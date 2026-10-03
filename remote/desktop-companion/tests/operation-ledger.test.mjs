@@ -94,8 +94,11 @@ test("receipt permissions inherit the installer's private Windows directory; POS
     const [name] = await readdir(directory), root = join(directory, name), receipt = join(root, `${id}.jsonl`);
     if (process.platform === "win32") {
       const child = Buffer.from(receipt).toString("base64");
-      const acl = JSON.parse(run(`$p=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${child}'));$a=[IO.File]::GetAccessControl($p);$rules=@($a.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier]));[PSCustomObject]@{owner=$a.GetOwner([Security.Principal.SecurityIdentifier]).Value;sids=@($rules|ForEach-Object{$_.IdentityReference.Value});allow=@($rules|ForEach-Object{$_.AccessControlType.ToString()})}|ConvertTo-Json -Compress`));
-      assert.deepEqual(new Set(acl.sids), new Set([acl.owner, "S-1-5-18"]));
+      const acl = JSON.parse(run(`$p=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${child}'));$a=[IO.File]::GetAccessControl($p);$rules=@($a.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier]));[PSCustomObject]@{currentUser=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value;owner=$a.GetOwner([Security.Principal.SecurityIdentifier]).Value;sids=@($rules|ForEach-Object{$_.IdentityReference.Value});allow=@($rules|ForEach-Object{$_.AccessControlType.ToString()})}|ConvertTo-Json -Compress`));
+      // Elevated Windows builders can assign the Administrators group as the
+      // child's owner. The inherited access grants must still be exclusively
+      // the actual installer user and SYSTEM, never that group's membership.
+      assert.deepEqual(new Set(acl.sids), new Set([acl.currentUser, "S-1-5-18"]));
       assert.ok(acl.allow.every(value => value === "Allow"));
     } else {
       assert.equal((await stat(root)).mode & 0o777, 0o700);
