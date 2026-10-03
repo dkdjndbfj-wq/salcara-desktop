@@ -7,6 +7,12 @@ jobs:
   package:
     runs-on: windows-latest
     timeout-minutes: 40
+    env:
+      # Windows' default TEMP may use the runneradmin 8.3 alias. Descriptor
+      # policy intentionally refuses aliases/junctions; fixtures use the real
+      # runner-owned path, without weakening production path checks.
+      TEMP: ${{ runner.temp }}
+      TMP: ${{ runner.temp }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -28,6 +34,7 @@ jobs:
       - name: Companion tests
         shell: pwsh
         run: |
+          node -e "const fs=require('node:fs'),os=require('node:os');const t=os.tmpdir(),r=fs.realpathSync(t);console.log({fixtureTemp:t,canonical:r});if(t.toLowerCase()!==r.toLowerCase())throw new Error('Fixture temp must be canonical')"
           $tests = @(Get-ChildItem -LiteralPath remote/desktop-companion/tests -Filter '*.test.mjs' -File | ForEach-Object FullName)
           node --test @tests
       - name: Bridge Windows unit tests
