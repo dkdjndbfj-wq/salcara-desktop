@@ -1,0 +1,37 @@
+# Dependencies, generated builds, and browser recordings
+**/node_modules/
+**/bin/
+**/out/
+**/output/
+**/download-cache/
+**/.cache/
+**/.playwright*/
+**/test-results/
+**/playwright-report/
+*.exe
+*.dll
+*.zip
+*.tar.gz
+*.dmg
+*.apk
+
+# Local identities and signing material
+.env
+.env.*
+!.env.example
+**/config.json
+**/active-desktop.json
+**/admin-token
+**/devices.json
+**/command-receipts/
+**/data/
+**/backups/
+**/personal-secrets/
+*.private.*
+*.pem
+*.key
+*.p12
+*.pfx
+*.log
+.DS_Store
+Thumbs.db

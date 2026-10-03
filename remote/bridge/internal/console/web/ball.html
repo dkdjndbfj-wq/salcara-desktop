@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>Salcara</title>
+<script src="theme-boot.js"></script>
+<link rel="stylesheet" href="ball.css">
+</head>
+<body>
+<div class="float" id="float">
+  <div class="aura" aria-hidden="true"><i></i><i></i></div>
+  <nav class="sats" id="sats" aria-label="快捷入口">
+    <button type="button" data-go="" title="打开主界面" aria-label="打开主界面"><span data-i="home"></span></button>
+    <button type="button" data-go="usage" title="用量" aria-label="用量"><span data-i="chart"></span></button>
+    <button type="button" data-go="overview" title="Agent" aria-label="Agent"><span data-i="spark"></span></button>
+    <button type="button" data-go="accounts" title="API 密钥" aria-label="API 密钥"><span data-i="key"></span></button>
+    <button type="button" data-go="login" title="手机远程" aria-label="手机远程"><span data-i="phone"></span></button>
+    <button type="button" data-go="settings" title="设置" aria-label="设置"><span data-i="gear"></span></button>
+  </nav>
+  <button class="ball" id="ball" type="button" aria-label="Salcara 悬浮球" data-mood="idle">
+    <span class="tint" aria-hidden="true"><b></b><b></b><b></b><b></b></span>
+    <span class="face" id="face"><i class="eye l"></i><i class="eye r"></i></span>
+    <span class="badge" id="badge" hidden></span>
+  </button>
+  <div class="bubble" id="bubble" role="status" aria-live="polite">
+    <div class="b-row"><span class="b-k">今日</span><b id="bTok">—</b><span class="b-u">tokens</span></div>
+    <div class="b-sub" id="bSub">读取中…</div>
+  </div>
+</div>
+<script src="usage-data.js"></script>
+<script src="ball.js"></script>
+</body>
+</html>

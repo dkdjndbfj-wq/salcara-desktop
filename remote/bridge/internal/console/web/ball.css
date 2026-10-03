@@ -1,0 +1,163 @@
+/* Floating ball: the home-screen orb, shrunk. Transparent window; only the ball,
+   its satellites and the usage bubble take the mouse. */
+:root { --ink: #10131a; --text: #192133; --muted: #6D768B; --ease: cubic-bezier(.22, .8, .24, 1); --spring: cubic-bezier(.34, 1.56, .64, 1); }
+*, *::before, *::after { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; background: transparent; overflow: hidden; user-select: none; -webkit-user-select: none;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; -webkit-font-smoothing: antialiased; }
+.float { position: fixed; inset: 0; }
+
+/* ---------- the ball ---------- */
+.ball { position: absolute; left: 50%; top: 50%; width: 64px; height: 64px; margin: -32px 0 0 -32px; border-radius: 50%; border: 0; padding: 0; cursor: grab; outline: none;
+  background:
+    radial-gradient(circle at var(--hx, 34%) var(--hy, 28%), #fff 0%, #fff 15%, rgba(255, 255, 255, 0) 46%),
+    radial-gradient(circle at 50% 42%, #fbfcfe 0%, #eef1f6 52%, #d3d9e4 82%, #b9c1d0 100%);
+  box-shadow: inset -5px -7px 12px rgba(110, 122, 148, .32), inset 4px 5px 10px rgba(255, 255, 255, .9), 0 6px 14px -4px rgba(30, 40, 70, .35), 0 1px 2px rgba(30, 40, 70, .12);
+  transform: scale(var(--s, 1)); transition: transform .45s var(--spring), box-shadow .3s; animation: bob 5s ease-in-out infinite; }
+.ball:active { cursor: grabbing; }
+.ball:hover, .float.open .ball { --s: 1.06; }
+.ball:focus-visible { box-shadow: 0 0 0 3px rgba(61, 99, 230, .35), 0 6px 14px -4px rgba(30, 40, 70, .35); }
+@keyframes bob { 50% { translate: 0 -3px; } }
+
+.face { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; gap: 11px; transform: translate(var(--ex, 0px), var(--ey, 0px)); transition: gap .3s var(--ease); }
+.eye { display: block; width: 5px; height: 19px; border-radius: 4px; background: var(--ink); transition: height .28s var(--ease), width .28s var(--ease), border-radius .28s var(--ease), transform .28s var(--ease), background .2s, border-color .2s; }
+.ball[data-mood="idle"]:hover .eye, .float.open .ball[data-mood="idle"] .eye { height: 22px; }
+.ball.blink .eye { animation: blink .18s ease-in-out; }
+@keyframes blink { 50% { transform: scaleY(.1); } }
+.badge { position: absolute; top: 2px; right: 2px; width: 12px; height: 12px; border-radius: 50%; background: #E5484D; box-shadow: 0 0 0 2.5px #fff; animation: pulse 1.6s infinite; }
+.badge[hidden] { display: none; }
+@keyframes pulse { 50% { opacity: .45; } }
+
+/* moods */
+.ball[data-mood="sleepy"] .eye { height: 3px; width: 10px; border-radius: 2px; }
+.ball[data-mood="sleepy"] .face::after { content: "z"; position: absolute; right: 9px; top: 6px; font-size: 10px; font-weight: 700; color: #8A93A8; animation: zz 2.4s ease-in-out infinite; }
+@keyframes zz { 0% { opacity: 0; transform: translate(0, 4px) scale(.7); } 40% { opacity: 1; } 100% { opacity: 0; transform: translate(5px, -7px) scale(1.1); } }
+.ball[data-mood="alert"] .eye { width: 9px; height: 13px; border-radius: 50%; }
+.ball[data-mood="alert"] .face { gap: 9px; }
+.ball[data-mood="working"] .eye { height: 14px; animation: scan var(--scan, 2.2s) ease-in-out infinite; }
+@keyframes scan { 0%, 100% { transform: translateX(-3px); } 50% { transform: translateX(3px); } }
+.ball[data-mood="working"]::before { content: ""; position: absolute; inset: -5px; border-radius: 50%; border: 2px solid transparent; border-top-color: rgba(61, 99, 230, .75); animation: spin 1.1s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+.ball[data-mood="sad"] .eye { height: 12px; }
+.ball[data-mood="sad"] .eye.l { transform: rotate(28deg); }
+.ball[data-mood="sad"] .eye.r { transform: rotate(-28deg); }
+
+/* ---------- satellites ---------- */
+.sats { position: absolute; left: 50%; top: 50%; width: 0; height: 0; }
+.sats button { --r: 72px; position: absolute; left: -17px; top: -17px; width: 34px; height: 34px; border-radius: 50%; padding: 0; border: 1px solid #E3E7F0; cursor: pointer;
+  display: grid; place-items: center; color: var(--text); background: #fff; box-shadow: 0 4px 12px rgba(30, 40, 70, .14);
+  opacity: 0; pointer-events: none; transform: rotate(var(--a)) translateY(-18px) rotate(calc(var(--a) * -1)) scale(.3);
+  transition: opacity .2s var(--ease), transform .35s var(--ease), background .2s, color .2s; transition-delay: calc(var(--i) * 12ms); }
+.float.open .sats button { opacity: 1; pointer-events: auto; transform: rotate(var(--a)) translateY(calc(var(--r) * -1)) rotate(calc(var(--a) * -1)) scale(1);
+  transition: opacity .3s var(--ease), transform .5s var(--spring), background .2s, color .2s; transition-delay: calc(var(--i) * 35ms); }
+.sats button > span { display: grid; place-items: center; width: 16px; height: 16px; line-height: 0; }
+.sats button svg { display: block; width: 16px; height: 16px; }
+.sats button:hover, .sats button:focus-visible { background: var(--ink); border-color: var(--ink); color: #fff; outline: none; }
+.sats button::after { content: attr(title); position: absolute; top: 50%; white-space: nowrap; font-size: 11px; color: #fff; background: rgba(16, 19, 26, .86);
+  padding: 3px 7px; border-radius: 6px; opacity: 0; pointer-events: none; transform: translateY(-50%); transition: opacity .15s; }
+.sats button[data-side="r"]::after { left: calc(100% + 6px); }
+.sats button[data-side="l"]::after { right: calc(100% + 6px); }
+.sats button:hover::after { opacity: 1; }
+
+/* ---------- usage bubble beside the ball ---------- */
+.bubble { position: absolute; top: 50%; min-width: 128px; padding: 9px 13px 10px; border-radius: 14px; background: rgba(255, 255, 255, .96);
+  border: 1px solid rgba(20, 30, 60, .06); box-shadow: 0 10px 28px -6px rgba(30, 40, 70, .28), 0 1px 2px rgba(30, 40, 70, .06);
+  opacity: 0; pointer-events: none; transition: opacity .2s var(--ease), transform .3s var(--ease); }
+.bubble.r { left: calc(50% + 44px); transform: translate(-6px, -50%); }
+.bubble.l { right: calc(50% + 44px); transform: translate(6px, -50%); }
+.float.peek:not(.open) .bubble { opacity: 1; transform: translate(0, -50%); }
+.b-row { display: flex; align-items: baseline; gap: 5px; white-space: nowrap; }
+.b-k { font-size: 11px; color: var(--muted); }
+.b-row b { font-size: 17px; font-weight: 650; color: var(--text); letter-spacing: -.3px; font-variant-numeric: tabular-nums; }
+.b-u { font-size: 11px; color: var(--muted); }
+.b-sub { margin-top: 2px; font-size: 11.5px; color: var(--muted); white-space: nowrap; font-variant-numeric: tabular-nums; }
+.b-sub em { font-style: normal; color: #2B44B8; font-weight: 600; }
+
+/* random idle expressions (ball.js picks one every few seconds) */
+.ball[data-quirk="wink-l"] .eye.l, .ball[data-quirk="wink-r"] .eye.r { height: 3px; width: 10px; border-radius: 2px; }
+.ball[data-quirk="squint"] .eye { height: 9px; }
+.ball[data-quirk="wide"] .eye { width: 7px; height: 22px; border-radius: 6px; }
+.ball[data-quirk="curious-l"] .eye.l, .ball[data-quirk="curious-r"] .eye.r { height: 23px; }
+.ball[data-quirk="curious-l"] .eye.r, .ball[data-quirk="curious-r"] .eye.l { height: 13px; }
+.ball[data-quirk="tilt-l"] .eye.l { transform: translateY(2.5px) rotate(-12deg); }
+.ball[data-quirk="tilt-l"] .eye.r { transform: translateY(-2.5px) rotate(-12deg); }
+.ball[data-quirk="tilt-r"] .eye.l { transform: translateY(-2.5px) rotate(12deg); }
+.ball[data-quirk="tilt-r"] .eye.r { transform: translateY(2.5px) rotate(12deg); }
+.ball[data-quirk="peek"] .eye { height: 9px; width: 6px; }
+
+/* ---------- burning tokens: the body glows in the app's brand blend
+   (sky #7CC6FF → blue #3D7BFA → violet #A68BF7 → pink #F4A6CE) ---------- */
+@property --rot { syntax: "<angle>"; inherits: false; initial-value: 0deg; }
+
+/* corona: a soft blend that hugs the body and licks upward */
+.aura { position: absolute; left: 50%; top: 50%; width: 64px; height: 64px; margin: -32px 0 0 -32px; pointer-events: none;
+  opacity: 0; transform: translateY(10px) scale(.5); transform-origin: 50% 90%;
+  /* going out: shrinks back into the body quickly */
+  transition: opacity .7s ease, transform .8s cubic-bezier(.5, 0, .75, .3); animation: bob 5s ease-in-out infinite; }
+.aura i { position: absolute; inset: -7px; border-radius: 50%; transform-origin: 50% 62%;
+  background: conic-gradient(from var(--rot), #7CC6FF, #3D7BFA, #A68BF7, #F4A6CE, #7CC6FF);
+  filter: blur(9px); animation: auraSpin 6s linear infinite, lick 2.2s ease-in-out infinite alternate; }
+.aura i:nth-child(2) { inset: -3px; filter: blur(5px); opacity: .75; animation: auraSpin 4.5s linear infinite reverse, lick 1.5s ease-in-out -.7s infinite alternate; }
+@keyframes auraSpin { to { --rot: 360deg; } }
+@keyframes lick { from { transform: scale(1, 1.04); } to { transform: scale(1.05, 1.2) translateY(-2px); } }
+.float.burning .aura { opacity: .9; transform: none;
+  /* catching fire: the corona flares up once the colour has risen through the body */
+  transition: opacity .9s ease .35s, transform 1.1s cubic-bezier(.34, 1.4, .64, 1) .3s; }
+.float.burning.hot .aura { opacity: 1; }
+.float.burning.hot .aura i { animation-duration: 3s, 1.1s; }
+.float.burning.hot .aura i:nth-child(2) { animation-duration: 2.4s, .8s; }
+
+/* body: colour wells up from below and rises through the sphere, under the orb's own lighting */
+@property --fill { syntax: "<percentage>"; inherits: false; initial-value: -25%; }
+/* the colour fills the body from the bottom up (and drains back down when it stops) through a soft-edged mask */
+.tint { --fill: -25%; position: absolute; inset: 0; border-radius: 50%; overflow: hidden; pointer-events: none;
+  -webkit-mask-image: linear-gradient(to top, #000 calc(var(--fill) - 22%), transparent var(--fill)); mask-image: linear-gradient(to top, #000 calc(var(--fill) - 22%), transparent var(--fill));
+  transition: --fill 1.5s cubic-bezier(.55, 0, .7, .4);
+  background: linear-gradient(to top, #A68BF7 0%, #6F8DF9 45%, #7CC6FF 100%); }
+.tint b { position: absolute; left: var(--x); bottom: -40%; width: 78%; height: 78%; margin-left: -39%; border-radius: 50%; opacity: 0;
+  background: radial-gradient(circle, var(--c) 0%, color-mix(in srgb, var(--c) 55%, transparent) 38%, transparent 70%); animation: well var(--d, 3.4s) linear var(--dl, 0s) infinite paused; }
+.tint b:nth-child(1) { --x: 30%; --c: #F4A6CE; --d: 3.6s; --dl: 0s; }
+.tint b:nth-child(2) { --x: 70%; --c: #3D7BFA; --d: 3.1s; --dl: -1.2s; }
+.tint b:nth-child(3) { --x: 50%; --c: #A68BF7; --d: 4s; --dl: -2.3s; }
+.tint b:nth-child(4) { --x: 40%; --c: #7CC6FF; --d: 3.3s; --dl: -.6s; }
+@keyframes well {
+  0% { transform: translateY(0) scale(.7); opacity: 0; }
+  20% { opacity: .95; }
+  70% { opacity: .75; }
+  100% { transform: translateY(-120%) scale(1.15); opacity: 0; }
+}
+.tint::after { content: ""; position: absolute; inset: 0; border-radius: 50%;
+  background: radial-gradient(circle at var(--hx, 34%) var(--hy, 28%), rgba(255, 255, 255, .92) 0%, rgba(255, 255, 255, .45) 14%, rgba(255, 255, 255, 0) 44%),
+    radial-gradient(circle at 50% 120%, rgba(48, 34, 120, .26), rgba(48, 34, 120, 0) 58%);
+  box-shadow: inset -5px -7px 12px rgba(52, 40, 130, .26), inset 4px 5px 10px rgba(255, 255, 255, .45); }
+.face, .badge { z-index: 1; }
+.float.burning .tint { --fill: 125%; transition: --fill 1.2s cubic-bezier(.3, .1, .2, 1); }
+.float.burning .tint b { animation-play-state: running; }
+.float.burning.hot .tint b { animation-duration: calc(var(--d) * .55); }
+.float.burning .ball { box-shadow: 0 8px 18px -6px rgba(90, 80, 200, .45), 0 1px 2px rgba(30, 40, 70, .12); }
+.float.burning .ball::before { display: none; } /* the glow already says "working" */
+.ember { position: absolute; left: 50%; top: 50%; border-radius: 50%; pointer-events: none; }
+
+/* ignition: the body draws a breath and pops; going out: a small sigh */
+@keyframes ignitePop { 0% { scale: 1; } 22% { scale: .92; } 58% { scale: 1.08; } 100% { scale: 1; } }
+@keyframes dousePop { 0% { scale: 1; } 40% { scale: .95 1.02; } 100% { scale: 1; } }
+.float.igniting .ball { animation: bob 5s ease-in-out infinite, ignitePop .75s cubic-bezier(.3, .7, .3, 1); }
+.float.dousing .ball { animation: bob 5s ease-in-out infinite, dousePop .9s ease-in-out; }
+.ring-burst { position: absolute; left: 50%; top: 50%; width: 64px; height: 64px; margin: -32px 0 0 -32px; border-radius: 50%; pointer-events: none;
+  background: conic-gradient(#7CC6FF, #3D7BFA, #A68BF7, #F4A6CE, #7CC6FF);
+  -webkit-mask: radial-gradient(closest-side, transparent 80%, #000 86%, #000 94%, transparent 100%); mask: radial-gradient(closest-side, transparent 80%, #000 86%, #000 94%, transparent 100%); }
+
+@media (prefers-reduced-motion: reduce) { .ball, .eye, .sats button, .bubble, .ball::before, .tint, .tint b, .aura, .aura i { animation: none !important; transition: none !important; } }
+
+/* dark appearance: the orb stays white; the bubble and satellites follow the theme */
+:root[data-theme="dark"] .bubble { background: rgba(28, 31, 39, .96); border-color: rgba(255, 255, 255, .08); }
+:root[data-theme="dark"] .b-row b { color: #e8ebf2; }
+:root[data-theme="dark"] .b-sub em { color: #9db6ff; }
+:root[data-theme="dark"] .sats button { background: #1f232b; border-color: #333946; color: #e8ebf2; }
+:root[data-theme="dark"] .sats button:hover, :root[data-theme="dark"] .sats button:focus-visible { background: #e8ebf2; border-color: #e8ebf2; color: #11141a; }
+@media (prefers-color-scheme: dark) {
+:root:not([data-theme="light"]) .bubble { background: rgba(28, 31, 39, .96); border-color: rgba(255, 255, 255, .08); }
+:root:not([data-theme="light"]) .b-row b { color: #e8ebf2; }
+:root:not([data-theme="light"]) .b-sub em { color: #9db6ff; }
+:root:not([data-theme="light"]) .sats button { background: #1f232b; border-color: #333946; color: #e8ebf2; }
+:root:not([data-theme="light"]) .sats button:hover, :root:not([data-theme="light"]) .sats button:focus-visible { background: #e8ebf2; border-color: #e8ebf2; color: #11141a; }
+}

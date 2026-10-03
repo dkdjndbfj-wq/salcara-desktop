@@ -1,0 +1,168 @@
+/* Salcara design language, aligned with the phone app: white-first surfaces, soft hairline borders,
+   generous radii, the logo's sky → blue → violet gradient as the only accent, pill buttons and
+   gentle spring-like motion. Loaded after app.css; only restyles, never changes behaviour. */
+:root {
+  --primary: #3D7BFA;
+  --primary-strong: #2A5CE0;
+  --primary-soft: #EEF1FF;
+  --accent: #A68BF7;
+  --accent-soft: rgba(166, 139, 247, .14);
+  --grad: linear-gradient(135deg, #7CC6FF 0%, #3D7BFA 48%, #A68BF7 100%);
+  --bg: #F7F8FD;
+  --surface: #FFFFFF;
+  --surface-2: #F7F8FD;
+  --surface-3: #F0F2FA;
+  --text: #0E1325;
+  --text-2: #2C3350;
+  --muted: #5E6583;
+  --faint: #9AA0B8;
+  --border: #E7E9F3;
+  --success: #12A150;
+  --success-soft: rgba(18, 161, 80, .1);
+  --warning: #A15C07;
+  --warning-soft: #FFF7E8;
+  --danger: #E5484D;
+  --danger-soft: #FFF1F3;
+  --shadow: 0 4px 16px rgba(27, 33, 80, .05);
+  --shadow-lg: 0 18px 50px rgba(27, 33, 80, .16);
+  --glow: 0 6px 16px rgba(61, 123, 250, .28);
+  --radius: 22px;
+  --radius-sm: 14px;
+  --ease: cubic-bezier(.22, 1, .36, 1);
+  --font: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI", "Noto Sans CJK SC", sans-serif;
+}
+
+
+body { font-size: 14px; background: var(--bg); color: var(--text); letter-spacing: .1px; }
+::selection { background: rgba(61, 123, 250, .2); }
+* { scrollbar-width: thin; scrollbar-color: var(--surface-3) transparent; }
+
+/* ---------- shell: sidebar like the phone's drawer ---------- */
+@media (min-width: 761px) { .app { background: linear-gradient(to right, var(--surface) 247px, var(--border) 247px, var(--border) 248px, var(--bg) 248px); } .sidebar { background: transparent !important; border-right: none !important; } }
+.sidebar { width: 248px; padding: 22px 14px 18px; }
+.brand { padding: 0 8px 26px; gap: 12px; }
+.brand-logo { width: 40px; height: 40px; border-radius: 13px; box-shadow: var(--glow); }
+.brand-name { font-size: 16.5px; font-weight: 750; letter-spacing: -.2px; }
+.brand-sub { font-size: 12px; color: var(--faint); }
+.nav { gap: 4px; }
+.nav a { height: 44px; padding: 0 14px; border-radius: 14px; font-size: 14.5px; font-weight: 550; color: var(--text-2); transition: background .2s var(--ease), color .2s, transform .2s var(--ease); }
+.nav a:hover { background: var(--surface-2); transform: translateX(2px); }
+.nav a.active { background: var(--primary-soft); color: var(--primary-strong); font-weight: 650; }
+.nav a.active .ico { color: var(--primary); }
+.ico svg { width: 19px; height: 19px; }
+.nav-badge { background: var(--danger); box-shadow: 0 0 0 3px var(--surface); }
+.conn { border-radius: 14px; background: var(--surface-2); height: 42px; padding: 0 14px; font-size: 13px; }
+.side-ver { color: var(--faint); }
+
+.main { padding: 34px 40px 64px; }
+.page-head { max-width: 1080px; margin-bottom: 24px; align-items: center; }
+.page-head h1 { font-size: 28px; font-weight: 750; letter-spacing: -.6px; }
+.page-head p { color: var(--muted); font-size: 14px; margin-top: 6px; }
+.view { max-width: 1080px; gap: 20px; }
+.view > * { animation: rise .42s var(--ease) both; }
+.view > *:nth-child(2) { animation-delay: .04s; } .view > *:nth-child(3) { animation-delay: .08s; }
+.view > *:nth-child(4) { animation-delay: .12s; } .view > *:nth-child(5) { animation-delay: .16s; } .view > *:nth-child(n+6) { animation-delay: .2s; }
+@keyframes rise { from { opacity: 0; transform: translateY(10px); } }
+
+/* ---------- surfaces ---------- */
+.card { border-radius: var(--radius); border: 1px solid var(--border); box-shadow: var(--shadow); padding: 22px 24px; background: var(--surface); }
+.card-title { font-size: 16px; font-weight: 700; letter-spacing: -.2px; }
+.callout { border-radius: 16px; padding: 13px 16px; background: var(--primary-soft); color: var(--text-2); line-height: 1.65; }
+.callout.warn { background: var(--warning-soft); }
+.callout.bad { background: var(--danger-soft); }
+.callout.ok { background: var(--success-soft); }
+.empty { color: var(--muted); }
+
+/* ---------- controls ---------- */
+.btn { height: 38px; padding: 0 18px; border-radius: 999px; border: 1px solid transparent; background: var(--surface-3); color: var(--text); font-weight: 600;
+  transition: background .18s, transform .18s var(--ease), box-shadow .18s, opacity .18s; }
+.btn:hover { background: #E6E9F7; }
+
+.btn:active { transform: scale(.97); }
+.btn svg { width: 16px; height: 16px; }
+.btn.primary, .btn.grad { background: var(--grad); border: none; color: #fff; box-shadow: var(--glow); }
+.btn.primary:hover, .btn.grad:hover { background: var(--grad); filter: brightness(1.05); box-shadow: 0 8px 20px rgba(61, 123, 250, .34); }
+.btn.danger { background: var(--danger-soft); color: var(--danger); border: none; }
+.btn.danger:hover { background: var(--danger); color: #fff; }
+.btn.ghost { background: transparent; }
+.btn.sm { height: 32px; padding: 0 13px; font-size: 13px; border-radius: 999px; }
+.icon-btn { width: 32px; height: 32px; border-radius: 50%; }
+.input, textarea.input, select.input { height: 42px; border-radius: 14px; border: 1px solid var(--border); background: var(--surface); padding: 0 14px; font-size: 14px;
+  transition: border-color .18s, box-shadow .18s, background .18s; }
+textarea.input { padding: 10px 14px; }
+.input:hover { border-color: #D6DAEA; }
+.input:focus { border-color: var(--primary); box-shadow: 0 0 0 4px rgba(61, 123, 250, .12); }
+.field label { font-size: 13px; font-weight: 650; color: var(--text-2); }
+.field .help { color: var(--faint); }
+.chip { height: 24px; padding: 0 10px; border-radius: 999px; background: var(--surface-3); color: var(--text-2); font-weight: 600; }
+.chip.ok { background: var(--success-soft); color: var(--success); }
+.chip.warn { background: var(--warning-soft); color: var(--warning); }
+.chip.info { background: var(--primary-soft); color: var(--primary-strong); }
+.switch span { background: var(--surface-3); }
+.switch input:checked + span { background: var(--grad); }
+.radio-card { border-radius: 18px; border: 1.5px solid var(--border); padding: 16px; transition: border-color .18s, background .18s, transform .18s var(--ease); }
+.radio-card:hover { transform: translateY(-1px); }
+.radio-card.sel { background: var(--primary-soft); border-color: var(--primary); }
+.setting-row { padding: 16px 0; }
+.list-item { padding: 14px 4px; }
+.folder-ico { border-radius: 12px; background: var(--primary-soft); color: var(--primary); }
+details.adv > summary { color: var(--primary-strong); }
+.logs { border-radius: 16px; background: #11151F; }
+.kv dt { color: var(--faint); }
+
+/* ---------- modal: rises like the phone's sheets ---------- */
+.modal-back { background: rgba(14, 19, 37, .32); backdrop-filter: blur(6px); animation: fade .2s ease; }
+.modal { border-radius: 28px; box-shadow: var(--shadow-lg); border: 1px solid var(--border); animation: pop .32s var(--ease); }
+.modal-head { padding: 22px 24px 12px; }
+.modal-head h3 { font-size: 18px; font-weight: 700; letter-spacing: -.2px; }
+.modal-body { padding: 0 24px; }
+.modal-foot { padding: 16px 24px 20px; border-top: none; }
+@keyframes pop { from { opacity: 0; transform: translateY(14px) scale(.98); } }
+
+/* ---------- toast: dark pill like the phone ---------- */
+.toasts { left: 50%; right: auto; transform: translateX(-50%); bottom: 26px; align-items: center; }
+.toast { border-radius: 999px; padding: 11px 20px; background: rgba(14, 19, 37, .92); color: #fff; box-shadow: var(--shadow-lg); animation: toastIn .34s var(--ease); }
+.toast.ok { background: rgba(14, 19, 37, .92); }
+.toast.ok::before { content: "✓"; color: #5CF2B0; margin-right: 8px; font-weight: 800; }
+.toast.bad { background: var(--danger); }
+@keyframes toastIn { from { opacity: 0; transform: translateY(12px) scale(.96); } }
+
+.skeleton { border-radius: 10px; }
+.tool-logo { border-radius: 13px; }
+.account-card { transition: transform .2s var(--ease), box-shadow .2s; }
+.account-card:hover { transform: translateY(-2px); box-shadow: 0 10px 28px rgba(27, 33, 80, .09); }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition: none !important; }
+}
+
+/* Compact desktop shell and page surfaces. Intentionally scoped outside #modalRoot:
+   the API editor and existing wbOpenModal configuration/confirmation flow stay unchanged. */
+.app { background: var(--bg); }
+.sidebar { background: var(--surface) !important; border-right: 1px solid var(--border) !important; }
+@media (min-width: 761px) { .sidebar { width: 220px; padding: 18px 12px 16px; } }
+.brand { padding-bottom: 20px; gap: 9px; }
+.brand-logo { width: 34px; height: 34px; border-radius: 8px; box-shadow: none; }
+.brand-name { font-size: 15px; }
+.brand-sub { font-size: 11px; }
+.nav a { height: 40px; padding: 0 12px; border-radius: 8px; font-size: 14px; transition: background .15s, color .15s; }
+.nav a:hover { transform: none; }
+.conn { height: 36px; padding: 0 10px; border-radius: 8px; font-size: 12px; }
+.main { padding: 24px 28px 40px; }
+.page-head { margin-bottom: 18px; }
+.page-head h1 { font-size: 24px; }
+.page-head p { font-size: 13px; margin-top: 4px; }
+#view { gap: 14px; }
+#view > * { animation: none; }
+#view .card { border-radius: 12px; padding: 16px; box-shadow: none; }
+#view .account-card:hover { transform: none; box-shadow: none; }
+#view .wb-adv > .card { border-radius: 0; padding: 0 16px; }
+#view .tool-logo { width: 34px; height: 34px; border-radius: 8px; font-size: 13px; box-shadow: none; }
+#view .btn, #headActions .btn { border-radius: 8px; box-shadow: none; padding: 0 12px; }
+#view .btn.primary, #headActions .btn.primary, #view .btn.grad { background: var(--primary); box-shadow: none; }
+#view .btn.primary:hover, #headActions .btn.primary:hover, #view .btn.grad:hover { background: var(--primary-strong); box-shadow: none; filter: none; }
+#view .btn:active, #headActions .btn:active { transform: none; }
+#view .input { border-radius: 8px; }
+#view .callout { border-radius: 8px; padding: 10px 12px; }
+#view .local-accounts { gap: 14px; }
+@media (max-width: 760px) { .main { padding: 18px 16px 28px; } .page-head { align-items: flex-start; flex-wrap: wrap; } }

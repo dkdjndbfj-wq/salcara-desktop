@@ -1,0 +1,35 @@
+/* Start-up animation, part 2 (the desktop app opens the console with ?boot=1).
+   The first frame repeats the last frame of desktop/loading.html: the orb and
+   the name in the middle of the window. From there they fly to their places on
+   the home screen and the rest of the screen settles in around them. */
+.boot { display: none; }
+html.booting .boot { display: block; position: fixed; inset: 0; z-index: 80; pointer-events: none; --S: 224px; --cy: calc(50% + 3px); }
+@media (max-height: 760px) { html.booting .boot { --S: 188px; } }
+@media (max-height: 620px) { html.booting .boot { --S: 157px; } }
+@media (max-width: 760px) { html.booting .boot { --S: 175px; } }
+html.booting .stage > .hud, html.booting .stage > .orb-zone, html.booting .stage > .foot { opacity: 0; }
+html.booting .orb, html.booting .orb-shadow { animation: none !important; }
+
+.boot-scene { position: absolute; left: 50%; top: var(--cy); width: 0; height: 0; transform-origin: 0 0; }
+.boot-scene > * { position: absolute; left: 0; top: 0; translate: -50% -50%; }
+.boot-orb { width: var(--S); height: var(--S); border-radius: 50%;
+  background:
+    radial-gradient(circle at 34% 28%, #fff 0%, #fff 16%, rgba(255, 255, 255, 0) 46%),
+    radial-gradient(circle at 50% 42%, #fbfcfe 0%, #eef1f6 52%, #d3d9e4 82%, #b9c1d0 100%);
+  box-shadow: inset -14px -20px 34px rgba(110, 122, 148, .30), inset 10px 12px 26px rgba(255, 255, 255, .9),
+    0 2px 3px rgba(30, 40, 70, .08), 0 22px 40px -8px rgba(30, 40, 70, .22), 0 44px 80px -20px rgba(30, 40, 70, .22); }
+.boot-orb::after { content: ""; position: absolute; left: 22%; right: 22%; bottom: 7%; height: 18%; border-radius: 50%;
+  background: radial-gradient(closest-side, rgba(255, 255, 255, .55), transparent); }
+.boot-face { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; gap: calc(var(--S) * .16); }
+.boot-face i { display: block; width: calc(var(--S) * .0625); height: calc(var(--S) * .25); border-radius: 99px; background: #10131a;
+  box-shadow: inset 0 -3px 4px rgba(255, 255, 255, .08); }
+.boot-shadow { top: calc(var(--S) * .55 + 12px); width: calc(var(--S) * .8); height: calc(var(--S) * .13); border-radius: 50%;
+  background: radial-gradient(closest-side, rgba(25, 35, 60, .34), rgba(25, 35, 60, .12) 60%, transparent); filter: blur(3px); }
+.boot-brand { position: absolute; left: 50%; top: calc(var(--cy) + var(--S) * .5 + 52px); translate: -50% 0; white-space: nowrap; transform-origin: 0 0;
+  font: 700 28px/normal var(--font); letter-spacing: .8px; color: var(--text); }
+.boot-brand .b2 { margin-left: 12px; font-weight: 400; color: var(--muted); }
+
+/* one brand-coloured ripple as the orb lands */
+.boot-ripple { position: absolute; z-index: 1; left: 50%; top: 50%; border-radius: 50%; pointer-events: none; translate: -50% -50%;
+  background: conic-gradient(from 200deg, #7CC6FF, #3D7BFA, #A68BF7, #F4A6CE, #7CC6FF);
+  -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 2px), #000 calc(100% - 1.5px)); }

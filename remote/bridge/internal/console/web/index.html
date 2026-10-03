@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Salcara Bridge</title>
+<link rel="icon" href="logo.svg" type="image/svg+xml">
+<script src="theme-boot.js"></script>
+<script src="boot.js"></script>
+<link rel="stylesheet" href="app.css">
+<link rel="stylesheet" href="theme.css">
+<link rel="stylesheet" href="remote.css">
+<link rel="stylesheet" href="workbench.css">
+<link rel="stylesheet" href="shell.css">
+<link rel="stylesheet" href="usage.css">
+<link rel="stylesheet" href="select.css">
+<link rel="stylesheet" href="dark.css">
+<link rel="stylesheet" href="boot.css">
+</head>
+<body>
+<div class="boot" id="boot" aria-hidden="true">
+  <div class="boot-scene"><div class="boot-shadow"></div><div class="boot-orb"><div class="boot-face"><i></i><i></i></div></div></div>
+  <div class="boot-brand"><span class="b1">Salcara</span><span class="b2">Bridge</span></div>
+</div>
+<div class="drag-strip" aria-hidden="true"></div>
+<div class="win-ctl" id="winCtl" hidden>
+  <button type="button" id="winMin" aria-label="最小化" title="最小化"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M3.5 8h9"/></svg></button>
+  <button type="button" class="x" id="winClose" aria-label="关闭（在后台继续运行）" title="关闭 · 在后台继续运行"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="m4 4 8 8M12 4l-8 8"/></svg></button>
+</div>
+<div class="stage" id="stage">
+  <header class="hud">
+    <div class="hud-brand">Salcara<span>Bridge</span></div>
+    <div class="conn" id="connPill"><span class="dot"></span><span class="conn-label">读取中…</span></div>
+  </header>
+
+  <div class="orb-zone" id="orbZone">
+    <div class="orbit" aria-hidden="true"></div>
+    <div class="orb-shadow" aria-hidden="true"></div>
+    <button class="orb" id="orb" type="button" aria-label="打开菜单" aria-expanded="false">
+      <span class="orb-face" id="orbFace"><i class="eye"></i><i class="eye"></i></span>
+    </button>
+    <nav class="ring" id="nav" aria-label="主菜单">
+      <a href="#overview" data-route="overview"><span class="ico" data-icon="spark"></span><b>Agent</b></a>
+      <a href="#accounts" data-route="accounts"><span class="ico" data-icon="key"></span><b>API 密钥</b></a>
+      <a href="#setup" data-route="setup"><span class="ico" data-icon="box"></span><b>环境</b><em class="ring-dot" id="setupDot" hidden></em></a>
+      <a href="#login" data-route="login"><span class="ico" data-icon="phone"></span><b>手机远程</b></a>
+      <a href="#usage" data-route="usage"><span class="ico" data-icon="chart"></span><b>用量</b></a>
+      <a href="#settings" data-route="settings"><span class="ico" data-icon="gear"></span><b>设置</b><span class="nav-badge" id="approvalBadge" hidden>0</span></a>
+    </nav>
+  </div>
+
+  <footer class="foot">
+    <div class="hint" id="hint">把鼠标移到球上</div>
+    <div class="side-ver" id="sideVer"></div>
+  </footer>
+</div>
+
+<div class="panel-back" id="panelBack" hidden>
+  <div class="panel" id="panel" role="dialog" aria-modal="true" aria-labelledby="pageTitle">
+    <header class="page-head">
+      <div class="page-title">
+        <span class="page-ico" id="pageIco"></span>
+        <div><h1 id="pageTitle"></h1><p id="pageSub"></p></div>
+      </div>
+      <div class="head-actions" id="headActions"></div>
+      <button class="panel-close" id="panelClose" type="button" aria-label="关闭">✕</button>
+    </header>
+    <section id="view" class="view"></section>
+  </div>
+</div>
+
+<div id="modalRoot"></div>
+<div id="toastRoot" class="toasts"></div>
+<script src="app.js"></script>
+<script src="remote.js"></script>
+<script src="workbench.js"></script>
+<script src="claude-desktop.js"></script>
+<script src="setup.js"></script>
+<script src="usage-data.js"></script>
+<script src="usage.js"></script>
+<script src="shell.js"></script>
+<script src="select.js"></script>
+<script src="notify.js"></script>
+<script src="prefs.js"></script>
+</body>
+</html>
