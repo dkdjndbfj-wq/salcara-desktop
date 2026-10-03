@@ -28,9 +28,13 @@ func (c *Client) Dispatch(ctx context.Context, cmd map[string]any) (any, error) 
 		return result, err
 	}
 	typ := str(cmd, "type")
-	if typ == "agents.api.set" || typ == "session.start" || typ == "session.send" {
+	if typ == "agents.api.set" || typ == "session.start" || typ == "session.send" || typ == "desktop.session.send" {
 		c.taskConfigMu.Lock()
 		defer c.taskConfigMu.Unlock()
+		c.expireUpdateLocked()
+		if c.updatePrepared {
+			return nil, errors.New("程序正在更新，请稍后重试")
+		}
 	}
 	if typ == "device.ping" {
 		// A transport probe must work before agent startup and must never open

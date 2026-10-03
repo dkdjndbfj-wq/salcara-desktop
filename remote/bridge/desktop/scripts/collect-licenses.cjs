@@ -8,6 +8,8 @@ const run = args => execFileSync(go, args, { cwd: root, encoding: 'utf8', maxBuf
 const moduleLines = run(['list','-deps','-f','{{if .Module}}{{.Module.Path}}|{{.Module.Version}}|{{.Module.Dir}}{{end}}','.']).trim().split(/\r?\n/).filter(Boolean);
 const modules = [...new Set(moduleLines)].map(line=>line.split('|'));
 let output = fs.readFileSync(path.join(root, 'THIRD-PARTY-NOTICES.md'), 'utf8');
+const goRoot = run(['env', 'GOROOT']).trim();
+output += '\n\n# Go runtime and standard library\n\n' + fs.readFileSync(path.join(goRoot, 'LICENSE'), 'utf8') + '\n';
 for (const [name, version, directory] of modules) {
   if (name === 'salcara/bridge' || !directory) continue;
   const names = fs.readdirSync(directory).filter(file => /^(LICENSE|COPYING|NOTICE)([._-].*)?$/i.test(file) && fs.statSync(path.join(directory,file)).isFile());

@@ -18,7 +18,7 @@ async function nodeLicenseText(root) {
     // Use Windows' system downloader only for this fixed official license URL.
     const powershell = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
     text = execFileSync(powershell, ['-NoProfile', '-NonInteractive', '-Command',
-      `[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false); [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; $ErrorActionPreference = 'Stop'; [Console]::Write((Invoke-WebRequest -UseBasicParsing -Uri '${url}' -TimeoutSec 25).Content)`],
+      `[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false); [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; $ErrorActionPreference = 'Stop'; $download = New-Object Net.WebClient; [Console]::Write($download.DownloadString('${url}')); $download.Dispose()`],
       { encoding: 'utf8', timeout: 30000, windowsHide: true, maxBuffer: 1024 * 1024 });
   }
   if (!text.includes('Node.js is licensed') || !text.includes('Permission is hereby granted')) throw new Error('Invalid Node runtime license response');
@@ -57,11 +57,15 @@ async function main() {
     out: process.env.SALCARA_DESKTOP_OUT || path.join(root, 'out'),
     overwrite: true,
     asar: true,
-    extraResource: [...['app.ico', 'app.png', 'tray.ico', 'tray.png', 'tray@2x.png'].map((name) => path.join(root, 'icons', name)), executable, probeNode, nodeLicense, path.resolve(root, '../../desktop-companion'), logo, path.resolve(root, '../README.md'), path.resolve(root, '../docs'), path.resolve(root, '../THIRD-PARTY-NOTICES.md'), path.join(root,'bin/GO-THIRD-PARTY-NOTICES.txt')],
+    extraResource: [...['app.ico', 'app.png', 'tray.ico', 'tray.png', 'tray@2x.png'].map((name) => path.join(root, 'icons', name)), executable, probeNode, nodeLicense, path.resolve(root, '../../desktop-companion'), logo, path.resolve(root, '../../../LICENSE'), path.resolve(root, '../README.md'), path.resolve(root, '../docs'), path.resolve(root, '../THIRD-PARTY-NOTICES.md'), path.join(root,'bin/GO-THIRD-PARTY-NOTICES.txt')],
     electronZipDir: process.env.SALCARA_ELECTRON_ZIP_DIR,
     ignore: [/[/\\]bin(?:[/\\]|$)/, /[/\\]out(?:[/\\]|$)/, /[/\\]download-cache(?:[/\\]|$)/],
   });
-  for (const directory of output) console.log(`Packaged: ${directory}`);
+  for (const directory of output) {
+    const target = platform === 'darwin' ? path.join(directory, `${appName}.app`) : directory;
+    fs.writeFileSync(path.join(target, '.salcara-install.json'), JSON.stringify({ product: 'salcara-desktop', version: require('../package.json').version }) + '\n');
+    console.log(`Packaged: ${directory}`);
+  }
 }
 
 main().catch((error) => {

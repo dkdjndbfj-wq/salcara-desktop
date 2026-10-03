@@ -1,25 +1,22 @@
-# 桌面自动更新准备
+# 桌面自动更新
 
-先开源源码，更新通道保持关闭。本次未生成发布签名私钥、上传安装包或创建签名 Release。
+1.6.0 配置本仓库更新通道和独立 Ed25519 公钥。此前公钥 / 仓库为空的开发版本不能自动获得信任配置，首次需手动安装完整新包。
 
-## 已有代码
+## 发布者流程
 
-以下路径相对 `remote/bridge/desktop`：
+首次签名身份由 `scripts/release-keygen.cjs` 创建，私钥位于仓库外 `.salcara/signing/desktop/update-signing-key.pem`，不得提交。公钥固定进 `package.json`，后续更新不能随意换钥匙。更新身份不是 Windows Authenticode 证书或 macOS notarization。
 
-- `updater.cjs`：版本 / Ed25519 签名、平台、大小及 SHA-256 校验，目录替换和回退逻辑。
-- `scripts/release-keygen.cjs`：发布者在项目外生成自己的更新私钥。
-- `scripts/release.cjs`：由已打包正式版生成 archive、`latest.json` 和 `latest.json.sig`。
-- `package.json` 的 `salcaraUpdateRepo` / `salcaraUpdatePublicKey` 保持为空，开源不会突然向用户推送更新。
+GitHub repository secret：`SALCARA_DESKTOP_UPDATE_PRIVATE_KEY`。手动运行 `Build signed Windows desktop`，测试后打包 Bridge、Electron、Node、companion、图标和许可证，签发 tar / manifest / sig，附首次下载 ZIP 与 SHA-256 清单。检查 artifact 后发布到同源码提交的 `v<数字版本>` Release，保持所有签名文件同一个标签，不替换签名私钥，不将源码 ZIP 当安装包。
 
-当前仍为 `1.5.1-test.2`，现有工具拒绝把测试版当正式更新发布。
-当前比较器按三段数字比较版本，不把去掉 `-test.2` 当作升级；首个更新还需提高数字版本，不能直接发布同数字的 `1.5.1` 就期待自动更新。
+后续版本提高 `package.json` 与 lockfile 的三段数字版本（例如 1.6.1）。跨平台文件汇总清单须重新签名，不自行修改已签 manifest。新用户用 ZIP；已安装客户端定期检查，使用原有更新窗口确认下载与重启。更新不会擅自停止正在运行的任务。
 
-## 下一阶段
+## 安装保障和边界
 
-1. 验证真实 Windows 打包、进程关闭 / 重启、目录锁定和回退，确认各平台支持范围。
-2. 建立发布签名身份，私钥不进仓库；仓库 / 客户端只放公钥。更新密钥与 Windows Authenticode / macOS notarization 不是同一身份。
-3. 配置仓库 `dkdjndbfj-wq/salcara-desktop` 和已验证公钥，编入客户端。旧空配置版本不会自动获得这些设置。
-4. 从审查过的源码构建正式版，生成平台 archive 和签名 manifest；多平台条目汇总后必须重新签名。
-5. 先验证坏签名、错误 hash / 平台、降级、中断下载、替换失败和正在执行任务时的处理，再正式启用。
+- 固定发布仓库 / 标签 / 文件，签名、版本、平台、压缩包大小与 SHA-256 校验。
+- 解压前 USTAR 全量检查、完整安装标记、链接目录拒绝、替换范围校验。
+- 本机自有核心闲置且审批已处理才能安全退出；与新任务共用 admission 锁，附着核心不被结束。helper 启动和安装许可成功后才退出。
+- 新版本核心健康启动后随机令牌确认，失败回退或保留恢复副本，不强杀仍活着的未确认新进程。
+- 不可写目录、开发运行、旧散装包只能从发布页手动下载。
+- Windows 合成替换/回滚与签名回归通过，真实 Electron A/B 升级还需验收。Mac/Linux 本次不提供安装包，未声称实机验证。
 
-目前验签单测不等于完整安装链已经安全验收。不要关闭签名检查，也不要把 GitHub 自动生成的源码压缩包当 updater 安装包。
+详细改动与准确验证：[PUBLISH-20261004.md](PUBLISH-20261004.md)。

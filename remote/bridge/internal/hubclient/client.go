@@ -93,6 +93,9 @@ type Client struct {
 	mgrMu             sync.RWMutex
 	mgr               agents.Manager
 	taskConfigMu      sync.Mutex // serialize phone task admission with API changes
+	updatePrepared    bool       // protected by taskConfigMu; updater closes task admission before quitting
+	updateUntil       time.Time  // prepare lease; abandoned installers cannot block new tasks forever
+	updateCommitted   bool
 	modelCatalogMu    sync.Mutex
 	modelCatalog      map[string]verifiedModelCatalog
 	modelCatalogEpoch uint64

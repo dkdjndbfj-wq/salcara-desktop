@@ -1,7 +1,7 @@
 {
   "name": "salcara-bridge-desktop",
   "productName": "Salcara Bridge",
-  "version": "1.5.1-test.2",
+  "version": "1.6.0",
   "private": true,
   "main": "main.cjs",
   "scripts": {
@@ -14,6 +14,6 @@
     "@electron/packager": "20.3.0",
     "electron": "44.4.5"
   },
-  "salcaraUpdateRepo": "",
-  "salcaraUpdatePublicKey": ""
+  "salcaraUpdateRepo": "dkdjndbfj-wq/salcara-desktop",
+  "salcaraUpdatePublicKey": "TyMO78WKxtU/PKbpmdLA4exnGgp42RkDFg7g4O/h1v4="
 }

@@ -30,6 +30,7 @@ let attached = false;    // using a core that was already running (not our child
 let updater = null;      // desktop/updater.cjs, created on first use
 let updateWin = null;    // the update window
 let announced = '';      // the version the update window was last opened for by itself
+let updateOwner = null;  // owning child/cookie during a two-phase update
 
 if (!app.requestSingleInstanceLock()) {
   app.quit();
@@ -474,6 +475,8 @@ function getUpdater() {
       if (state.phase !== lastPhase) { lastPhase = state.phase; updateTrayMenu(); }
     },
     beforeInstall: stopForUpdate,
+    commitInstall: commitForUpdate,
+    installAborted: abortForUpdate,
   });
   return updater;
 }
@@ -518,17 +521,48 @@ function openUpdateWindow(quiet) {
 }
 /** Before the folders are swapped: stop the core and let the app quit. */
 async function stopForUpdate() {
+  // Never kill an attached core, somebody else's process or an active task.
+  // The owning core atomically closes admission only after all its tasks finish.
+  const child = bridge;
+  if (!child || child.exitCode !== null || attached) throw new Error('核心正在由其他进程管理，请退出原程序后再更新');
+  const cookies = await require('electron').session.defaultSession.cookies.get({ url: consoleURL, name: 'salcara_console' });
+  if (cookies.length !== 1) throw new Error('无法验证核心连接，请稍后重试');
+  updateOwner = { child, cookie: cookies[0].value };
+  await updateRequest('prepare');
+}
+
+async function updateRequest(action) {
+  if (!updateOwner) throw new Error('没有安全的更新准备');
+  const response = await fetch(consoleURL + 'api/update/' + action, {
+      method: 'POST', signal: AbortSignal.timeout(5000),
+      headers: { 'Content-Type': 'application/json', Origin: consoleURL.slice(0, -1), Cookie: `salcara_console=${updateOwner.cookie}` },
+      body: JSON.stringify({ pid: updateOwner.child.pid, version: app.getVersion() }),
+    });
+  const body = await response.json();
+  if (!response.ok || body.ok !== true) throw new Error(body.error || '核心未允许更新');
+}
+
+async function commitForUpdate() {
+  const child = updateOwner && updateOwner.child;
+  if (!child || child !== bridge) throw new Error('核心身份已改变，未安装更新');
   quitting = true;
-  clearInterval(attachTimer);
-  if (bridge && bridge.exitCode === null) bridge.kill();
-  else if (await healthy()) {
-    // A core this app did not start: ask it to quit through the console (same cookie as the page).
-    if (window && !window.isDestroyed() && window.webContents.getURL().startsWith(consoleURL)) {
-      await window.webContents.executeJavaScript("fetch('/api/quit', { method: 'POST' }).then(() => 1, () => 0)", true).catch(() => 0);
-    }
+  try {
+    await updateRequest('commit');
+    for (let i = 0; i < 75 && child.exitCode === null; i++) await new Promise((r) => setTimeout(r, 200));
+    if (child.exitCode === null) throw new Error('核心仍未安全退出，未安装更新');
+    clearInterval(attachTimer);
+  } catch (error) {
+    quitting = false;
+    throw error;
   }
-  for (let i = 0; i < 40 && await healthy(); i++) await new Promise((r) => setTimeout(r, 200));
-  for (const w of [window, ball, updateWin]) if (w && !w.isDestroyed()) w.hide();
+}
+
+async function abortForUpdate() {
+  const owner = updateOwner;
+  if (owner && owner.child.exitCode === null) await updateRequest('cancel').catch(() => {});
+  updateOwner = null;
+  quitting = false;
+  if ((!bridge || bridge.exitCode !== null) && !(await healthy())) spawnCore();
 }
 function reportUpdateResult() {
   const done = getUpdater().afterRestart();

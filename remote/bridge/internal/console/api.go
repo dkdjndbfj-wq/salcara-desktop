@@ -58,6 +58,9 @@ func (s *Server) routes(m *http.ServeMux) {
 	m.HandleFunc("POST /api/settings", s.handleSettings)
 	m.HandleFunc("GET /api/logs", s.handleLogs)
 	m.HandleFunc("POST /api/quit", s.handleQuit)
+	m.HandleFunc("POST /api/update/prepare", s.handleUpdatePrepare)
+	m.HandleFunc("POST /api/update/commit", s.handleUpdateCommit)
+	m.HandleFunc("POST /api/update/cancel", s.handleUpdateCancel)
 	m.HandleFunc("POST /api/reveal", s.handleReveal)
 }
 

@@ -12,6 +12,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { verifyManifest } = require('../updater.cjs');
+const { validateArchive } = require('../update-archive.cjs');
 
 const root = path.resolve(__dirname, '..');
 const pkg = require('../package.json');
@@ -19,7 +20,7 @@ const version = pkg.version;
 if (!/^\d+\.\d+\.\d+$/.test(version)) { console.error(`测试版（${version}）不发布自动更新。`); process.exit(1); }
 if (!pkg.salcaraUpdateRepo) { console.error('package.json 里还没有填写 salcaraUpdateRepo（GitHub 仓库，例如 owner/repo）。'); process.exit(1); }
 if (!pkg.salcaraUpdatePublicKey) { console.error('还没有签名公钥，请先运行 npm run release:keygen。'); process.exit(1); }
-const keyFile = process.env.SALCARA_UPDATE_KEY || path.join(os.homedir(), '.salcara', 'update-signing-key.pem');
+const keyFile = process.env.SALCARA_UPDATE_KEY || path.join(os.homedir(), '.salcara', 'signing', 'desktop', 'update-signing-key.pem');
 if (!fs.existsSync(keyFile)) { console.error(`找不到签名私钥：${keyFile}`); process.exit(1); }
 
 const platform = process.platform, arch = process.arch;
@@ -40,15 +41,15 @@ fs.rmSync(archive, { force: true });
 const tar = platform === 'win32' ? path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'tar.exe') : 'tar';
 // macOS: the archive holds the .app; elsewhere: the contents of the app folder.
 const contents = platform === 'darwin' ? [`${appName}.app`] : ['.'];
-execFileSync(tar, ['-czf', archive, '-C', built, ...contents], { stdio: 'inherit' });
+execFileSync(tar, ['--format', 'ustar', '-czf', archive, '-C', built, ...contents], { stdio: 'inherit' });
 const bytes = fs.readFileSync(archive);
 const file = { name, sha256: crypto.createHash('sha256').update(bytes).digest('hex'), size: bytes.length };
 
 const manifestFile = path.join(releaseDir, 'latest.json');
-let manifest = { version, notes, date: new Date().toISOString(), files: {} };
+let manifest = { schema: 1, product: 'salcara-desktop', repo: pkg.salcaraUpdateRepo, version, notes, date: new Date().toISOString(), files: {} };
 try {
   const old = JSON.parse(fs.readFileSync(manifestFile, 'utf8'));
-  if (old && old.version === version && old.files && typeof old.files === 'object') manifest = { ...old, notes: notes || old.notes || '', files: { ...old.files } };
+  if (old && old.schema === 1 && old.product === 'salcara-desktop' && old.repo === pkg.salcaraUpdateRepo && old.version === version && old.files && typeof old.files === 'object') manifest = { ...old, notes: notes || old.notes || '', files: { ...old.files } };
 } catch { /* first platform */ }
 manifest.files[`${platform}-${arch}`] = file;
 const body = Buffer.from(JSON.stringify(manifest, null, 2) + '\n');
@@ -57,6 +58,8 @@ const signature = crypto.sign(null, body, crypto.createPrivateKey(fs.readFileSyn
 verifyManifest({ manifest: body, signature, publicKey: pkg.salcaraUpdatePublicKey, current: '0.0.0', platform, arch, tag: `v${version}` });
 fs.writeFileSync(manifestFile, body);
 fs.writeFileSync(manifestFile + '.sig', signature + '\n');
+// Recheck the publisher's archive using exactly the runtime extraction policy.
+validateArchive(archive).catch((error) => { console.error(error.message); process.exitCode = 1; });
 
 console.log(`
 已生成（${(file.size / 1048576).toFixed(1)} MB）：

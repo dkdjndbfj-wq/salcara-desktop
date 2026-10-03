@@ -12,7 +12,7 @@ function keys() {
   return { pub: publicKey.export({ type: 'spki', format: 'der' }).subarray(-32).toString('base64'), privateKey };
 }
 function manifestFor(version, files, privateKey) {
-  const body = Buffer.from(JSON.stringify({ version, notes: '- 新功能', files }));
+  const body = Buffer.from(JSON.stringify({ schema: 1, product: 'salcara-desktop', repo: 'o/r', version, notes: '- 新功能', files }));
   return { body, sig: crypto.sign(null, body, privateKey).toString('base64') };
 }
 const file = { name: 'Salcara-Bridge-1.6.0-linux-x64.tar.gz', sha256: 'a'.repeat(64), size: 10 };
@@ -52,13 +52,16 @@ test('end to end: check, download, verify, unpack, swap and relaunch (POSIX)', {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'salcara-upd-'));
   // The installed app and the new build.
   const appDir = path.join(tmp, 'Salcara Bridge'); fs.mkdirSync(appDir);
-  fs.writeFileSync(path.join(appDir, 'salcara'), '#!/bin/sh\necho launched > "$(dirname "$0")/../launched"\n', { mode: 0o755 });
+  const ack = `const fs=require('fs');const saved=JSON.parse(fs.readFileSync(${JSON.stringify(path.join(tmp, 'ud', 'update.json'))},'utf8'));fs.writeFileSync(saved.receipt,saved.token);`;
+  fs.writeFileSync(path.join(appDir, 'salcara'), `#!/bin/sh\n${JSON.stringify(process.execPath)} -e '${ack.replace(/'/g, "'\\''")}'\necho launched > "$(dirname "$0")/../launched"\nsleep 2\n`, { mode: 0o755 });
+  fs.writeFileSync(path.join(appDir, '.salcara-install.json'), JSON.stringify({ product: 'salcara-desktop', version: '1.5.1' }));
   fs.writeFileSync(path.join(appDir, 'VERSION'), '1.5.1');
   const build = path.join(tmp, 'build'); fs.mkdirSync(build);
   fs.writeFileSync(path.join(build, 'salcara'), fs.readFileSync(path.join(appDir, 'salcara')), { mode: 0o755 });
   fs.writeFileSync(path.join(build, 'VERSION'), '1.6.0');
+  fs.writeFileSync(path.join(build, '.salcara-install.json'), JSON.stringify({ product: 'salcara-desktop', version: '1.6.0' }));
   const archive = path.join(tmp, 'a.tar.gz');
-  execFileSync('tar', ['-czf', archive, '-C', build, '.']);
+  execFileSync('tar', ['--format', 'ustar', '-czf', archive, '-C', build, '.']);
   const bytes = fs.readFileSync(archive);
   const k = keys();
   const name = 'Salcara-Bridge-1.6.0-linux-x64.tar.gz';
