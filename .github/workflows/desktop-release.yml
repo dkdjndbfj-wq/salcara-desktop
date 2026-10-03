@@ -7,12 +7,6 @@ jobs:
   package:
     runs-on: windows-latest
     timeout-minutes: 40
-    env:
-      # Windows' default TEMP may use the runneradmin 8.3 alias. Descriptor
-      # policy intentionally refuses aliases/junctions; fixtures use the real
-      # runner-owned path, without weakening production path checks.
-      TEMP: ${{ runner.temp }}
-      TMP: ${{ runner.temp }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -26,6 +20,13 @@ jobs:
         with:
           go-version: '1.27.1'
           cache-dependency-path: remote/bridge/go.sum
+      - name: Canonical runner-owned temporary directory
+        shell: pwsh
+        run: |
+          # Short-path aliases must not weaken production descriptor policy.
+          $fixtureTemp = node -e "console.log(require('node:fs').realpathSync(process.env.RUNNER_TEMP))"
+          "TEMP=$fixtureTemp" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "TMP=$fixtureTemp" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
       - name: Desktop tests (including synthetic Windows swap and rollback)
         shell: pwsh
         run: |
