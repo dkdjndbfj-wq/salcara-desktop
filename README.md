@@ -1,56 +1,66 @@
-# Salcara Desktop · 桌面 Agent 工作台
+# Salcara Desktop
 
-独立桌面软件源码：命名 API 密钥库、Agent 配置与启动、原会话管理，以及可选的手机远程连接。
+开源的桌面 Agent 工作台。在一个地方管理多组 API，为 Codex、Claude Code 和 Claude Desktop 选择服务商、配置并打开原工具；需要时，也可以配合 Salcara 手机 App 和 Hub 远程继续编程。
 
-Windows 完整桌面构建和签名更新流程已配置；可下载包请查看本仓库 Releases。开源和签名不代表原生桌面接口、自动更新和手机链路已经全部实机验收。
+本地使用不需要注册 Salcara 账号，也不需要部署服务器。API 可以自行命名，同一组 API 可以供多个 Agent 使用，不绑定某个品牌。
 
-## 范围
+[下载 Windows 安装包](https://github.com/dkdjndbfj-wq/salcara-desktop/releases/download/v1.6.1/Salcara-Desktop-1.6.1-win32-x64-setup.exe) · [全部版本](https://github.com/dkdjndbfj-wq/salcara-desktop/releases) · [使用教程](docs/USER-GUIDE.zh.md) · [反馈问题](https://github.com/dkdjndbfj-wq/salcara-desktop/issues)
 
-- `remote/bridge`：Go 核心、本地控制台、Electron 桌面外壳。
-- `remote/desktop-companion`：需要用户明确授权的 Codex Desktop 实验适配器。
-- `assets/brand-logo.png`：桌面构建所需共享资源。
+## 可以做什么
 
-不包含手机 App、中转站插件、个人 Hub、真实 API / 配对数据、签名私钥，也不捆绑 Codex / Claude 本体。本地 API 与 Agent 功能不要求部署 Hub。
+- **管理 API**：保存服务商地址、密钥和名称，在不同 Agent 之间共享选择。
+- **配置与启动 Agent**：为已安装的工具应用 API 配置，打开或重启原应用；模型在 Agent 自己的菜单里选择。
+- **读取和恢复编程会话**：查看本机支持的会话记录，继续已有项目；不因换 API 新建一套 Codex 用户目录。
+- **跨协议模型接入**：本地网关转换受支持的 Responses、Chat Completions 和 Messages 请求。能否正常使用仍取决于服务商接口、模型工具调用能力和 Agent 版本。
+- **可选手机远程**：通过自行部署或可信站点提供的 Salcara Hub 扫码配对，查看支持的编程会话并发送任务。
+- **签名自动更新**：检查新版本，验证更新签名及文件完整性，在任务结束后确认安装。
 
-## 能力与边界
+## 下载与安装
 
-- 同一命名 API 可供不同 Agent 使用；实际模型与工具兼容性取决于上游协议及 Agent。
-- 本地工具配置、启动、会话记录和本机用量；工具配置修改与重启需要用户在软件里明确操作。
-- 原样保留当前固定窗口、悬浮球、托盘、启动动画和主题，不重新设计 UI。
-- 手机远程需另行部署兼容 Hub；电脑保持在线，桌面原生操作还需要适配器授权。
-- Codex Desktop 是实验适配，未知宿主或权限不足时拒绝；Claude Desktop 原 Chat / Cowork 直接发送、停止仍未实现，不能用 CLI 冒充。
-- 1.6.0 配置本仓库更新通道和独立 Ed25519 公钥；更新签名、大小、SHA-256 和安装范围均需验证。任务未结束、非自有核心或不可写目录不会强制安装。
+当前提供 **Windows 10/11 x64** 桌面包。Codex、Claude Code、Claude Desktop 需要另外安装，Salcara 不捆绑这些工具。
 
-本地 Key / 配置备份并非完整系统钥匙串保护，勿共享真实配置。远程 Hub 当前不是端到端加密通道，中继所在站点可接触转发内容，只连接可信服务。
+| 下载文件 | 用途 |
+| --- | --- |
+| `Salcara-Desktop-1.6.1-win32-x64-setup.exe` | 推荐。安装向导、开始菜单快捷方式、Windows 卸载入口 |
+| `Salcara-Bridge-1.6.1-win32-x64.zip` | 免安装便携版，解压完整文件夹后运行 |
+| `SHA256SUMS.txt` | 下载文件的 SHA-256 校验清单 |
 
-## 开发
+双击安装包，按向导安装到当前用户目录，然后从开始菜单打开 **Salcara Desktop**。无需管理员权限。为了兼容已有配置，应用窗口和可执行文件仍使用 `Salcara Bridge` 名称。
 
-使用 Go 1.27.1、Node.js 22 的当前维护版本或满足依赖 engines 的较新版本。桌面按构建机器自身的系统 / 架构打包。
+便携版请运行解压目录中的 `Salcara Bridge.exe`，不要只复制这个 exe。GitHub 自动生成的 **Source code** 不是可直接运行的安装包；`.tar.gz`、`latest.json` 和 `.sig` 是客户端自动更新文件。
 
-```sh
-cd remote/bridge/desktop
-npm ci
-npm run dev
-# 只构建完整桌面目录，不发布正式更新
-npm run package
-```
+目前没有 Windows Authenticode 代码签名证书，SmartScreen 可能提示未知发行者。更新文件的 Ed25519 签名不等于 Windows 系统信任证书。请只从本仓库 Releases 下载，不要关闭系统安全功能。
 
-`npm run dev` 会启动桌面软件并访问本机配置，实验验证建议采用独立测试配置。产物在 `remote/bridge/desktop/out`，必须保留完整目录，不能只移动 exe。Go 不在 PATH 时通过 `GO_BIN` 指定可执行文件。
+## 第一次使用
 
-源码测试：
+1. 打开 **API 密钥**，添加 API 名称、服务商地址和密钥。
+2. 打开 **Agent**，在工具卡片里选择这组 API。工具未安装时，可从 **环境** 页面查看安装入口。
+3. 点击 **打开**，加载服务商模型；需要时开启模型菜单覆盖。
+4. 确认当前任务已结束，再配置并打开原工具。进入工具后选择模型，开始或继续项目。
 
-```sh
-node --test remote/bridge/desktop/test/*.test.cjs
-node --test remote/desktop-companion/tests/*.test.mjs
-cd remote/bridge
-go test -short ./...
-go vet ./...
-```
+只在电脑上使用，到这里就够了。换 API、恢复原配置、Claude Desktop 第三方模式及手机配对的具体步骤见 [完整使用教程](docs/USER-GUIDE.zh.md)。
 
-`-short` 明确跳过需要独立 Hub 的跨组件 e2e；本仓库不复制服务器当桌面依赖。Windows 既有平台断言与准确测试结果见 [发布交接](docs/PUBLISH-20261004.md)。Actions 提供手动 Windows 签名打包入口，先上传 artifact 供验收，不自动覆盖 Release。
+## 手机远程（可选）
 
-## 后续更新与许可
+桌面 App 负责访问这台电脑的工具和项目，手机 App 负责移动端操作，Hub 负责设备配对和消息中继。三者是独立项目，不需要把服务器安装到桌面 App 里。
 
-签名发布流程与更新边界见 [自动更新](docs/AUTO-UPDATE.md)。旧公钥 / 仓库为空的开发版本首次需手动安装新版本，不能自动获得信任身份。
+- [Salcara 手机 App](https://github.com/dkdjndbfj-wq/salcara-image-mobile)
+- [Salcara Hub：Docker 部署与管理](https://github.com/dkdjndbfj-wq/salcara-hub-plugin)
 
-沿用原源码的 [MIT 许可证](LICENSE) 和版权声明。第三方归属见 [通知](remote/bridge/THIRD-PARTY-NOTICES.md)；构建会收集 Go / Node 许可证，Electron 自带许可。实验适配器保留自己的 [MIT](remote/desktop-companion/LICENSE)。
+在 **手机远程** 中连接已经部署 Hub 的站点，显示二维码，再用手机扫码绑定。电脑必须在线且未休眠；只连接可信的 Hub，当前中继不是端到端加密，Hub 运营者可能接触会话内容。
+
+远程编程不是整台电脑的屏幕投影或通用远程桌面：Codex 会话可通过支持的编程后端继续，Claude Desktop 的 Code 会话通过 Claude Code 继续。**Claude Desktop 普通 Chat / Cowork 不支持直接远程发送或停止**；桌面窗口也不保证立即刷新手机续聊内容。详细限制见教程，不将 CLI 能力冒充桌面原生能力。
+
+## 更新与卸载
+
+现有正式客户端使用同一更新通道和公钥。收到更新提示后，先结束正在运行的任务，再确认下载和安装；不会为了更新强制结束 Agent 任务。早期未配置更新通道的开发版需手动安装正式包。
+
+安装版可在 Windows **设置 → 应用 → 已安装的应用 → Salcara Desktop** 卸载。卸载保留 API 配置、配对数据及第三方 Agent 的项目和会话；重装可继续使用。请妥善保护本机配置，它包含敏感密钥，不是完整的系统钥匙串保险库。
+
+## 开发与贡献
+
+这是完整的桌面项目，正式源码统一维护在 `main`。开发、测试、安装器构建和签名发布步骤见 [开发指南](docs/DEVELOPMENT.md) 与 [自动更新](docs/AUTO-UPDATE.md)。欢迎提交 Issue 和 Pull Request；请勿附带 API Key、配对令牌或真实用户配置。
+
+## 许可
+
+使用 [MIT 许可证](LICENSE)。第三方依赖与版权声明见 [第三方通知](remote/bridge/THIRD-PARTY-NOTICES.md)，桌面适配组件保留其 [MIT 许可证](remote/desktop-companion/LICENSE)。Codex、Claude 等品牌及工具属于各自权利人；Salcara 是独立项目，不代表其官方产品。

@@ -14,7 +14,8 @@ async function verifyRelease(directory, portableDirectory) {
   assert.equal(pkg.salcaraUpdateRepo, 'dkdjndbfj-wq/salcara-desktop');
   const archiveName = `Salcara-Bridge-${pkg.version}-win32-x64.tar.gz`;
   const zipName = `Salcara-Bridge-${pkg.version}-win32-x64.zip`;
-  const expected = [archiveName, zipName, 'latest.json', 'latest.json.sig', 'SHA256SUMS.txt'].sort();
+  const setupName = `Salcara-Desktop-${pkg.version}-win32-x64-setup.exe`;
+  const expected = [archiveName, zipName, setupName, 'latest.json', 'latest.json.sig', 'SHA256SUMS.txt'].sort();
   assert.deepEqual(fs.readdirSync(directory).sort(), expected, 'exact complete artifact required');
   const sums = fs.readFileSync(path.join(directory, 'SHA256SUMS.txt'), 'utf8').replace(/^\uFEFF/, '').trim().split(/\r?\n/);
   const seen = new Set();
@@ -32,6 +33,15 @@ async function verifyRelease(directory, portableDirectory) {
     assert.equal(await digest(path.join(directory, match[2])), match[1], `hash mismatch: ${match[2]}`);
   }
   assert.deepEqual([...seen].sort(), expected.filter(name => name !== 'SHA256SUMS.txt'));
+  const setup = fs.openSync(path.join(directory, setupName), 'r');
+  try {
+    const header = Buffer.alloc(64);
+    assert.equal(fs.readSync(setup, header, 0, header.length, 0), header.length);
+    assert.equal(header.subarray(0, 2).toString('ascii'), 'MZ', 'setup must be a Windows executable');
+    const pe = Buffer.alloc(4);
+    assert.equal(fs.readSync(setup, pe, 0, 4, header.readUInt32LE(60)), 4);
+    assert.deepEqual(pe, Buffer.from([0x50, 0x45, 0, 0]), 'setup PE header required');
+  } finally { fs.closeSync(setup); }
   const manifest = fs.readFileSync(path.join(directory, 'latest.json'));
   assert.ok(manifest.length <= 256 * 1024);
   const data = JSON.parse(manifest);
@@ -52,7 +62,7 @@ async function verifyRelease(directory, portableDirectory) {
       assert.ok(fs.statSync(path.join(root, name)).isFile(), `incomplete portable package: ${name}`);
     }
   }
-  console.log(JSON.stringify({version:pkg.version, product:data.product, repo:data.repo, signatureVerified:true, archiveVerified:true, archiveBytes:verified.file.size, archiveSHA256:verified.file.sha256, portableVerified:Boolean(portableDirectory)}));
+  console.log(JSON.stringify({version:pkg.version, product:data.product, repo:data.repo, signatureVerified:true, archiveVerified:true, archiveBytes:verified.file.size, archiveSHA256:verified.file.sha256, setupName, setupSHA256:await digest(path.join(directory, setupName)), portableVerified:Boolean(portableDirectory)}));
 }
 if (require.main === module) verifyRelease(path.resolve(process.argv[2]), process.argv[3] && path.resolve(process.argv[3])).catch(error => {console.error(error.message);process.exitCode=1;});
 module.exports = { verifyRelease };

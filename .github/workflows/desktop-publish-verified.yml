@@ -49,7 +49,6 @@ jobs:
       - name: Verify hashes, signature, USTAR policy and complete portable package
         shell: pwsh
         run: |
-          Copy-Item -LiteralPath remote/bridge/desktop/scripts/verify-release-artifact.cjs -Destination tested-source/remote/bridge/desktop/scripts/verify-release-artifact.cjs
           $zip = @(Get-ChildItem -LiteralPath verified-artifact -Filter '*.zip' -File)
           if ($zip.Count -ne 1) { throw 'Exact portable ZIP required' }
           Expand-Archive -LiteralPath $zip[0].FullName -DestinationPath verified-portable
@@ -63,5 +62,5 @@ jobs:
         run: |
           $version = (Get-Content tested-source/remote/bridge/desktop/package.json -Raw | ConvertFrom-Json).version
           $files = @(Get-ChildItem -LiteralPath verified-artifact -File | ForEach-Object FullName)
-          gh release create "v$version" @files --repo $env:GITHUB_REPOSITORY --target $env:SOURCE_SHA --title "Salcara Bridge v$version" --notes-file "tested-source/docs/RELEASE-$version.md" --draft
+          gh release create "v$version" @files --repo $env:GITHUB_REPOSITORY --target $env:SOURCE_SHA --title "Salcara Desktop v$version" --notes-file "tested-source/docs/RELEASE-$version.md" --draft
           if ($LASTEXITCODE -ne 0) { throw 'Draft release staging failed' }

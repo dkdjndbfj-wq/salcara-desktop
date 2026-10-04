@@ -1,11 +1,11 @@
-name: Build signed Windows desktop
+name: Build Windows installer and signed updates
 on:
   workflow_dispatch:
 permissions:
   contents: read
 jobs:
   package:
-    runs-on: windows-latest
+    runs-on: windows-2025
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
@@ -52,6 +52,12 @@ jobs:
       - name: Build complete desktop directory
         working-directory: remote/bridge/desktop
         run: npm run package
+      - name: Build current-user Windows installer
+        working-directory: remote/bridge/desktop
+        run: npm run installer
+      - name: Install, reinstall, downgrade protection and uninstall (isolated Windows user)
+        shell: pwsh
+        run: ./remote/bridge/desktop/scripts/test-installer.ps1
       - name: Import desktop signing identity from secret
         env:
           DESKTOP_UPDATE_KEY: ${{ secrets.SALCARA_DESKTOP_UPDATE_PRIVATE_KEY }}
@@ -68,7 +74,11 @@ jobs:
           "SALCARA_UPDATE_KEY=$keyPath" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
       - name: Create and verify signed update manifest and archive
         working-directory: remote/bridge/desktop
-        run: npm run release -- --notes ../../../docs/RELEASE-1.6.0.md
+        shell: pwsh
+        run: |
+          $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          npm run release -- --notes "../../../docs/RELEASE-$version.md"
+          if ($LASTEXITCODE -ne 0) { throw 'Signed archive creation failed' }
       - name: Create portable download and checksum list
         working-directory: remote/bridge/desktop
         shell: pwsh
@@ -79,6 +89,9 @@ jobs:
           Compress-Archive -LiteralPath $built -DestinationPath (Join-Path $release "Salcara-Bridge-$version-win32-x64.zip")
           $lines = Get-ChildItem -LiteralPath $release -File | Sort-Object Name | ForEach-Object { "$((Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLower())  $($_.Name)" }
           [IO.File]::WriteAllLines((Join-Path $release 'SHA256SUMS.txt'), $lines)
+      - name: Verify exact installer, portable package and signed update inventory
+        working-directory: remote/bridge/desktop
+        run: node scripts/verify-release-artifact.cjs out/release out
       - uses: actions/upload-artifact@v4
         with:
           name: salcara-desktop-windows-signed
@@ -91,5 +104,5 @@ jobs:
         run: |
           $keyPath = Join-Path $env:RUNNER_TEMP 'salcara-desktop-update-signing-key.pem'
           if (Test-Path -LiteralPath $keyPath) { Remove-Item -LiteralPath $keyPath -Force }
-      # Root task verifies these artifacts and creates v<version>; this workflow
+      # A separate verification workflow stages a draft v<version>; this workflow
       # does not create, overwrite or expose a GitHub Release on its own.

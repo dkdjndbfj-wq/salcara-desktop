@@ -65,7 +65,8 @@ test('Windows swap waits for healthy acknowledgement and rolls back a dead new p
   const ps=path.join(process.env.SystemRoot,'System32','WindowsPowerShell','v1.0','powershell.exe');
   for (const succeeds of [true,false]) {
     const scope=path.join(root,succeeds?'success':'rollback');fs.mkdirSync(scope);
-    const appDir=path.join(scope,'Salcara Bridge'),stage=path.join(scope,'.Salcara Bridge.update'),newDir=path.join(stage,'app'),backupDir=appDir+'.old-123';
+    const appDir=path.join(scope,'app'),stage=path.join(scope,'.app.update'),newDir=path.join(stage,'app'),backupDir=appDir+'.old-123';
+    const uninstall=path.join(scope,'unins000.exe');fs.writeFileSync(uninstall,'synthetic-uninstaller-outside-payload');
     fs.mkdirSync(appDir);fs.mkdirSync(newDir,{recursive:true});
     const launch=path.join(appDir,'fixture.exe');fs.copyFileSync(process.execPath,launch);fs.copyFileSync(process.execPath,path.join(newDir,'fixture.exe'));
     fs.writeFileSync(path.join(appDir,'VERSION'),'old');fs.writeFileSync(path.join(newDir,'VERSION'),'new');
@@ -77,6 +78,7 @@ test('Windows swap waits for healthy acknowledgement and rolls back a dead new p
     const result=spawnSync(ps,['-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',script],{windowsHide:true,timeout:20000,env:{...process.env,NODE_OPTIONS:`--require "${boot.replace(/\\/g,'/')}"`}});
     assert.equal(fs.readFileSync(path.join(appDir,'VERSION'),'utf8'),succeeds?'new':'old',result.stderr?.toString());
     assert.equal(fs.existsSync(backupDir),false);
+    assert.equal(fs.readFileSync(uninstall,'utf8'),'synthetic-uninstaller-outside-payload');
     assert.match(fs.readFileSync(log,'utf8'),succeeds?/updated and healthy/:/rolled back/);
     // Let exit callbacks close synthetic process handles before cleanup.
     await new Promise((resolve) => setTimeout(resolve, 300));

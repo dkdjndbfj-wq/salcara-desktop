@@ -1,12 +1,13 @@
 {
   "name": "salcara-bridge-desktop",
   "productName": "Salcara Bridge",
-  "version": "1.6.0",
+  "version": "1.6.1",
   "private": true,
   "main": "main.cjs",
   "scripts": {
     "dev": "node scripts/build-bridge.cjs && electron .",
     "package": "node scripts/package.cjs",
+    "installer": "node scripts/installer.cjs",
     "release": "node scripts/release.cjs",
     "release:keygen": "node scripts/release-keygen.cjs"
   },
