@@ -1,0 +1,67 @@
+name: Verify prior Windows build and stage release
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        required: true
+        description: Successful desktop-release workflow run ID
+      source_sha:
+        required: true
+        description: Exact tested 40-character source commit
+permissions:
+  contents: write
+  actions: read
+concurrency:
+  group: desktop-release-publishing
+  cancel-in-progress: false
+jobs:
+  verify-and-stage:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Require the exact successful native build
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BUILD_RUN: ${{ inputs.run_id }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        shell: pwsh
+        run: |
+          if ($env:GITHUB_REPOSITORY -ne 'dkdjndbfj-wq/salcara-desktop' -or $env:BUILD_RUN -notmatch '^\d+$' -or $env:SOURCE_SHA -notmatch '^[a-f0-9]{40}$') { throw 'Unexpected publishing identity' }
+          $run = gh api "repos/$env:GITHUB_REPOSITORY/actions/runs/$env:BUILD_RUN" | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or $run.conclusion -ne 'success' -or $run.status -ne 'completed' -or $run.head_sha -ne $env:SOURCE_SHA -or $run.path -ne '.github/workflows/desktop-release.yml' -or $run.event -ne 'workflow_dispatch') { throw 'Exact successful desktop build required' }
+          $artifacts = gh api "repos/$env:GITHUB_REPOSITORY/actions/runs/$env:BUILD_RUN/artifacts" | ConvertFrom-Json
+          $asset = @($artifacts.artifacts | Where-Object { $_.name -eq 'salcara-desktop-windows-signed' -and -not $_.expired })
+          if ($LASTEXITCODE -ne 0 -or $asset.Count -ne 1 -or $asset[0].digest -notmatch '^sha256:[a-f0-9]{64}$') { throw 'Exact unexpired artifact required' }
+          gh run download $env:BUILD_RUN --repo $env:GITHUB_REPOSITORY --name salcara-desktop-windows-signed --dir verified-artifact
+          if ($LASTEXITCODE -ne 0) { throw 'Artifact download failed' }
+          Write-Output "Artifact ID=$($asset[0].id) digest=$($asset[0].digest) source=$env:SOURCE_SHA"
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_sha }}
+          path: tested-source
+          persist-credentials: false
+      - name: Verify hashes, signature, USTAR policy and complete portable package
+        shell: pwsh
+        run: |
+          Copy-Item -LiteralPath remote/bridge/desktop/scripts/verify-release-artifact.cjs -Destination tested-source/remote/bridge/desktop/scripts/verify-release-artifact.cjs
+          $zip = @(Get-ChildItem -LiteralPath verified-artifact -Filter '*.zip' -File)
+          if ($zip.Count -ne 1) { throw 'Exact portable ZIP required' }
+          Expand-Archive -LiteralPath $zip[0].FullName -DestinationPath verified-portable
+          node tested-source/remote/bridge/desktop/scripts/verify-release-artifact.cjs verified-artifact verified-portable
+          if ($LASTEXITCODE -ne 0) { throw 'Artifact verification failed' }
+      - name: Upload verified assets to a draft (root task publishes after review)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        shell: pwsh
+        run: |
+          $version = (Get-Content tested-source/remote/bridge/desktop/package.json -Raw | ConvertFrom-Json).version
+          $files = @(Get-ChildItem -LiteralPath verified-artifact -File | ForEach-Object FullName)
+          gh release create "v$version" @files --repo $env:GITHUB_REPOSITORY --target $env:SOURCE_SHA --title "Salcara Bridge v$version" --notes-file "tested-source/docs/RELEASE-$version.md" --draft
+          if ($LASTEXITCODE -ne 0) { throw 'Draft release staging failed' }
