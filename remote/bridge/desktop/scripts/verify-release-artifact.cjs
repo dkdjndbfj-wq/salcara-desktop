@@ -58,7 +58,7 @@ async function verifyRelease(directory, portableDirectory) {
   if (portableDirectory) {
     const root = path.join(portableDirectory, 'Salcara Bridge-win32-x64');
     assert.deepEqual(JSON.parse(fs.readFileSync(path.join(root, '.salcara-install.json'), 'utf8')), marker);
-    for (const name of ['Salcara Bridge.exe', 'resources/app.asar', 'resources/SalcaraBridge.exe', 'resources/SalcaraProbeNode.exe', 'resources/desktop-companion/src/stdio.mjs', 'resources/NODE-LICENSE.txt', 'resources/GO-THIRD-PARTY-NOTICES.txt']) {
+    for (const name of ['Salcara Bridge.exe', 'resources/app.asar', 'resources/SalcaraBridge.exe', 'resources/SalcaraProbeNode.exe', 'resources/desktop-companion/src/stdio.mjs', 'resources/NODE-LICENSE.txt', 'resources/GO-THIRD-PARTY-NOTICES.txt', 'resources/README.md', 'resources/docs/USER-GUIDE.zh.md']) {
       assert.ok(fs.statSync(path.join(root, name)).isFile(), `incomplete portable package: ${name}`);
     }
   }

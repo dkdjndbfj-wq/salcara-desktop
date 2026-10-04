@@ -18,6 +18,7 @@
 - `installer/windows.iss`、`root.marker`：Inno Setup 当前用户安装，固定专属路径；完整 payload 放 `app`，外层保留卸载器，开始菜单和可选桌面快捷方式。
 - 重装先将已验证旧应用重命名到专属 `.salcara-setup-recovery`，新文件成功安装后才清理；安装失败尝试恢复，无法安全恢复则保留备份；已有恢复目录时拒绝覆盖。安装/卸载拒绝被占用或含重解析点的 payload，不强杀进程；不清扫用户父目录和 `app.old-*` 恢复备份。
 - `scripts/installer.cjs`：校验生产版本、完整产品标记、必须文件、无链接/特殊节点后调用 ISCC，不启动 App、不读签名私钥。
+- `scripts/package.cjs`：随包附带产品首页及根 `docs` 的新用户教程，代替旧 Bridge 过程文档；发布验收要求教程真实存在。
 - `scripts/test-installer.ps1`：仅 GitHub Windows runner，一次性用户/profile 的真实安装器回归，不启动 Agent/App、不触碰开发者配置。
 - `test/installer.test.cjs`：合成载荷/调用边界测试；`update-hardening.test.cjs` 增加安装版 parent/app 布局，确认更新/回滚不删除外层卸载器。
 - `package.json` 与 lockfile：1.6.1，加 `installer` 命令，依赖和签名公钥不变。
@@ -45,5 +46,9 @@
 - Linux source-check `37198632957` 成功：desktop、companion、Go short 单元、vet、race。
 - Windows build `37198628697`：全部源码测试/vet、完整 Electron 构建、真实 Inno Setup 编译成功；隔离用户 smoke 失败，worker 未生成结果。流程拒绝签发上传或正式发布，未把“编译成功”写为“安装验收成功”。
 - 后续修复首先补隔离 worker 的诊断及初始化失败返回，不绕过账户隔离或直接在真实用户环境安装。
+
+第二轮 `37199287625` / 提交 `40b9d487ebd364ae24188a0478526b2bca0f6a80`：完整构建、Inno 编译再次成功，诊断正确返回隔离 worker 的 `GetFullPath` 参数为空/非法路径异常；尚未通过实际安装验收。Linux source-check `37199291611` 成功。补创建已验证一次性 profile 的 AppData 目录后再核对 known folders，不跳过隔离检查。
+
+Git HTTPS 上传中一次连接重置导致调度到旧提交，Windows run `37199152820` 已取消，不计作新补丁验收；源码通过官方 Git database API 保持精确 SHA 和非强制 fast-forward 后，才调度上述第二轮。重复旧源码 Linux run 不替代新源码验收。
 
 后续 CI 与正式资产结果在实际完成后追加。

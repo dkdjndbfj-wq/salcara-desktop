@@ -57,7 +57,7 @@ async function main() {
     out: process.env.SALCARA_DESKTOP_OUT || path.join(root, 'out'),
     overwrite: true,
     asar: true,
-    extraResource: [...['app.ico', 'app.png', 'tray.ico', 'tray.png', 'tray@2x.png'].map((name) => path.join(root, 'icons', name)), executable, probeNode, nodeLicense, path.resolve(root, '../../desktop-companion'), logo, path.resolve(root, '../../../LICENSE'), path.resolve(root, '../README.md'), path.resolve(root, '../docs'), path.resolve(root, '../THIRD-PARTY-NOTICES.md'), path.join(root,'bin/GO-THIRD-PARTY-NOTICES.txt')],
+    extraResource: [...['app.ico', 'app.png', 'tray.ico', 'tray.png', 'tray@2x.png'].map((name) => path.join(root, 'icons', name)), executable, probeNode, nodeLicense, path.resolve(root, '../../desktop-companion'), logo, path.resolve(root, '../../../LICENSE'), path.resolve(root, '../../../README.md'), path.resolve(root, '../../../docs'), path.resolve(root, '../THIRD-PARTY-NOTICES.md'), path.join(root,'bin/GO-THIRD-PARTY-NOTICES.txt')],
     electronZipDir: process.env.SALCARA_ELECTRON_ZIP_DIR,
     ignore: [/[/\\]bin(?:[/\\]|$)/, /[/\\]out(?:[/\\]|$)/, /[/\\]download-cache(?:[/\\]|$)/],
   });

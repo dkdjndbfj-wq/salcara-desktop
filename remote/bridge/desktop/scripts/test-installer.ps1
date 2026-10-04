@@ -86,9 +86,16 @@ if ($Mode -eq 'Worker') {
     $env:LOCALAPPDATA = Join-Path $profile 'AppData\Local'
     $env:TEMP = Join-Path $env:LOCALAPPDATA 'Temp'
     $env:TMP = $env:TEMP
-    $roaming = [Environment]::GetFolderPath('ApplicationData')
-    $local = [Environment]::GetFolderPath('LocalApplicationData')
+    # A newly loaded profile can have valid shell-folder registrations before
+    # those directories exist. Read the paths without creating anything,
+    # validate against our SID-owned profile, then create only those paths.
+    $roaming = [Environment]::GetFolderPath('ApplicationData', [Environment+SpecialFolderOption]::DoNotVerify)
+    $local = [Environment]::GetFolderPath('LocalApplicationData', [Environment+SpecialFolderOption]::DoNotVerify)
+    Assert-Condition (-not [string]::IsNullOrWhiteSpace($roaming) -and -not [string]::IsNullOrWhiteSpace($local)) 'The disposable profile has no registered AppData folders'
     Assert-Condition ([IO.Path]::GetFullPath($roaming) -eq $env:APPDATA -and [IO.Path]::GetFullPath($local) -eq $env:LOCALAPPDATA) 'Token known folders do not agree with the isolated profile'
+    New-Item -ItemType Directory -Path $env:APPDATA -Force | Out-Null
+    New-Item -ItemType Directory -Path $env:LOCALAPPDATA -Force | Out-Null
+    Assert-Condition ([Environment]::GetFolderPath('ApplicationData') -eq $roaming -and [Environment]::GetFolderPath('LocalApplicationData') -eq $local) 'Created token known folders do not agree with the isolated profile'
     New-Item -ItemType Directory -Path $env:TEMP -Force | Out-Null
     $expected = Get-Content -LiteralPath (Join-Path $FixtureRoot 'expected.json') -Raw | ConvertFrom-Json
     $setup = Join-Path $FixtureRoot 'setup.exe'
@@ -186,10 +193,11 @@ if ($Mode -eq 'Worker') {
     Assert-Condition ($running.Count -eq 0) 'Silent smoke launched an application'
     [IO.File]::WriteAllText((Join-Path $FixtureRoot 'result.json'), (@{ passed = $true; version = $expected.version; profile = $profile; appLaunched = $false } | ConvertTo-Json -Compress))
   } catch {
+    $failedLine = $_.InvocationInfo.ScriptLineNumber
     if ($canReport) {
-      [IO.File]::WriteAllText((Join-Path $FixtureRoot 'result.json'), (@{ passed = $false; error = $_.Exception.Message } | ConvertTo-Json -Compress))
+      [IO.File]::WriteAllText((Join-Path $FixtureRoot 'result.json'), (@{ passed = $false; error = $_.Exception.Message; line = $failedLine } | ConvertTo-Json -Compress))
     }
-    [Console]::Error.WriteLine('Isolated smoke worker: ' + $_.Exception.Message)
+    [Console]::Error.WriteLine('Isolated smoke worker line ' + $failedLine + ': ' + $_.Exception.Message)
     exit 1
   }
   exit 0
@@ -238,7 +246,7 @@ try {
   $resultFile = Join-Path $FixtureRoot 'result.json'
   Assert-Condition (Test-Path -LiteralPath $resultFile -PathType Leaf) 'The isolated worker did not produce a result'
   $result = Get-Content -LiteralPath $resultFile -Raw | ConvertFrom-Json
-  if ($worker.ExitCode -ne 0 -or -not $result.passed) { throw ('Installer smoke failed: ' + $result.error) }
+  if ($worker.ExitCode -ne 0 -or -not $result.passed) { throw ('Installer smoke failed at worker line ' + $result.line + ': ' + $result.error) }
   $smokeSucceeded = $true
   Write-Output ($result | ConvertTo-Json -Compress)
 } finally {
