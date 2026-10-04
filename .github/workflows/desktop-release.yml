@@ -32,6 +32,9 @@ jobs:
         run: |
           $tests = @(Get-ChildItem -LiteralPath remote/bridge/desktop/test -Filter '*.test.cjs' -File | ForEach-Object FullName)
           node --test @tests
+      - name: Validate isolated installer account environment
+        shell: pwsh
+        run: ./remote/bridge/desktop/scripts/test-installer.ps1 -ProfileOnly
       - name: Companion tests
         shell: pwsh
         run: |

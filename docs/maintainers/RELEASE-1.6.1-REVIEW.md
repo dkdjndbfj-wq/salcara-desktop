@@ -54,3 +54,5 @@ Git HTTPS 上传中一次连接重置导致调度到旧提交，Windows run `371
 后续 CI 与正式资产结果在实际完成后追加。
 
 第三轮 `37201878907` / 提交 `41822ad5a3d835f22012dd2de7c33360e7ba050a`：编译成功，隔离 worker 的 known folders 与新用户 profile 不一致，安装仍未开始、未签发或发布。Linux `37201882251` 成功。测试启动修复为先调用 Windows `CreateProfile` 创建一次性 profile，再通过 PowerShell 7.4+ `Start-Process -Environment` 在进程启动前传入该用户的环境；保持 SID、注册 profile、known folders 的一致性校验。该参数默认不会自动为不同凭据切换继承的用户环境，参考 [Microsoft Start-Process 文档](https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.management/start-process?view=powershell-7.5) 与 [CreateProfile](https://learn.microsoft.com/en-us/windows/win32/api/userenv/nf-userenv-createprofile)。
+
+第四轮 `37202372796` / 提交 `61fa07e37c1861932d2a4db130b21fff54c8aba0`：独立调用 `CreateProfile` 被 runner 拒绝，未运行安装器；Linux `37202376364` 成功。去掉该额外调用，使用已经可用的 `LoadUserProfile` 建立 profile，启动前指定随机且原先不存在的账户目录，worker 仍必须与系统 SID 注册和 known folders 完全一致。增加 `-ProfileOnly` 前置快速验收，目录初始化失败时不再先重做完整压缩；正式安装器回归仍是独立必须步骤，没有取消。

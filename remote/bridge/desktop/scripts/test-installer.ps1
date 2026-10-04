@@ -4,7 +4,8 @@ param(
   [string]$PayloadPath,
   [string]$FixtureRoot,
   [string]$ExpectedSid,
-  [string]$ExpectedUser
+  [string]$ExpectedUser,
+  [switch]$ProfileOnly
 )
 
 $ErrorActionPreference = 'Stop'
@@ -97,6 +98,10 @@ if ($Mode -eq 'Worker') {
     New-Item -ItemType Directory -Path $env:LOCALAPPDATA -Force | Out-Null
     Assert-Condition ([Environment]::GetFolderPath('ApplicationData') -eq $roaming -and [Environment]::GetFolderPath('LocalApplicationData') -eq $local) 'Created token known folders do not agree with the isolated profile'
     New-Item -ItemType Directory -Path $env:TEMP -Force | Out-Null
+    if ($ProfileOnly) {
+      [IO.File]::WriteAllText((Join-Path $FixtureRoot 'result.json'), (@{ passed = $true; phase = 'profile'; profile = $profile; appLaunched = $false } | ConvertTo-Json -Compress))
+      exit 0
+    }
     $expected = Get-Content -LiteralPath (Join-Path $FixtureRoot 'expected.json') -Raw | ConvertFrom-Json
     $setup = Join-Path $FixtureRoot 'setup.exe'
     $root = Join-Path $local 'Programs\Salcara Desktop'
@@ -210,10 +215,12 @@ $principal = [Security.Principal.WindowsPrincipal]::new([Security.Principal.Wind
 Assert-Condition ($principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) 'The runner must create an isolated local test account'
 $desktopRoot = Split-Path -Parent $PSScriptRoot
 $version = (Get-Content -LiteralPath (Join-Path $desktopRoot 'package.json') -Raw | ConvertFrom-Json).version
-if (-not $InstallerPath) { $InstallerPath = Join-Path $desktopRoot "out\release\Salcara-Desktop-$version-win32-x64-setup.exe" }
-if (-not $PayloadPath) { $PayloadPath = Join-Path $desktopRoot 'out\Salcara Bridge-win32-x64' }
-$InstallerPath = (Get-Item -LiteralPath $InstallerPath).FullName
-$PayloadPath = (Get-Item -LiteralPath $PayloadPath).FullName
+if (-not $ProfileOnly) {
+  if (-not $InstallerPath) { $InstallerPath = Join-Path $desktopRoot "out\release\Salcara-Desktop-$version-win32-x64-setup.exe" }
+  if (-not $PayloadPath) { $PayloadPath = Join-Path $desktopRoot 'out\Salcara Bridge-win32-x64' }
+  $InstallerPath = (Get-Item -LiteralPath $InstallerPath).FullName
+  $PayloadPath = (Get-Item -LiteralPath $PayloadPath).FullName
+}
 $runnerTemp = (Get-Item -LiteralPath $env:RUNNER_TEMP).FullName
 $FixtureRoot = Join-Path $runnerTemp ('salcara-install-smoke-' + [Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $FixtureRoot | Out-Null
@@ -228,23 +235,13 @@ try {
   $account = New-LocalUser -Name $taskUser -Password $securePassword -AccountNeverExpires -PasswordNeverExpires -Description 'Disposable Salcara installer CI test'
   $usersGroup = Get-LocalGroup -SID ([Security.Principal.SecurityIdentifier]::new('S-1-5-32-545'))
   Add-LocalGroupMember -Group $usersGroup -Member $account
-  # Create the profile before launching a .NET host, so its shell-folder cache
-  # cannot initialize using the parent runner's inherited profile environment.
-  Add-Type -TypeDefinition @'
-using System;
-using System.Runtime.InteropServices;
-using System.Text;
-public static class SalcaraInstallerTestProfile {
-    [DllImport("userenv.dll", CharSet = CharSet.Unicode)]
-    public static extern int CreateProfile(string sid, string name, StringBuilder path, uint length);
-}
-'@
-  $profileBuffer = [Text.StringBuilder]::new(1024)
-  $profileStatus = [SalcaraInstallerTestProfile]::CreateProfile($account.SID.Value, $taskUser, $profileBuffer, 1024)
-  Assert-Condition ($profileStatus -eq 0) 'The disposable profile could not be created'
-  $taskProfile = [IO.Path]::GetFullPath($profileBuffer.ToString())
+  # LoadUserProfile creates the new account's profile before running the
+  # worker. Set its expected environment before .NET caches shell folders;
+  # the worker then verifies this path against the system's actual SID entry.
   $usersRoot = [IO.Path]::GetFullPath((Join-Path $env:SystemDrive 'Users'))
-  Assert-Condition ([IO.Path]::GetDirectoryName($taskProfile) -eq $usersRoot -and [IO.Path]::GetFileName($taskProfile) -eq $taskUser) 'The newly created profile escaped the disposable account'
+  $taskProfile = Join-Path $usersRoot $taskUser
+  Assert-Condition (-not (Test-Path -LiteralPath $taskProfile)) 'The random disposable profile path already exists'
+  Assert-Condition (-not (Test-Path -LiteralPath ('HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\' + $account.SID.Value))) 'The new account already has a profile registration'
   $taskLocal = Join-Path $taskProfile 'AppData\Local'
   $workerEnvironment = @{
     USERPROFILE = $taskProfile
@@ -262,16 +259,19 @@ public static class SalcaraInstallerTestProfile {
   $acl.AddAccessRule($rule)
   Set-Acl -LiteralPath $FixtureRoot -AclObject $acl
   [IO.File]::WriteAllText((Join-Path $FixtureRoot '.salcara-installer-smoke'), $account.SID.Value)
-  Copy-Item -LiteralPath $InstallerPath -Destination (Join-Path $FixtureRoot 'setup.exe')
   Copy-Item -LiteralPath $PSCommandPath -Destination (Join-Path $FixtureRoot 'worker.ps1')
-  $names = @('Salcara Bridge.exe', 'resources/app.asar', 'resources/SalcaraBridge.exe', 'resources/SalcaraProbeNode.exe',
-    'resources/desktop-companion/src/stdio.mjs', 'resources/NODE-LICENSE.txt', 'resources/GO-THIRD-PARTY-NOTICES.txt', '.salcara-install.json')
-  $files = @($names | ForEach-Object { @{ name = $_; sha256 = (Get-FileHash -LiteralPath (Join-Path $PayloadPath $_) -Algorithm SHA256).Hash.ToLowerInvariant() } })
-  [IO.File]::WriteAllText((Join-Path $FixtureRoot 'expected.json'), (@{ version = $version; files = $files } | ConvertTo-Json -Depth 5))
+  if (-not $ProfileOnly) {
+    Copy-Item -LiteralPath $InstallerPath -Destination (Join-Path $FixtureRoot 'setup.exe')
+    $names = @('Salcara Bridge.exe', 'resources/app.asar', 'resources/SalcaraBridge.exe', 'resources/SalcaraProbeNode.exe',
+      'resources/desktop-companion/src/stdio.mjs', 'resources/NODE-LICENSE.txt', 'resources/GO-THIRD-PARTY-NOTICES.txt', '.salcara-install.json', 'resources/README.md', 'resources/docs/USER-GUIDE.zh.md')
+    $files = @($names | ForEach-Object { @{ name = $_; sha256 = (Get-FileHash -LiteralPath (Join-Path $PayloadPath $_) -Algorithm SHA256).Hash.ToLowerInvariant() } })
+    [IO.File]::WriteAllText((Join-Path $FixtureRoot 'expected.json'), (@{ version = $version; files = $files } | ConvertTo-Json -Depth 5))
+  }
   $credential = [Management.Automation.PSCredential]::new($env:COMPUTERNAME + '\' + $taskUser, $securePassword)
   Assert-Condition ($PSVersionTable.PSVersion -ge [version]'7.4') 'The isolated worker requires Start-Process Environment support'
   $powershell = Join-Path $PSHOME 'pwsh.exe'
   $arguments = '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + (Join-Path $FixtureRoot 'worker.ps1') + '" -Mode Worker -FixtureRoot "' + $FixtureRoot + '" -ExpectedSid "' + $account.SID.Value + '" -ExpectedUser "' + $taskUser + '"'
+  if ($ProfileOnly) { $arguments += ' -ProfileOnly' }
   $worker = Start-Process -FilePath $powershell -ArgumentList $arguments -Credential $credential -LoadUserProfile -Environment $workerEnvironment -WorkingDirectory $FixtureRoot -WindowStyle Hidden -PassThru -Wait -RedirectStandardOutput (Join-Path $FixtureRoot 'worker.stdout.log') -RedirectStandardError (Join-Path $FixtureRoot 'worker.stderr.log')
   $resultFile = Join-Path $FixtureRoot 'result.json'
   Assert-Condition (Test-Path -LiteralPath $resultFile -PathType Leaf) 'The isolated worker did not produce a result'
