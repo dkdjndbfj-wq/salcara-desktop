@@ -20,3 +20,5 @@ GitHub repository secret：`SALCARA_DESKTOP_UPDATE_PRIVATE_KEY`。手动运行 `
 - Windows 合成替换/回滚与签名回归通过，真实 Electron A/B 升级还需验收。Mac/Linux 本次不提供安装包，未声称实机验证。
 
 详细改动与准确验证：[PUBLISH-20261004.md](PUBLISH-20261004.md)。
+
+发布大包不必依赖发布者电脑的下载速度：构建成功后手动运行 `Verify prior Windows build and stage release`，填写原 `desktop-release.yml` 成功 run ID 与 exact source SHA。该流程下载原产物，检查实际 hash、原源码公钥签名、归档安全规则和完整 ZIP，再创建 draft；不能选择其它 workflow 的 artifact、不重建或覆盖已签版本。发布者最后确认 draft 的源码 / assets metadata 后公开。若已存在同标签，流程拒绝创建，不使用 `--clobber` 覆盖。
