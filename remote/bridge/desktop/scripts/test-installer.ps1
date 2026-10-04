@@ -3,7 +3,8 @@ param(
   [string]$InstallerPath,
   [string]$PayloadPath,
   [string]$FixtureRoot,
-  [string]$ExpectedSid
+  [string]$ExpectedSid,
+  [string]$ExpectedUser
 )
 
 $ErrorActionPreference = 'Stop'
@@ -32,29 +33,63 @@ function Remove-FixtureTree([string]$Directory) {
   Remove-Item -LiteralPath $Directory -Force
 }
 
-if ($Mode -eq 'Worker') {
-  $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
-  Assert-Condition ($ExpectedSid -match '^S-1-5-21-(\d+-){3}\d+$' -and $identity.User.Value -eq $ExpectedSid) 'The smoke worker must use the disposable account'
-  $FixtureRoot = [IO.Path]::GetFullPath($FixtureRoot)
-  $identityFile = Join-Path $FixtureRoot '.salcara-installer-smoke'
-  Assert-Condition (([IO.File]::ReadAllText($identityFile)).Trim() -eq $ExpectedSid) 'Invalid isolated fixture identity'
-  $profile = [Environment]::GetFolderPath('UserProfile')
-  $roaming = [Environment]::GetFolderPath('ApplicationData')
-  $local = [Environment]::GetFolderPath('LocalApplicationData')
-  Assert-Condition ([IO.Path]::GetFileName($profile) -like 'SalcaraCI_*') 'The worker profile must be disposable'
-  foreach ($folder in @($roaming, $local)) {
-    Assert-Condition ($folder.StartsWith($profile + '\', [StringComparison]::OrdinalIgnoreCase)) 'Known folders escaped the disposable profile'
+function Write-SmokeDiagnostics([string]$Directory) {
+  # These files only contain the disposable worker's output and installer
+  # logs. Never inspect the runner's AppData or print credential objects.
+  $remaining = 4000
+  $names = @('worker.stderr.log', 'worker.stdout.log')
+  $lastInstaller = Get-ChildItem -LiteralPath $Directory -Filter 'installer-*.log' -File | Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1
+  if ($lastInstaller) { $names += $lastInstaller.Name }
+  foreach ($name in $names) {
+    $file = Join-Path $Directory $name
+    if (Test-Path -LiteralPath $file -PathType Leaf) {
+      $item = Get-Item -LiteralPath $file
+      if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { continue }
+      if ($name -like 'installer-*.log') {
+        $message = (Get-Content -LiteralPath $file -Tail 24) -join "`n"
+      } else { $message = [IO.File]::ReadAllText($file) }
+      $message = $message -replace '[\x00-\x08\x0B\x0C\x0E-\x1F]', '?'
+      $bytes = [Text.Encoding]::UTF8.GetBytes($message)
+      $prefix = $name + ': '
+      $available = $remaining - [Text.Encoding]::UTF8.GetByteCount($prefix) - 2
+      if ($available -le 0) { break }
+      if ($bytes.Length -gt $available) { $message = [Text.Encoding]::UTF8.GetString($bytes, 0, $available) }
+      if ($message) { Write-Output ($prefix + $message) }
+      $remaining -= [Text.Encoding]::UTF8.GetByteCount($prefix + $message) + 2
+      if ($remaining -le 0) { break }
+    }
   }
-  # CreateProcessWithLogonW can inherit the parent environment. Replace only
-  # this worker's process environment with its own token's known folders.
-  $env:USERPROFILE = $profile
-  $env:APPDATA = $roaming
-  $env:LOCALAPPDATA = $local
-  $env:TEMP = Join-Path $local 'Temp'
-  $env:TMP = $env:TEMP
-  New-Item -ItemType Directory -Path $env:TEMP -Force | Out-Null
+}
 
+if ($Mode -eq 'Worker') {
+  $canReport = $false
   try {
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    Assert-Condition ($ExpectedSid -match '^S-1-5-21-(\d+-){3}\d+$' -and $identity.User.Value -eq $ExpectedSid) 'The smoke worker must use the disposable account'
+    Assert-Condition ($ExpectedUser -match '^SalcaraCI_[a-f0-9]{8}$' -and $identity.Name.Split('\')[-1] -eq $ExpectedUser) 'Unexpected disposable account name'
+    $FixtureRoot = [IO.Path]::GetFullPath($FixtureRoot)
+    $fixture = Get-Item -LiteralPath $FixtureRoot
+    Assert-Condition ($fixture.Name -match '^salcara-install-smoke-[a-f0-9]{32}$' -and ($fixture.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0) 'Invalid isolated fixture path'
+    $identityFile = Join-Path $FixtureRoot '.salcara-installer-smoke'
+    Assert-Condition (([IO.File]::ReadAllText($identityFile)).Trim() -eq $ExpectedSid) 'Invalid isolated fixture identity'
+    $canReport = $true
+    # USERPROFILE inherited by CreateProcessWithLogonW is not authoritative.
+    # The profile associated with this token's SID is the system-owned source.
+    $profileKey = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\' + $ExpectedSid
+    $profile = [IO.Path]::GetFullPath((Get-ItemProperty -LiteralPath $profileKey).ProfileImagePath)
+    $usersRoot = [IO.Path]::GetFullPath((Join-Path $env:SystemDrive 'Users'))
+    Assert-Condition ([IO.Path]::GetDirectoryName($profile) -eq $usersRoot -and [IO.Path]::GetFileName($profile) -eq $ExpectedUser) 'The token profile must be the exact disposable account profile'
+    $profileItem = Get-Item -LiteralPath $profile
+    Assert-Condition (($profileItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0) 'The disposable profile cannot be a reparse directory'
+    $env:USERPROFILE = $profile
+    $env:APPDATA = Join-Path $profile 'AppData\Roaming'
+    $env:LOCALAPPDATA = Join-Path $profile 'AppData\Local'
+    $env:TEMP = Join-Path $env:LOCALAPPDATA 'Temp'
+    $env:TMP = $env:TEMP
+    $roaming = [Environment]::GetFolderPath('ApplicationData')
+    $local = [Environment]::GetFolderPath('LocalApplicationData')
+    Assert-Condition ([IO.Path]::GetFullPath($roaming) -eq $env:APPDATA -and [IO.Path]::GetFullPath($local) -eq $env:LOCALAPPDATA) 'Token known folders do not agree with the isolated profile'
+    New-Item -ItemType Directory -Path $env:TEMP -Force | Out-Null
     $expected = Get-Content -LiteralPath (Join-Path $FixtureRoot 'expected.json') -Raw | ConvertFrom-Json
     $setup = Join-Path $FixtureRoot 'setup.exe'
     $root = Join-Path $local 'Programs\Salcara Desktop'
@@ -151,7 +186,10 @@ if ($Mode -eq 'Worker') {
     Assert-Condition ($running.Count -eq 0) 'Silent smoke launched an application'
     [IO.File]::WriteAllText((Join-Path $FixtureRoot 'result.json'), (@{ passed = $true; version = $expected.version; profile = $profile; appLaunched = $false } | ConvertTo-Json -Compress))
   } catch {
-    [IO.File]::WriteAllText((Join-Path $FixtureRoot 'result.json'), (@{ passed = $false; error = $_.Exception.Message } | ConvertTo-Json -Compress))
+    if ($canReport) {
+      [IO.File]::WriteAllText((Join-Path $FixtureRoot 'result.json'), (@{ passed = $false; error = $_.Exception.Message } | ConvertTo-Json -Compress))
+    }
+    [Console]::Error.WriteLine('Isolated smoke worker: ' + $_.Exception.Message)
     exit 1
   }
   exit 0
@@ -173,6 +211,7 @@ $FixtureRoot = Join-Path $runnerTemp ('salcara-install-smoke-' + [Guid]::NewGuid
 New-Item -ItemType Directory -Path $FixtureRoot | Out-Null
 $taskUser = 'SalcaraCI_' + [Guid]::NewGuid().ToString('N').Substring(0, 8)
 $account = $null
+$smokeSucceeded = $false
 try {
   $bytes = New-Object byte[] 32
   $random = [Security.Cryptography.RandomNumberGenerator]::Create()
@@ -194,20 +233,22 @@ try {
   [IO.File]::WriteAllText((Join-Path $FixtureRoot 'expected.json'), (@{ version = $version; files = $files } | ConvertTo-Json -Depth 5))
   $credential = [Management.Automation.PSCredential]::new($env:COMPUTERNAME + '\' + $taskUser, $securePassword)
   $powershell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
-  $arguments = '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + (Join-Path $FixtureRoot 'worker.ps1') + '" -Mode Worker -FixtureRoot "' + $FixtureRoot + '" -ExpectedSid "' + $account.SID.Value + '"'
-  $worker = Start-Process -FilePath $powershell -ArgumentList $arguments -Credential $credential -LoadUserProfile -WindowStyle Hidden -PassThru -Wait
+  $arguments = '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + (Join-Path $FixtureRoot 'worker.ps1') + '" -Mode Worker -FixtureRoot "' + $FixtureRoot + '" -ExpectedSid "' + $account.SID.Value + '" -ExpectedUser "' + $taskUser + '"'
+  $worker = Start-Process -FilePath $powershell -ArgumentList $arguments -Credential $credential -LoadUserProfile -WindowStyle Hidden -PassThru -Wait -RedirectStandardOutput (Join-Path $FixtureRoot 'worker.stdout.log') -RedirectStandardError (Join-Path $FixtureRoot 'worker.stderr.log')
   $resultFile = Join-Path $FixtureRoot 'result.json'
   Assert-Condition (Test-Path -LiteralPath $resultFile -PathType Leaf) 'The isolated worker did not produce a result'
   $result = Get-Content -LiteralPath $resultFile -Raw | ConvertFrom-Json
   if ($worker.ExitCode -ne 0 -or -not $result.passed) { throw ('Installer smoke failed: ' + $result.error) }
+  $smokeSucceeded = $true
   Write-Output ($result | ConvertTo-Json -Compress)
 } finally {
+  if (-not $smokeSucceeded) { Write-SmokeDiagnostics $FixtureRoot }
   if ($account) {
     $profile = Get-CimInstance Win32_UserProfile -Filter ("SID='" + $account.SID.Value + "'")
     if ($profile) {
       $profilePath = [IO.Path]::GetFullPath($profile.LocalPath)
       $usersRoot = [IO.Path]::GetFullPath((Join-Path $env:SystemDrive 'Users'))
-      Assert-Condition (-not $profile.Special -and [IO.Path]::GetDirectoryName($profilePath) -eq $usersRoot -and [IO.Path]::GetFileName($profilePath).StartsWith($taskUser, [StringComparison]::OrdinalIgnoreCase)) 'Refusing to remove an unexpected user profile'
+      Assert-Condition (-not $profile.Special -and [IO.Path]::GetDirectoryName($profilePath) -eq $usersRoot -and [IO.Path]::GetFileName($profilePath) -eq $taskUser) 'Refusing to remove an unexpected user profile'
       Assert-Condition (-not $profile.Loaded) 'The disposable worker profile is still loaded'
       Remove-CimInstance -InputObject $profile
     }

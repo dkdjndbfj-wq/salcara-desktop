@@ -29,6 +29,7 @@
 
 - Windows desktop Node：42 项，41 pass，0 fail，1 POSIX e2e skip；含完整合成 Windows swap/rollback，外层卸载器保留。
 - Windows companion：93 pass，0 fail/skip。
+- Windows Bridge：与既有发布相同的 `-short` + 五项平台断言排除测试通过，`go vet ./...` 通过；没有修改 Go 运行源码。
 - 本机未安装 ISCC，真实 setup 编译/安装器执行由 Windows CI 验证，未在本机安装覆盖正式 App。
 - CodeRabbit 审查技能：CLI 缺失后尝试官方安装命令，返回 `Unsupported operating system: mingw64_nt-10.0-26200`。没有启动审查、没有结果，不以手工审查替代或声称其通过；需要受支持的 Linux/macOS 环境安装、登录后才能补做。
 
@@ -38,4 +39,11 @@
 
 不能把安装器 smoke、合成进程或 CI build 当真实 Codex/Claude/手机全链路或真实 Electron A/B 更新验收。setup 没有 Windows Authenticode 签名；此版本不声称消除了全部隐藏问题。
 
-CI 与正式资产结果在实际完成后追加。
+## GitHub 首轮结果
+
+- 提交 `f9f5acd27c6f2f261267c72ffab4a73f5c2a8c57`。
+- Linux source-check `37198632957` 成功：desktop、companion、Go short 单元、vet、race。
+- Windows build `37198628697`：全部源码测试/vet、完整 Electron 构建、真实 Inno Setup 编译成功；隔离用户 smoke 失败，worker 未生成结果。流程拒绝签发上传或正式发布，未把“编译成功”写为“安装验收成功”。
+- 后续修复首先补隔离 worker 的诊断及初始化失败返回，不绕过账户隔离或直接在真实用户环境安装。
+
+后续 CI 与正式资产结果在实际完成后追加。
