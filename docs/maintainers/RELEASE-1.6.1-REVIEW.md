@@ -52,3 +52,5 @@
 Git HTTPS 上传中一次连接重置导致调度到旧提交，Windows run `37199152820` 已取消，不计作新补丁验收；源码通过官方 Git database API 保持精确 SHA 和非强制 fast-forward 后，才调度上述第二轮。重复旧源码 Linux run 不替代新源码验收。
 
 后续 CI 与正式资产结果在实际完成后追加。
+
+第三轮 `37201878907` / 提交 `41822ad5a3d835f22012dd2de7c33360e7ba050a`：编译成功，隔离 worker 的 known folders 与新用户 profile 不一致，安装仍未开始、未签发或发布。Linux `37201882251` 成功。测试启动修复为先调用 Windows `CreateProfile` 创建一次性 profile，再通过 PowerShell 7.4+ `Start-Process -Environment` 在进程启动前传入该用户的环境；保持 SID、注册 profile、known folders 的一致性校验。该参数默认不会自动为不同凭据切换继承的用户环境，参考 [Microsoft Start-Process 文档](https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.management/start-process?view=powershell-7.5) 与 [CreateProfile](https://learn.microsoft.com/en-us/windows/win32/api/userenv/nf-userenv-createprofile)。

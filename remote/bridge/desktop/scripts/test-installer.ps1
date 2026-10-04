@@ -92,7 +92,7 @@ if ($Mode -eq 'Worker') {
     $roaming = [Environment]::GetFolderPath('ApplicationData', [Environment+SpecialFolderOption]::DoNotVerify)
     $local = [Environment]::GetFolderPath('LocalApplicationData', [Environment+SpecialFolderOption]::DoNotVerify)
     Assert-Condition (-not [string]::IsNullOrWhiteSpace($roaming) -and -not [string]::IsNullOrWhiteSpace($local)) 'The disposable profile has no registered AppData folders'
-    Assert-Condition ([IO.Path]::GetFullPath($roaming) -eq $env:APPDATA -and [IO.Path]::GetFullPath($local) -eq $env:LOCALAPPDATA) 'Token known folders do not agree with the isolated profile'
+    Assert-Condition ([IO.Path]::GetFullPath($roaming) -eq $env:APPDATA -and [IO.Path]::GetFullPath($local) -eq $env:LOCALAPPDATA) ('Token known folders do not agree with the isolated profile: profile=' + $profile + '; roaming=' + $roaming + '; local=' + $local)
     New-Item -ItemType Directory -Path $env:APPDATA -Force | Out-Null
     New-Item -ItemType Directory -Path $env:LOCALAPPDATA -Force | Out-Null
     Assert-Condition ([Environment]::GetFolderPath('ApplicationData') -eq $roaming -and [Environment]::GetFolderPath('LocalApplicationData') -eq $local) 'Created token known folders do not agree with the isolated profile'
@@ -228,6 +228,35 @@ try {
   $account = New-LocalUser -Name $taskUser -Password $securePassword -AccountNeverExpires -PasswordNeverExpires -Description 'Disposable Salcara installer CI test'
   $usersGroup = Get-LocalGroup -SID ([Security.Principal.SecurityIdentifier]::new('S-1-5-32-545'))
   Add-LocalGroupMember -Group $usersGroup -Member $account
+  # Create the profile before launching a .NET host, so its shell-folder cache
+  # cannot initialize using the parent runner's inherited profile environment.
+  Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+using System.Text;
+public static class SalcaraInstallerTestProfile {
+    [DllImport("userenv.dll", CharSet = CharSet.Unicode)]
+    public static extern int CreateProfile(string sid, string name, StringBuilder path, uint length);
+}
+'@
+  $profileBuffer = [Text.StringBuilder]::new(1024)
+  $profileStatus = [SalcaraInstallerTestProfile]::CreateProfile($account.SID.Value, $taskUser, $profileBuffer, 1024)
+  Assert-Condition ($profileStatus -eq 0) 'The disposable profile could not be created'
+  $taskProfile = [IO.Path]::GetFullPath($profileBuffer.ToString())
+  $usersRoot = [IO.Path]::GetFullPath((Join-Path $env:SystemDrive 'Users'))
+  Assert-Condition ([IO.Path]::GetDirectoryName($taskProfile) -eq $usersRoot -and [IO.Path]::GetFileName($taskProfile) -eq $taskUser) 'The newly created profile escaped the disposable account'
+  $taskLocal = Join-Path $taskProfile 'AppData\Local'
+  $workerEnvironment = @{
+    USERPROFILE = $taskProfile
+    APPDATA = (Join-Path $taskProfile 'AppData\Roaming')
+    LOCALAPPDATA = $taskLocal
+    TEMP = (Join-Path $taskLocal 'Temp')
+    TMP = (Join-Path $taskLocal 'Temp')
+    USERNAME = $taskUser
+    USERDOMAIN = $env:COMPUTERNAME
+    HOMEDRIVE = [IO.Path]::GetPathRoot($taskProfile).TrimEnd('\')
+    HOMEPATH = $taskProfile.Substring([IO.Path]::GetPathRoot($taskProfile).Length - 1)
+  }
   $acl = Get-Acl -LiteralPath $FixtureRoot
   $rule = [Security.AccessControl.FileSystemAccessRule]::new($account.SID, 'Modify', 'ContainerInherit,ObjectInherit', 'None', 'Allow')
   $acl.AddAccessRule($rule)
@@ -240,9 +269,10 @@ try {
   $files = @($names | ForEach-Object { @{ name = $_; sha256 = (Get-FileHash -LiteralPath (Join-Path $PayloadPath $_) -Algorithm SHA256).Hash.ToLowerInvariant() } })
   [IO.File]::WriteAllText((Join-Path $FixtureRoot 'expected.json'), (@{ version = $version; files = $files } | ConvertTo-Json -Depth 5))
   $credential = [Management.Automation.PSCredential]::new($env:COMPUTERNAME + '\' + $taskUser, $securePassword)
-  $powershell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+  Assert-Condition ($PSVersionTable.PSVersion -ge [version]'7.4') 'The isolated worker requires Start-Process Environment support'
+  $powershell = Join-Path $PSHOME 'pwsh.exe'
   $arguments = '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + (Join-Path $FixtureRoot 'worker.ps1') + '" -Mode Worker -FixtureRoot "' + $FixtureRoot + '" -ExpectedSid "' + $account.SID.Value + '" -ExpectedUser "' + $taskUser + '"'
-  $worker = Start-Process -FilePath $powershell -ArgumentList $arguments -Credential $credential -LoadUserProfile -WindowStyle Hidden -PassThru -Wait -RedirectStandardOutput (Join-Path $FixtureRoot 'worker.stdout.log') -RedirectStandardError (Join-Path $FixtureRoot 'worker.stderr.log')
+  $worker = Start-Process -FilePath $powershell -ArgumentList $arguments -Credential $credential -LoadUserProfile -Environment $workerEnvironment -WorkingDirectory $FixtureRoot -WindowStyle Hidden -PassThru -Wait -RedirectStandardOutput (Join-Path $FixtureRoot 'worker.stdout.log') -RedirectStandardError (Join-Path $FixtureRoot 'worker.stderr.log')
   $resultFile = Join-Path $FixtureRoot 'result.json'
   Assert-Condition (Test-Path -LiteralPath $resultFile -PathType Leaf) 'The isolated worker did not produce a result'
   $result = Get-Content -LiteralPath $resultFile -Raw | ConvertFrom-Json
