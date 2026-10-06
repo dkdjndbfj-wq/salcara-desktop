@@ -10,13 +10,14 @@ function fromMain(event, win, consoleURL) {
   } catch { return false; }
 }
 
-function registerWindowIpc({ ipcMain, dialog, getWindow, consoleURL, fromSplash, hide, hideSplash, path }) {
+function registerWindowIpc({ ipcMain, dialog, getWindow, consoleURL, fromSplash, hide, hideSplash, path, closeUpdate = () => false }) {
   let choosing = null;
   ipcMain.on('win:minimize', event => {
     const win = getWindow();
     if ((fromMain(event, win, consoleURL) || fromSplash(event)) && win && !win.isDestroyed()) win.minimize();
   });
   ipcMain.on('win:close', event => {
+    if (closeUpdate(event)) return;
     if (fromMain(event, getWindow(), consoleURL)) hide();
     else if (fromSplash(event)) hideSplash();
   });

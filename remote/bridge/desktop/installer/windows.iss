@@ -47,7 +47,9 @@ Name: desktopicon; Description: "Create a desktop shortcut"; Flags: unchecked
 
 [Files]
 Source: "{#PayloadDir}\*"; DestDir: "{app}\app"; Flags: ignoreversion recursesubdirs createallsubdirs
-Source: "root.marker"; DestDir: "{app}"; DestName: ".salcara-installer"; Flags: ignoreversion
+; Recovery copies and updater staging survive uninstall. Keep their enclosing
+; product identity too, so a subsequent install does not treat them as foreign.
+Source: "root.marker"; DestDir: "{app}"; DestName: ".salcara-installer"; Flags: ignoreversion uninsneveruninstall
 
 [Icons]
 Name: "{userprograms}\Salcara Desktop"; Filename: "{app}\app\Salcara Bridge.exe"; WorkingDir: "{app}\app"
@@ -68,6 +70,7 @@ const
 var
   PayloadMoved: Boolean;
   InstallationCommitted: Boolean;
+  UninstallRootValidated: Boolean;
 
 function FileAttributes(Name: String): Cardinal;
   external 'GetFileAttributesW@kernel32.dll stdcall';
@@ -132,6 +135,57 @@ begin
           Result := False;
           Exit;
         end;
+      until not FindNext(Entry);
+    finally
+      FindClose(Entry);
+    end;
+end;
+
+function IsLegacyRecoveryName(Name: String): Boolean;
+var
+  I, J: Integer;
+  Parts: TArrayOfString;
+begin
+  Result := (Name = '.app.update') or (Name = '.salcara-setup-recovery');
+  if Result then Exit;
+  // New updaters retain unmarked legacy staging under a non-colliding name.
+  // A client upgraded by tar may still have the old uninstall log.
+  if Copy(Name, 1, 18) = '.app.update.saved-' then begin
+    Parts := StringSplit(Name, ['-'], stAll);
+    if (GetArrayLength(Parts) <> 3) or (Length(Parts[1]) < 1) or
+      (Length(Parts[1]) > 16) or (Length(Parts[2]) <> 8) then Exit;
+    for I := 1 to Length(Parts[1]) do
+      if (Parts[1][I] < '0') or (Parts[1][I] > '9') then Exit;
+    for J := 1 to Length(Parts[2]) do
+      if Pos(Parts[2][J], '0123456789abcdef') = 0 then Exit;
+    Result := True;
+    Exit;
+  end;
+  if Copy(Name, 1, 8) <> 'app.old-' then Exit;
+  if (Length(Name) < 9) or (Length(Name) > 24) then Exit;
+  for I := 9 to Length(Name) do
+    if (Name[I] < '0') or (Name[I] > '9') then Exit;
+  Result := True;
+end;
+
+function IsLegacyUninstalledRoot(Root: String): Boolean;
+var
+  Entry: TFindRec;
+begin
+  // 1.6.1/1.6.2 removed the root marker on uninstall but kept recovery data.
+  // Only accept non-colliding directory names. Do not read, overwrite, remove
+  // or claim ownership of their contents; an arbitrary app/file still fails.
+  Result := True;
+  if FindFirst(Root + '\*', Entry) then
+    try
+      repeat
+        if (Entry.Name <> '.') and (Entry.Name <> '..') then
+          if not IsLegacyRecoveryName(Entry.Name) or
+            ((Entry.Attributes and FileAttributeDirectory) = 0) or
+            ((Entry.Attributes and FileAttributeReparsePoint) <> 0) then begin
+            Result := False;
+            Exit;
+          end;
       until not FindNext(Entry);
     finally
       FindClose(Entry);
@@ -238,13 +292,15 @@ begin
     Exit;
   end;
   if not RootOwned(Root) then begin
-    if Uninstalling or not IsEmptyDirectory(Root) then
+    if Uninstalling or not IsLegacyUninstalledRoot(Root) then
       Result := 'This directory is not owned by the Salcara installer.';
+    if Result = '' then Log('Preserving legacy uninstalled recovery directories without modifying them.');
     Exit;
   end;
   if not Uninstalling then
-    if FileExists(Root + '\.salcara-setup-recovery') or
-      DirExists(Root + '\.salcara-setup-recovery') then begin
+    if DirExists(Root + '\app') and
+      (FileExists(Root + '\.salcara-setup-recovery') or
+      DirExists(Root + '\.salcara-setup-recovery')) then begin
       Result := 'A previous installer recovery copy exists. Keep it for recovery before reinstalling.';
       Exit;
     end;
@@ -371,6 +427,7 @@ begin
   if CurUninstallStep = usUninstall then begin
     Root := ExpandConstant('{app}'); Error := CheckInstallation(Root, True);
     if Error <> '' then RaiseException(Error);
+    UninstallRootValidated := True;
     if DirExists(Root + '\app') then
       if not RemovePayload(Root + '\app') then
         RaiseException('The application files could not be removed. No process was stopped.');
@@ -381,5 +438,15 @@ begin
         RegDeleteValue(HKCU, 'Software\Microsoft\Windows\CurrentVersion\Run', 'SalcaraBridge');
     // Do not remove AppData, configuration overrides, Agent installations,
     // user-added files in the parent, update staging or recovery backups.
+  end;
+  if (CurUninstallStep = usPostUninstall) and UninstallRootValidated then begin
+    Root := ExpandConstant('{app}');
+    // An older appended Inno log can still remove the marker despite the new
+    // Files flag. Restore only the fixed, previously validated surviving root;
+    // never overwrite an unexpected marker or recreate a removed directory.
+    if IsFixedRoot(Root) and SafeParents(Root) and DirExists(Root) and
+      (FileAttributes(Root + '\.salcara-installer') = InvalidAttributes) then
+      if not SaveStringToFile(Root + '\.salcara-installer', RootIdentity + #13#10, False) then
+        Log('Recovery directory identity could not be retained.');
   end;
 end;

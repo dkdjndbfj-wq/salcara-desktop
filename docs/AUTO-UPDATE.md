@@ -6,6 +6,8 @@
 
 自 1.6.0 起，正式客户端固定使用 `dkdjndbfj-wq/salcara-desktop` 与 package.json 中的 Ed25519 公钥；1.6.2 保持不变。未配置公钥/通道的早期开发版需手动首次安装。
 
+1.6.3 沿用同一身份，修复 Windows helper 交接和卸载后重装。旧版更新器本身无法由尚未安装的新包修复；1.6.1 / 1.6.2 若内置更新失败，先手动运行新 setup。细节与测试边界见 [1.6.3 修复记录](maintainers/RELEASE-1.6.3-REPAIR.md)。检查周期为 2 小时，提示和下载不停止任务，仅显式安装经过 idle/admission 检查。
+
 发布私钥只在仓库外或 GitHub repository secret `SALCARA_DESKTOP_UPDATE_PRIVATE_KEY` 保存。不要运行 keygen 来替换已有身份，不要提交、打印或写入日志。更新签名不是 Windows Authenticode 证书或 macOS notarization。
 
 ## 发布步骤

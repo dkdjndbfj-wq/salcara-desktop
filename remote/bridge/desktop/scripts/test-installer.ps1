@@ -172,28 +172,44 @@ if ($Mode -eq 'Worker') {
     $backup = Join-Path $root 'app.old-123'
     New-Item -ItemType Directory -Path $backup -Force | Out-Null
     [IO.File]::WriteAllText((Join-Path $backup 'retain.txt'), 'recovery-copy')
+    $updateStage = Join-Path $root '.app.update'
+    $partialResources = Join-Path $updateStage 'app\resources'
+    New-Item -ItemType Directory -Path $partialResources -Force | Out-Null
+    [IO.File]::WriteAllText((Join-Path $partialResources 'app.asar'), 'interrupted-updater-payload')
     New-Item -Path $runKey -Force | Out-Null
     $ownedRun = '"' + $exe + '" --background'
     New-ItemProperty -LiteralPath $runKey -Name 'SalcaraBridge' -Value $ownedRun -PropertyType String -Force | Out-Null
     Assert-Condition ((Start-Installer $uninstall) -eq 0) 'Uninstall failed'
     Assert-Condition (-not (Test-Path -LiteralPath $app)) 'Uninstall retained an update-added payload file'
     Assert-Condition (-not (Test-Path -LiteralPath $uninstallKey)) 'Uninstall retained its registration'
+    Assert-Condition (Test-Path -LiteralPath (Join-Path $root '.salcara-installer') -PathType Leaf) 'Uninstall lost the recovery directory identity'
     Assert-Condition (-not (Get-ItemProperty -LiteralPath $runKey).PSObject.Properties['SalcaraBridge']) 'Owned autostart value was retained'
     Assert-Condition (([IO.File]::ReadAllText((Join-Path $root 'retain-parent-file.txt'))) -eq 'not-application-payload') 'Uninstall removed a parent file'
     Assert-Condition (([IO.File]::ReadAllText((Join-Path $backup 'retain.txt'))) -eq 'recovery-copy') 'Uninstall removed a recovery copy'
     Assert-Condition (([IO.File]::ReadAllText((Join-Path $setupRecovery 'retain.txt'))) -eq 'interrupted-installer-copy') 'Uninstall removed an installer recovery copy'
+    Assert-Condition (([IO.File]::ReadAllText((Join-Path $partialResources 'app.asar'))) -eq 'interrupted-updater-payload') 'Uninstall removed interrupted updater staging'
     foreach ($file in $configFiles) { Assert-Condition (([IO.File]::ReadAllText($file)) -eq '{"fixture":"retain-userdata"}') 'Uninstall changed user configuration' }
 
-    # A parent containing unrelated files is no longer owned after uninstall.
-    # Clear only the deliberately created sentinels before a fresh install.
-    Remove-Item -LiteralPath (Join-Path $root 'retain-parent-file.txt') -Force
-    Remove-FixtureTree $backup
-    Remove-FixtureTree $setupRecovery
-    Assert-Condition ((Start-Installer $setup) -eq 0) 'Fresh install after uninstall failed'
+    # No manual cleanup: failed-update staging, recovery copies and user-added
+    # parent files must survive uninstall AND permit an ordinary reinstall.
+    Assert-Condition ((Start-Installer $setup) -eq 0) 'Reinstall with retained updater/recovery data failed'
+    Assert-Condition (([IO.File]::ReadAllText((Join-Path $root 'retain-parent-file.txt'))) -eq 'not-application-payload') 'Reinstall removed a parent file'
+    Assert-Condition (([IO.File]::ReadAllText((Join-Path $partialResources 'app.asar'))) -eq 'interrupted-updater-payload') 'Reinstall removed update staging'
     $foreignRun = '"C:\Different Installation\Salcara Bridge.exe" --background'
     New-ItemProperty -LiteralPath $runKey -Name 'SalcaraBridge' -Value $foreignRun -PropertyType String -Force | Out-Null
     Assert-Condition ((Start-Installer $uninstall) -eq 0) 'Second uninstall failed'
     Assert-Condition ((Get-ItemProperty -LiteralPath $runKey).SalcaraBridge -eq $foreignRun) 'Uninstall removed another installation autostart value'
+    # Reproduce the released 1.6.1/1.6.2 uninstall bug: marker missing, staging
+    # retained. Unknown files still block adoption and are never overwritten.
+    Remove-Item -LiteralPath (Join-Path $root '.salcara-installer') -Force
+    Assert-Condition ((Start-Installer $setup) -ne 0) 'Installer adopted a markerless root with unrelated files'
+    Assert-Condition (([IO.File]::ReadAllText((Join-Path $root 'retain-parent-file.txt'))) -eq 'not-application-payload') 'Rejected legacy recovery changed a user file'
+    Move-Item -LiteralPath (Join-Path $root 'retain-parent-file.txt') -Destination (Join-Path $FixtureRoot 'retained-parent-file.txt')
+    Assert-Condition ((Start-Installer $setup) -eq 0) 'Legacy uninstalled root with updater remnants was not recovered'
+    Assert-Condition (([IO.File]::ReadAllText((Join-Path $partialResources 'app.asar'))) -eq 'interrupted-updater-payload') 'Legacy recovery touched update staging'
+    Assert-Condition (([IO.File]::ReadAllText((Join-Path $backup 'retain.txt'))) -eq 'recovery-copy') 'Legacy recovery touched a backup'
+    Assert-Condition (([IO.File]::ReadAllText((Join-Path $setupRecovery 'retain.txt'))) -eq 'interrupted-installer-copy') 'Legacy recovery touched installer recovery'
+    Assert-Condition ((Start-Installer $uninstall) -eq 0) 'Legacy recovery uninstall failed'
     $running = @(Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -and $_.ExecutablePath.StartsWith($root + '\', [StringComparison]::OrdinalIgnoreCase) })
     Assert-Condition ($running.Count -eq 0) 'Silent smoke launched an application'
     [IO.File]::WriteAllText((Join-Path $FixtureRoot 'result.json'), (@{ passed = $true; version = $expected.version; profile = $profile; appLaunched = $false } | ConvertTo-Json -Compress))

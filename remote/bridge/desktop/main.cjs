@@ -216,8 +216,11 @@ function windowBackground() {
 }
 
 function registerIpc() {
+  const updateIpc = require('./update-ipc.cjs').registerUpdateIpc({ ipcMain, getWindow: () => updateWin,
+    updateURL: require('node:url').pathToFileURL(path.join(__dirname, 'update.html')).href, getUpdater, checkForUpdate });
   require('./window-ipc.cjs').registerWindowIpc({ ipcMain, dialog, getWindow: () => window, consoleURL, fromSplash, hide: hideToBall,
-    hideSplash: () => { closedDuringStart = true; if (window && !window.isDestroyed()) window.hide(); }, path });
+    hideSplash: () => { closedDuringStart = true; if (window && !window.isDestroyed()) window.hide(); }, path,
+    closeUpdate: event => { if (!updateIpc.allowed(event)) return false; updateIpc.close(event); return true; } });
   ipcMain.on('win:theme', (event, theme) => {
     if (!fromConsole(event) || !['system', 'light', 'dark'].includes(theme) || theme === readAppearance()) return;
     applyAppearance(theme);
@@ -245,16 +248,6 @@ function registerIpc() {
     return updateSummary();
   });
   ipcMain.on('update:open', (event) => { if (fromConsole(event)) openUpdateWindow(false); });
-  // The update window itself.
-  const fromUpdate = (event) => Boolean(updateWin) && !updateWin.isDestroyed() && event.sender === updateWin.webContents;
-  ipcMain.handle('upd:state', (event) => (fromUpdate(event) ? getUpdater().state() : null));
-  ipcMain.on('upd:check', (event) => { if (fromUpdate(event)) void checkForUpdate(true); });
-  ipcMain.on('upd:download', (event) => { if (fromUpdate(event)) void getUpdater().download(); });
-  ipcMain.on('upd:cancel', (event) => { if (fromUpdate(event)) getUpdater().cancel(); });
-  ipcMain.on('upd:install', (event) => { if (fromUpdate(event)) void getUpdater().install().catch((error) => console.error('update install failed:', error)); });
-  ipcMain.on('upd:skip', (event) => { if (fromUpdate(event)) { getUpdater().skip(); updateWin.close(); } });
-  ipcMain.on('upd:page', (event) => { if (fromUpdate(event)) getUpdater().openPage(); });
-  ipcMain.on('upd:later', (event) => { if (fromUpdate(event)) updateWin.close(); });
   // The local error page (file://loading.html) may ask for one more start attempt.
   ipcMain.on('core:retry', async (event) => {
     const url = event.senderFrame && event.senderFrame.url;
@@ -498,6 +491,7 @@ function updateTrayItems() {
   return [];
 }
 async function checkForUpdate(manual) {
+  getUpdater().cleanup();
   const st = await getUpdater().check(manual);
   // Found by the periodic check: open the window once per version, without taking focus, unless skipped.
   if (!manual && st.phase === 'available' && st.version && announced !== st.version && !getUpdater().skipped(st.version)) {
@@ -606,8 +600,9 @@ async function start() {
   if (startHidden || closedDuringStart || !window.isVisible()) showBall();
   getUpdater().cleanup();
   reportUpdateResult();
+  setTimeout(() => getUpdater().cleanup(), 5000);
   setTimeout(() => void checkForUpdate(false), 20000);
-  setInterval(() => void checkForUpdate(false), 6 * 3600 * 1000);
+  setInterval(() => void checkForUpdate(false), 2 * 3600 * 1000);
 }
 
 app.on('before-quit', () => {

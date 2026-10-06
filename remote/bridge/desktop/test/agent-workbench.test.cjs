@@ -161,6 +161,44 @@ function deferred() {
   return { promise, resolve };
 }
 
+test('Agent and API modal close buttons delegate immediately without launching or waiting for a backend', async () => {
+  for (const editor of [false, true]) {
+    const f = setup();
+    if (editor) vm.runInContext('localEditor(null)', f.context);
+    else {
+      f.S.local.bindings.codex.accountId = 'api-shared';
+      f.wbOpenModal('codex');
+    }
+    const button = f.modal.children.find(node => node.dataset.act === 'closeModal' && node.classList.contains('icon-btn'));
+    assert.ok(button, 'the actual modal template must expose its close control');
+    let prevented = false;
+    // Include a child target (SVG/text node wrapper), not only the button box.
+    const event = { target: { closest: selector => selector === '[data-act]' ? button : null }, preventDefault() { prevented = true; } };
+    for (const listener of f.document.listeners.get('click')) listener(event);
+    await Promise.resolve();
+    assert.equal(prevented, true);
+    assert.equal(f.modal.innerHTML, '');
+    assert.equal(f.calls.length, 0);
+    f.assertNoLaunch();
+  }
+});
+
+test('a late model response cannot restore an Agent modal after its close button is clicked', async () => {
+  const gate = deferred(), f = setup({ onModels: () => gate.promise });
+  f.S.local.bindings.codex.accountId = 'api-shared';
+  f.backend.bindings.codex.accountId = 'api-shared';
+  f.wbOpenModal('codex');
+  const load = vm.runInContext("wbLoadModels('codex', 'api-shared', true)", f.context);
+  const button = f.modal.children.find(node => node.dataset.act === 'closeModal' && node.classList.contains('icon-btn'));
+  const event = { target: { closest: selector => selector === '[data-act]' ? button : null }, preventDefault() {} };
+  for (const listener of f.document.listeners.get('click')) listener(event);
+  assert.equal(f.modal.innerHTML, '');
+  gate.resolve();
+  await load;
+  assert.equal(f.modal.innerHTML, '');
+  f.assertNoLaunch();
+});
+
 test('modal/editor layout and model rules remain stable after requested picker removal and shorter copy', () => {
   // Normalized-LF snapshots; the modal includes the requested compact copy.
   const snapshots = [

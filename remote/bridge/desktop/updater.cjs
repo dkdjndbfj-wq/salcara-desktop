@@ -28,6 +28,8 @@ const { validateArchive, assertPrivateTree } = require('./update-archive.cjs');
 const ED25519_SPKI_PREFIX = Buffer.from('302a300506032b6570032100', 'hex');
 const MAX_SMALL_ASSET = 256 * 1024;
 const MAX_ARCHIVE = 2 * 1024 * 1024 * 1024;
+const HELPER_READY_TIMEOUT = 10000;
+const STAGE_MARKER = '.salcara-update.json';
 
 /* ---------- pure helpers (unit tested) ---------- */
 function versionParts(v) { return String(v || '').replace(/^v/, '').split(/[.+-]/).slice(0, 3).map((x) => Number.parseInt(x, 10) || 0); }
@@ -79,41 +81,51 @@ function psQuote(s) { return `'${String(s).replace(/'/g, "''")}'`; }
 function shQuote(s) { return `'${String(s).replace(/'/g, "'\\''")}'`; }
 
 /** The detached script that swaps the folders once the app has quit. */
-function swapScript({ platform, pid, appDir, newDir, backupDir, launch, log, permit, receipt, token }) {
+function swapScript({ platform, pid, appDir, newDir, backupDir, launch, log, permit, receipt, token, ready }) {
   if (platform === 'win32') {
     return [
       "$ErrorActionPreference = 'Stop'",
-      `$app = ${psQuote(appDir)}; $new = ${psQuote(newDir)}; $bak = ${psQuote(backupDir)}; $exe = ${psQuote(launch)}; $log = ${psQuote(log)}; $permit = ${psQuote(permit || '')}; $receipt = ${psQuote(receipt || '')}; $token = ${psQuote(token || '')}`,
+      `$app = ${psQuote(appDir)}; $new = ${psQuote(newDir)}; $bak = ${psQuote(backupDir)}; $exe = ${psQuote(launch)}; $log = ${psQuote(log)}; $permit = ${psQuote(permit || '')}; $receipt = ${psQuote(receipt || '')}; $token = ${psQuote(token || '')}; $helperReady = ${psQuote(ready || '')}`,
       'function Log($m) { try { Add-Content -LiteralPath $log -Value ("{0:o} {1}" -f (Get-Date), $m) } catch {} }',
-      `try { Wait-Process -Id ${Number(pid)} -Timeout 60 -ErrorAction SilentlyContinue } catch {}`,
-      `if (Get-Process -Id ${Number(pid)} -ErrorAction SilentlyContinue) { Log 'original app did not exit; update skipped'; exit 1 }`,
-      "if (-not $permit -or -not (Test-Path -LiteralPath $permit) -or [IO.File]::ReadAllText($permit) -ne $token) { Log 'update not permitted'; exit 1 }",
       '$app = [IO.Path]::GetFullPath($app); $new = [IO.Path]::GetFullPath($new); $bak = [IO.Path]::GetFullPath($bak)',
       '$parent = [IO.Path]::GetDirectoryName($app); $stage = [IO.Path]::Combine($parent, "." + [IO.Path]::GetFileName($app) + ".update")',
-      'if (-not $parent -or -not $bak.StartsWith($app + ".old-", [StringComparison]::OrdinalIgnoreCase) -or -not $new.StartsWith($stage + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) { Log "unsafe update scope"; exit 1 }',
+      'if (-not $parent -or [IO.Path]::GetDirectoryName($bak) -ne $parent -or -not $bak.StartsWith($app + ".old-", [StringComparison]::OrdinalIgnoreCase) -or -not $new.StartsWith($stage + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) { Log "unsafe update scope"; exit 1 }',
+      // A Windows process holds its working directory open. Never inherit app\
+      // as the helper's cwd, or the helper itself prevents the directory swap.
+      'Set-Location -LiteralPath $parent; [Environment]::CurrentDirectory = $parent',
+      'Log "helper started"',
+      "if (-not $permit -or -not (Test-Path -LiteralPath $permit) -or [IO.File]::ReadAllText($permit) -ne $token) { Log 'update not permitted'; exit 1 }",
+      'if ($helperReady) { [IO.File]::WriteAllText($helperReady, $token) }',
+      `for ($i = 0; $i -lt 120; $i++) { if (-not (Test-Path -LiteralPath $permit) -or [IO.File]::ReadAllText($permit) -ne $token) { Log 'update cancelled'; exit 1 }; if (-not (Get-Process -Id ${Number(pid)} -ErrorAction SilentlyContinue)) { break }; Start-Sleep -Milliseconds 500 }`,
+      `if (Get-Process -Id ${Number(pid)} -ErrorAction SilentlyContinue) { Log 'original app did not exit; update skipped'; exit 1 }`,
+      "if (-not (Test-Path -LiteralPath $permit) -or [IO.File]::ReadAllText($permit) -ne $token) { Log 'update cancelled'; exit 1 }",
       // The core and helper processes may still hold files for a moment: retry the rename for up to a minute.
       '$moved = $false',
       'for ($i = 0; $i -lt 120; $i++) { try { [IO.Directory]::Move($app, $bak); $moved = $true; break } catch { Start-Sleep -Milliseconds 500 } }',
-      "if (-not $moved) { Log 'install folder still in use; update skipped'; Start-Process -FilePath $exe -WindowStyle Hidden; exit 1 }",
-      'try { [IO.Directory]::Move($new, $app) } catch { Log "swap failed: $_"; [IO.Directory]::Move($bak, $app); Start-Process -FilePath $exe -WindowStyle Hidden; exit 1 }',
-      '$started = $null; try { $started = Start-Process -FilePath $exe -WindowStyle Hidden -PassThru } catch { Log "new app launch failed: $_" }',
+      "if (-not $moved) { Log 'install folder still in use; update skipped'; Start-Process -FilePath $exe -WorkingDirectory $parent -WindowStyle Hidden; exit 1 }",
+      'try { [IO.Directory]::Move($new, $app) } catch { Log "swap failed: $_"; [IO.Directory]::Move($bak, $app); Start-Process -FilePath $exe -WorkingDirectory $parent -WindowStyle Hidden; exit 1 }',
+      '$started = $null; try { $started = Start-Process -FilePath $exe -WorkingDirectory $parent -WindowStyle Hidden -PassThru } catch { Log "new app launch failed: $_" }',
       '$ready = $false; for ($i = 0; $i -lt 120; $i++) { if ((Test-Path -LiteralPath $receipt) -and [IO.File]::ReadAllText($receipt) -eq $token) { $ready = $true; break }; if (-not $started -or $started.HasExited) { break }; Start-Sleep -Milliseconds 500 }',
       'if ($ready) { Log "updated and healthy"; try { Remove-Item -LiteralPath $bak -Recurse -Force } catch { Log "old copy retained" }; exit 0 }',
       'if ($started -and -not $started.HasExited) { Log "new app did not acknowledge healthy startup; backup retained without killing it"; exit 1 }',
-      'try { [IO.Directory]::Move($app, $new); [IO.Directory]::Move($bak, $app); Start-Process -FilePath $exe -WindowStyle Hidden; Log "rolled back" } catch { Log "rollback requires recovery: $_" }; exit 1',
+      'try { [IO.Directory]::Move($app, $new); [IO.Directory]::Move($bak, $app); Start-Process -FilePath $exe -WorkingDirectory $parent -WindowStyle Hidden; Log "rolled back" } catch { Log "rollback requires recovery: $_" }; exit 1',
       '',
     ].join('\r\n');
   }
   const start = platform === 'darwin' ? 'open -W "$app" >/dev/null 2>&1 &' : '"$exe" >/dev/null 2>&1 &';
   return [
     '#!/bin/sh',
-    `app=${shQuote(appDir)}; new=${shQuote(newDir)}; bak=${shQuote(backupDir)}; exe=${shQuote(launch)}; log=${shQuote(log)}; permit=${shQuote(permit || '')}; receipt=${shQuote(receipt || '')}; token=${shQuote(token || '')}`,
-    `i=0; while kill -0 ${Number(pid)} 2>/dev/null && [ $i -lt 120 ]; do sleep 0.5; i=$((i+1)); done`,
-    `if kill -0 ${Number(pid)} 2>/dev/null; then echo 'original app did not exit' >> "$log"; exit 1; fi`,
-    '[ -n "$permit" ] && [ "$(cat "$permit" 2>/dev/null)" = "$token" ] || exit 1',
+    `app=${shQuote(appDir)}; new=${shQuote(newDir)}; bak=${shQuote(backupDir)}; exe=${shQuote(launch)}; log=${shQuote(log)}; permit=${shQuote(permit || '')}; receipt=${shQuote(receipt || '')}; token=${shQuote(token || '')}; ready=${shQuote(ready || '')}`,
     'parent=$(dirname "$app"); base=$(basename "$app"); [ "$parent" != "$app" ] && [ "$parent" != "/" ] || exit 1',
     'case "$bak" in "$app".old-[0-9]*) ;; *) exit 1 ;; esac',
     'case "$new" in "$parent/.$base.update/"*) ;; *) exit 1 ;; esac',
+    'cd "$parent" || exit 1',
+    'echo "helper started" >> "$log"',
+    '[ -n "$permit" ] && [ "$(cat "$permit" 2>/dev/null)" = "$token" ] || exit 1',
+    '[ -z "$ready" ] || printf %s "$token" > "$ready" || exit 1',
+    `i=0; while kill -0 ${Number(pid)} 2>/dev/null && [ $i -lt 120 ]; do sleep 0.5; i=$((i+1)); done`,
+    `if kill -0 ${Number(pid)} 2>/dev/null; then echo 'original app did not exit' >> "$log"; exit 1; fi`,
+    '[ "$(cat "$permit" 2>/dev/null)" = "$token" ] || exit 1',
     'if mv "$app" "$bak"; then',
     '  if ! mv "$new" "$app"; then mv "$bak" "$app"; ' + start + ' exit 1; fi',
     'else echo "$(date) install folder busy; update skipped" >> "$log"; ' + start + ' exit 1; fi',
@@ -197,6 +209,47 @@ function createUpdater(deps) {
   function set(patch) { st = { ...st, ...patch, current: deps.app.getVersion() }; deps.onChange(st); }
 
   function stagingRoot() { return layout ? path.join(path.dirname(layout.appDir), `.${path.basename(layout.appDir)}.update`) : null; }
+  function stageOwned(root) {
+    try {
+      assertPrivateTree(root);
+      const markerPath = path.join(root, STAGE_MARKER), markerStat = fs.lstatSync(markerPath);
+      if (!markerStat.isFile() || markerStat.isSymbolicLink() || markerStat.size > 1024) return false;
+      const marker = JSON.parse(fs.readFileSync(markerPath, 'utf8'));
+      return marker.schema === 1 && marker.product === 'salcara-desktop-update' && marker.appDir === layout.appDir;
+    } catch { return false; }
+  }
+  function logPhase(message) {
+    try { fs.mkdirSync(deps.userData, { recursive: true, mode: 0o700 }); fs.appendFileSync(path.join(deps.userData, 'update.log'), `${new Date().toISOString()} ${message}\n`, { mode: 0o600 }); } catch { /* diagnostics never stop work */ }
+  }
+  function cleanupHelpers() {
+    const saved = read(), records = Array.isArray(saved.helpers) ? saved.helpers : [];
+    const kept = [];
+    for (const record of records) {
+      if (!/^[0-9a-f]{64}$/.test(record?.token || '') || !Number.isInteger(record.pid) || record.pid < 0) { kept.push(record); continue; }
+      if (saved.installing && saved.token === record.token) { kept.push(record); continue; }
+      const directory = path.join(deps.userData, 'updater-helpers', record.token);
+      try {
+        if (!fs.existsSync(directory)) continue;
+        assertPrivateTree(directory);
+        const markerPath = path.join(directory, '.salcara-helper.json'), markerStat = fs.lstatSync(markerPath);
+        if (!markerStat.isFile() || markerStat.isSymbolicLink() || markerStat.size > 1024) throw new Error('Invalid helper marker');
+        const marker = JSON.parse(fs.readFileSync(markerPath, 'utf8'));
+        if (marker.product !== 'salcara-desktop-update-helper' || marker.token !== record.token) throw new Error('Foreign helper directory');
+        const helperPid = Number.isInteger(marker.pid) && marker.pid > 0 ? marker.pid : record.pid;
+        if (helperPid > 0) {
+          try { process.kill(helperPid, 0); kept.push(record); continue; } catch (error) { if (error.code !== 'ESRCH') throw error; }
+        }
+        const names = fs.readdirSync(directory);
+        if (names.some(name => !['runtime.exe','bootstrap.cjs','.salcara-helper.json'].includes(name) || !fs.lstatSync(path.join(directory,name)).isFile())) throw new Error('Unexpected helper files');
+        // Delete the mapped executable first; a scanner lock must not remove
+        // the marker first and strand an unrecognizable helper directory.
+        if (fs.existsSync(path.join(directory,'runtime.exe'))) fs.unlinkSync(path.join(directory,'runtime.exe'));
+        if (fs.existsSync(path.join(directory,'bootstrap.cjs'))) fs.unlinkSync(path.join(directory,'bootstrap.cjs'));
+        fs.unlinkSync(markerPath); fs.rmdirSync(directory);
+      } catch { kept.push(record); }
+    }
+    if (kept.length !== records.length) write({ helpers:kept });
+  }
   function canWrite() {
     if (!layout) return false;
     try { assertPrivateTree(layout.appDir); const marker = JSON.parse(fs.readFileSync(path.join(layout.appDir, '.salcara-install.json'), 'utf8'));
@@ -208,10 +261,11 @@ function createUpdater(deps) {
   /** Leftovers of an earlier update (the staging folder and backups of old versions). */
   function cleanup() {
     if (!layout) return;
+    cleanupHelpers();
     // Only the swap helper deletes its exact backup after healthy startup.
     // Never sweep sibling folders or delete recovery data before acknowledgement.
     if (read().installing || ['downloading', 'verifying', 'ready', 'installing'].includes(st.phase)) return;
-    try { assertPrivateTree(layout.appDir); const root = stagingRoot(); if (fs.existsSync(root)) { assertPrivateTree(root); fs.rmSync(root, { recursive: true }); } } catch { /* leave unsafe paths alone */ }
+    try { assertPrivateTree(layout.appDir); const root = stagingRoot(); if (stageOwned(root)) fs.rmSync(root, { recursive: true }); } catch { /* leave unsafe or in-use paths alone */ }
   }
 
   async function checkOnce(manual) {
@@ -269,9 +323,19 @@ function createUpdater(deps) {
     set({ phase: 'downloading', received: 0, speed: 0, error: '' });
     try {
       assertPrivateTree(layout.appDir);
-      if (fs.existsSync(root)) assertPrivateTree(root);
+      if (fs.existsSync(root)) {
+        assertPrivateTree(root);
+        if (!stageOwned(root)) {
+          // Old versions left unmarked staging after uninstall. Preserve it
+          // instead of deleting a directory merely because of its name.
+          await fs.promises.rename(root, `${root}.saved-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`);
+          logPhase('unmarked update staging retained');
+        }
+      }
       await fs.promises.rm(root, { recursive: true, force: true });
       await fs.promises.mkdir(root, { recursive: true, mode: 0o700 });
+      await fs.promises.writeFile(path.join(root, STAGE_MARKER), JSON.stringify({ schema: 1, product: 'salcara-desktop-update', appDir: layout.appDir }), { flag: 'wx', mode: 0o600 });
+      logPhase('download started');
       const archive = path.join(root, release.file.name);
       await downloadTo(release.archiveUrl, archive, {
         size: release.file.size, sha256: release.file.sha256, signal: controller.signal,
@@ -302,9 +366,11 @@ function createUpdater(deps) {
       if (marker.product !== 'salcara-desktop' || marker.version !== release.version) throw new UpdateError('安装包内容不正确');
       controller.signal.throwIfAborted();
       staged = { newDir: target, version: release.version };
+      logPhase('update verified and staged');
       set({ phase: 'ready' });
     } catch (error) {
-      try { assertPrivateTree(root); fs.rmSync(root, { recursive: true, force: true }); } catch { /* do not follow linked paths */ }
+      logPhase(`download or verification failed (${error.code || error.name || 'Error'})`);
+      try { if (stageOwned(root)) fs.rmSync(root, { recursive: true, force: true }); } catch { /* do not follow linked paths */ }
       if (controller && controller.signal.aborted) set({ phase: 'available', received: 0 });
       else set({ phase: 'error', error: error instanceof UpdateError ? error.message : '下载失败，请检查网络后重试', canRetry: true, retry: 'download' });
     } finally {
@@ -324,25 +390,72 @@ function createUpdater(deps) {
     const token = crypto.randomBytes(32).toString('hex');
     const permit = path.join(stagingRoot(), 'install-permit');
     const receipt = path.join(deps.userData, `update-ready-${token}`);
+    const ready = path.join(deps.userData, `update-helper-${token}`);
     try {
       assertPrivateTree(layout.appDir); assertPrivateTree(staged.newDir);
-      fs.writeFileSync(script, (platform === 'win32' ? '\ufeff' : '') + swapScript({ platform, pid: process.pid, appDir: layout.appDir, newDir: staged.newDir, backupDir, launch: layout.launch, log, permit, receipt, token }), { mode: 0o700, flag: 'wx' });
+      logPhase('installation requested');
+      fs.writeFileSync(script, (platform === 'win32' ? '\ufeff' : '') + swapScript({ platform, pid: process.pid, appDir: layout.appDir, newDir: staged.newDir, backupDir, launch: layout.launch, log, permit, receipt, token, ready }), { mode: 0o700, flag: 'wx' });
       await deps.beforeInstall();
-      const child = platform === 'win32'
-      ? spawn(path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'),
-        ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-File', script], { detached: true, stdio: 'ignore', windowsHide: true })
-      : spawn('/bin/sh', [script], { detached: true, stdio: 'ignore' });
-      await new Promise((resolve, reject) => { child.once('spawn', resolve); child.once('error', reject); });
-      child.unref();
+      logPhase('idle core prepared');
       fs.mkdirSync(deps.userData, { recursive: true, mode: 0o700 });
       fs.writeFileSync(stateFile, JSON.stringify({ ...read(), installing: staged.version, receipt, token }), { mode: 0o600 });
       fs.writeFileSync(permit, token, { mode: 0o600, flag: 'wx' });
+      // Detached Windows PowerShell may exit 0 without executing the script;
+      // non-detached children, on the other hand, belong to Node's kill-on-exit
+      // job. A detached bundled Node supervisor keeps the non-detached PS
+      // child alive, outside both the install tree and the original app job.
+      const helperOptions = { detached: true, stdio: 'ignore', windowsHide: true, cwd: path.dirname(layout.appDir) };
+      const launchHelper = deps.spawnHelper || spawn;
+      let child;
+      if (platform === 'win32') {
+        const directory = path.join(deps.userData, 'updater-helpers', token);
+        fs.mkdirSync(path.dirname(directory), { recursive:true, mode:0o700 }); assertPrivateTree(path.dirname(directory));
+        fs.mkdirSync(directory, { mode:0o700 });
+        fs.writeFileSync(path.join(directory,'.salcara-helper.json'), JSON.stringify({product:'salcara-desktop-update-helper',token}), {flag:'wx',mode:0o600});
+        write({ helpers:[...(Array.isArray(read().helpers) ? read().helpers : []), {token,pid:0}] });
+        const runtime = path.join(layout.appDir,'resources','SalcaraProbeNode.exe');
+        const runtimeStat = fs.lstatSync(runtime);
+        if (!runtimeStat.isFile() || runtimeStat.isSymbolicLink()) throw new UpdateError('内置更新运行组件不完整，请下载新版安装包');
+        assertPrivateTree(path.dirname(runtime));
+        await fs.promises.copyFile(runtime, path.join(directory,'runtime.exe'), fs.constants.COPYFILE_EXCL);
+        const powershell = path.join(process.env.SystemRoot || 'C:\\Windows','System32','WindowsPowerShell','v1.0','powershell.exe');
+        const args = ['-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-WindowStyle','Hidden','-File',script];
+        const bootstrap = `const fs=require('node:fs');fs.writeFileSync(${JSON.stringify(path.join(directory,'.salcara-helper.json'))},JSON.stringify({product:'salcara-desktop-update-helper',token:${JSON.stringify(token)},pid:process.pid}));const {spawn}=require('node:child_process');const child=spawn(${JSON.stringify(powershell)},${JSON.stringify(args)},{detached:false,stdio:'ignore',windowsHide:true,cwd:${JSON.stringify(path.dirname(layout.appDir))}});child.once('error',()=>process.exit(1));child.once('exit',code=>process.exit(code===0?0:1));\n`;
+        fs.writeFileSync(path.join(directory,'bootstrap.cjs'), bootstrap, {flag:'wx',mode:0o600});
+        child = launchHelper(path.join(directory,'runtime.exe'), [path.join(directory,'bootstrap.cjs')], helperOptions);
+      } else child = launchHelper('/bin/sh', [script], helperOptions);
+      await new Promise((resolve, reject) => { child.once('spawn', resolve); child.once('error', reject); });
+      child.unref();
+      if (platform === 'win32' && Number.isInteger(child.pid)) write({ helpers:read().helpers.map(record => record?.token === token ? {...record,pid:child.pid} : record) });
+      logPhase('helper process spawned');
+      const deadline = Date.now() + HELPER_READY_TIMEOUT;
+      let acknowledged = false;
+      while (Date.now() < deadline) {
+        try { acknowledged = fs.readFileSync(ready, 'utf8') === token; } catch { /* helper is starting */ }
+        if (acknowledged) break;
+        if (child.exitCode !== null && child.exitCode !== undefined) break;
+        await new Promise(resolve => setTimeout(resolve, 100));
+      }
+      if (!acknowledged) {
+        logPhase(`helper did not acknowledge readiness (exit ${child.exitCode ?? 'pending'})`);
+        throw new UpdateError('更新程序未能启动，当前任务和版本保持不变，请重试');
+      }
+      logPhase('helper acknowledged readiness');
+      try { fs.unlinkSync(ready); } catch { /* transient lock */ }
+      try { fs.unlinkSync(script); } catch { /* the parsed helper may still hold its script open */ }
       if (deps.commitInstall) await deps.commitInstall();
+      logPhase('core shutdown committed');
       deps.app.quit();
     } catch (error) {
+      logPhase(`installation aborted (${error.code || error.name || 'Error'})`);
       try { fs.unlinkSync(permit); } catch { /* never leave a permission after an aborted install */ }
+      try { fs.unlinkSync(ready); } catch { /* no readiness is reusable */ }
+      try { fs.unlinkSync(script); } catch { /* the helper will observe the revoked permit */ }
       if (read().token === token) write({ installing: '', receipt: '', token: '' });
-      if (deps.installAborted) await deps.installAborted();
+      if (deps.installAborted) {
+        try { await deps.installAborted(); } catch { logPhase('core resumption after abort failed'); }
+      }
+      cleanupHelpers();
       set({ phase: 'error', error: String(error.message || error), canRetry: true, retry: 'download' });
     }
     return st;
