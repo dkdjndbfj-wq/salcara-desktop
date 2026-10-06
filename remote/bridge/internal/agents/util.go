@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -81,6 +82,20 @@ func shortPath(p, cwd string) string {
 	if cwd != "" && filepath.IsAbs(p) {
 		if rel, err := filepath.Rel(cwd, p); err == nil && !strings.HasPrefix(rel, "..") {
 			return filepath.ToSlash(rel)
+		}
+	}
+	// Fixtures and transcripts can carry POSIX paths even when the bridge is
+	// running on Windows (for example a WSL/remote worker). filepath.IsAbs on
+	// Windows intentionally rejects `/work/app`, so use slash semantics for
+	// this wire representation without changing native Windows paths.
+	if cwd != "" && strings.HasPrefix(p, "/") && strings.HasPrefix(cwd, "/") {
+		base, target := path.Clean(cwd), path.Clean(p)
+		if target == base {
+			return "."
+		}
+		prefix := strings.TrimRight(base, "/") + "/"
+		if strings.HasPrefix(target, prefix) {
+			return filepath.ToSlash(strings.TrimPrefix(target, prefix))
 		}
 	}
 	return p

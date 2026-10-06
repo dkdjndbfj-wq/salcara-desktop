@@ -43,6 +43,23 @@ type Config struct {
 	ClaudeKey         string             `json:"claudeKey,omitempty"` // empty = AccountKey
 	RemoteDeviceOnly  bool               `json:"remoteDeviceOnly,omitempty"`
 	RemoteConnections []RemoteConnection `json:"remoteConnections,omitempty"`
+	// One physical computer/phone authorization, independent of station credentials.
+	ComputerID       string `json:"computerId,omitempty"`
+	PhoneBindingID   string `json:"phoneBindingId,omitempty"`
+	PhoneHash        string `json:"phoneHash,omitempty"`
+	PhonePairPending string `json:"phonePairPending,omitempty"` // exact station identity allowed to finish a local QR
+	PhonePairAttempt string `json:"phonePairAttempt,omitempty"`
+	PhonePairExpires int64  `json:"phonePairExpires,omitempty"`
+	// Conditional station cleanup survives offline Hubs and a process restart.
+	// Entries contain the revoked generation only, never API/device secrets.
+	PendingPhoneRevokes []PendingPhoneRevoke `json:"pendingPhoneRevokes,omitempty"`
+	// Last committed handover receipt contains metadata, never a key/secret.
+	RemoteHandoverOperation string `json:"remoteHandoverOperation,omitempty"`
+	RemoteHandoverFrom      string `json:"remoteHandoverFrom,omitempty"`
+	RemoteHandoverAt        int64  `json:"remoteHandoverAt,omitempty"`
+	// Hash of the non-secret station-switch payload. It makes retries with one
+	// operation ID idempotent without accepting a different API/model payload.
+	RemoteHandoverPayloadHash string `json:"remoteHandoverPayloadHash,omitempty"`
 
 	DeviceID     string             `json:"deviceId"`
 	DeviceSecret string             `json:"deviceSecret"`
@@ -82,6 +99,7 @@ type Config struct {
 // Clone returns a deep copy.
 func (c Config) Clone() Config {
 	c.RemoteConnections = append([]RemoteConnection(nil), c.RemoteConnections...)
+	c.PendingPhoneRevokes = append([]PendingPhoneRevoke(nil), c.PendingPhoneRevokes...)
 	c.Projects = append([]protocol.Project(nil), c.Projects...)
 	c.LocalAccounts = append([]LocalAccount(nil), c.LocalAccounts...)
 	for i := range c.LocalAccounts {

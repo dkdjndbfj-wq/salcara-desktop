@@ -222,6 +222,12 @@ func run(background bool) error {
 		Version: version,
 		Logger:  logger,
 		Desktop: companion,
+		// Agent status is requested whenever the remote workbench opens. Use the
+		// launcher service's bounded, coalesced inventory instead of the raw
+		// package scan; otherwise every phone refresh can rescan Windows installs.
+		DiscoverTools: func(ctx context.Context, paths map[string]string) []launcher.Tool {
+			return localLauncher.Inventory(ctx, paths)
+		},
 		ClaudeDesktopHistory: func(ctx context.Context) (hubclient.ReadOnlyDesktopHistory, error) {
 			return claudeDesktop.ReadOnlyHistory(ctx, store.Get().LocalToolPaths)
 		},
@@ -232,7 +238,7 @@ func run(background bool) error {
 				want, missing = "claude-desktop", "没有检测到 Claude Desktop"
 				open = func(k string) error { return desktoplink.OpenClaude(k, imported) }
 			}
-			for _, tool := range launcher.Discover(ctx, store.Get().LocalToolPaths) {
+			for _, tool := range localLauncher.Inventory(ctx, store.Get().LocalToolPaths) {
 				if tool.ID == want && tool.Available {
 					return open(key)
 				}

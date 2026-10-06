@@ -27,8 +27,25 @@ const projectOf = (cwd) => String(cwd || '').replace(/[\\/]+$/, '').split(/[\\/]
 
 function rmHubState() { return (S.state && S.state.hub && S.state.hub.state) || 'not_logged_in'; }
 
+function rmPairStatus(st) {
+  const pair = st?.pairing;
+  if (!pair || pair.deviceId !== S.state?.config?.deviceId) return;
+  const consumed = Boolean(S.pairQR && pair.pendingExpiresAt === 0);
+  if (pair.pendingExpiresAt === 0) {
+    S.pairQR = ''; S.pairExpires = 0; clearInterval(RM.qrTimer);
+    const box = S.route === 'login' ? $('#pairQR') : null;
+    if (box) {
+      box.classList.remove('live');
+      box.innerHTML = pair.paired ? `${icon('check')}<span>手机已绑定</span>`
+        : '<button class="btn primary sm" data-act="rmShowQR">' + icon('scan') + '显示二维码</button>';
+    }
+  }
+  if (consumed && pair.paired) toast('手机绑定成功', 'ok');
+}
+
 RENDER_login = async function (view) {
   const st = await loadState();
+  if (view.isConnected === false) return;
   const c = st.config, state = rmHubState();
   const linked = c.loggedIn;
   const connected = state === 'connected';
@@ -61,10 +78,10 @@ RENDER_login = async function (view) {
       <div class="rm-pair">
         <div class="rm-qr ${qrLive ? 'live' : ''}" id="pairQR">${qrLive
           ? `<img src="${esc(S.pairQR)}" alt="手机绑定二维码"><span class="rm-timer" id="rmTimer"></span>`
-          : connected ? `<button class="btn primary sm" data-act="rmShowQR">${icon('scan')}显示二维码</button>` : '<span>先连接中转站</span>'}</div>
+          : connected ? st.hub?.pairing?.paired ? `${icon('check')}<span>手机已绑定</span>` : `<button class="btn primary sm" data-act="rmShowQR">${icon('scan')}显示二维码</button>` : '<span>先连接中转站</span>'}</div>
         <ol class="rm-steps">
-          <li>手机打开 Salcara →「编程」，${station ? `填同一个中转站 <b>${esc(station)}</b>` : '填同一个中转站地址'}</li>
-          <li>点「扫描二维码」对准左边</li>
+          <li>手机打开 Salcara →「编程」→「我的电脑」</li>
+          <li>点「绑定新电脑」扫码</li>
           <li>选好 Agent 和 API，点「连接」</li>
           <li class="rm-tip">二维码 5 分钟有效，只能用一次</li>
         </ol>

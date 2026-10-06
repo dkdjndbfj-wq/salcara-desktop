@@ -50,7 +50,7 @@ func (s *Server) buildQR(c config.Config, pair hubclient.PairInfo) error {
 		s.clearQR()
 		return nil
 	}
-	payload, err := json.Marshal(map[string]any{"type": "salcara-remote-pair", "version": 1, "hubUrl": c.EffectiveHubURL() + "/v1", "deviceId": c.DeviceID, "deviceName": c.DeviceName, "ticket": pair.Ticket, "expiresAt": pair.ExpiresAt})
+	payload, err := json.Marshal(map[string]any{"type": "salcara-remote-pair", "version": 1, "hubUrl": c.EffectiveHubURL() + "/v1", "deviceId": c.DeviceID, "deviceName": c.DeviceName, "computerId": pair.ComputerID, "ticket": pair.Ticket, "expiresAt": pair.ExpiresAt})
 	if err != nil {
 		return err
 	}

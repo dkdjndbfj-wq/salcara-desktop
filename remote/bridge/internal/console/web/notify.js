@@ -1,15 +1,13 @@
 'use strict';
-/* System notifications from the desktop console: an operation waits for your
-   approval, or a task started from the phone / this computer finished. Only
-   shown when the window is not in front, and can be turned off in 设置. */
-
+/* One system reminder for a genuinely completed Codex turn with a Chinese
+   final answer. Uses the console's existing SSE stream; never infer completion
+   from an idle session, tool update, approval, reasoning or history replay. */
 const NOTIFY = (() => {
   const KEY = 'salcara.notify';
   const enabled = () => { try { return localStorage.getItem(KEY) !== 'off'; } catch (_) { return true; } };
-  const setEnabled = (on) => { try { localStorage.setItem(KEY, on ? 'on' : 'off'); } catch (_) { /* optional */ } };
-  const statuses = new Map();
-  const shown = new Set();
-
+  const setEnabled = on => { try { localStorage.setItem(KEY, on ? 'on' : 'off'); } catch (_) {} };
+  const turns = new Map(), sessions = new Map(), shown = new Set();
+  const trim = (map, size) => { while (map.size > size) map.delete(map.keys().next().value); };
   async function inFront() {
     if (document.hidden) return false;
     if (window.salcaraWindow && window.salcaraWindow.state) {
@@ -17,44 +15,44 @@ const NOTIFY = (() => {
     }
     return document.hasFocus();
   }
-
-  async function post(title, body, route, once) {
-    if (!enabled() || (once && shown.has(once)) || await inFront()) return;
-    if (once) { shown.add(once); if (shown.size > 500) shown.clear(); }
+  async function post(body, once) {
+    // Claim synchronously before checking focus; concurrent terminal updates
+    // cannot each pass the asynchronous check and show duplicate reminders.
+    if (shown.has(once)) return;
+    shown.add(once); trim(shown, 500);
+    if (!enabled() || await inFront()) return;
+    const title = 'Codex 已完成本轮任务', route = 'sessions';
     if (window.salcaraWindow && window.salcaraWindow.notify) { window.salcaraWindow.notify(title, body, route); return; }
     if (!('Notification' in window)) return;
     if (Notification.permission === 'default') { try { await Notification.requestPermission(); } catch (_) { return; } }
     if (Notification.permission !== 'granted') return;
     const n = new Notification(title, { body, icon: 'logo.svg' });
-    n.onclick = () => { window.focus(); if (route) location.hash = '#' + route; n.close(); };
+    n.onclick = () => { window.focus(); location.hash = '#' + route; n.close(); };
   }
-
-  const toolName = (t) => (t === 'codex' ? 'Codex' : t === 'claude' ? 'Claude Code' : 'Agent');
-
   function onEvent(ev) {
-    if (!ev || typeof ev !== 'object') return;
-    if (ev.type === 'approval.request') {
-      void post('需要你批准', `${toolName(ev.tool)}：${String(ev.title || '一个操作').slice(0, 120)}`, 'sessions', 'ap:' + ev.approvalId);
+    if (!ev || ev.tool !== 'codex' || !ev.sessionKey) return;
+    if (ev.type === 'session.updated' && ev.session) {
+      sessions.set(ev.sessionKey, { parent: ev.session.parentSessionKey || '' }); trim(sessions, 1000);
       return;
     }
-    if (ev.type === 'session.updated' && ev.session) {
-      const s = ev.session, key = s.sessionKey;
-      const before = statuses.get(key);
-      statuses.set(key, s.status);
-      if (statuses.size > 2000) statuses.clear();
-      const wasBusy = before === 'running' || before === 'waiting_approval';
-      if (!wasBusy) return;
-      const title = String(s.title || '对话').slice(0, 80);
-      if (s.status === 'idle') void post(`${toolName(s.tool)} 完成了任务`, title, 'sessions');
-      else if (s.status === 'failed') void post(`${toolName(s.tool)} 任务出错`, title, 'sessions');
+    if (!ev.turnId) return;
+    const key = ev.sessionKey + ':' + ev.turnId;
+    if (ev.type === 'turn' && ev.status === 'started') {
+      if (!shown.has(key) && !turns.has(key)) turns.set(key, { text: '' });
+      trim(turns, 256); return;
     }
+    const turn = turns.get(key);
+    if (!turn) return; // no observed live start: no historical/replayed notice
+    if (ev.type === 'message' && ev.role === 'assistant' && ev.final === true) {
+      turn.text = String(ev.text || '').trim().slice(0, 2000); return;
+    }
+    if (ev.type !== 'turn' || !['completed', 'failed', 'interrupted'].includes(ev.status)) return;
+    turns.delete(key);
+    const session = sessions.get(ev.sessionKey);
+    if (ev.status !== 'completed' || ev.error || !session || session.parent || !/[\u3400-\u9fff]/.test(turn.text)) {
+      shown.add(key); trim(shown, 500); return;
+    }
+    void post(turn.text.replace(/\s+/g, ' ').slice(0, 120), key);
   }
-
-  function connect() {
-    let es;
-    try { es = new EventSource('/api/stream'); } catch (_) { return; }
-    es.addEventListener('event', (m) => { try { onEvent(JSON.parse(m.data)); } catch (_) { /* ignore */ } });
-  }
-  connect();
   return { enabled, setEnabled, onEvent };
 })();

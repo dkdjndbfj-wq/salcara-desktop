@@ -60,10 +60,12 @@ func TestDeviceOnlyRequestsNeverUseModelKeyAndQueueDoesNotCrossStations(t *testi
 	_ = st.Update(func(c *config.Config) error {
 		c.AccountKey = "private-legacy-model-key"
 		c.ConnectRemote("https://one.test", "https://one.test/salcara-hub")
+		c.PhoneBindingID, c.PhoneHash = strings.Repeat("b", 64), strings.Repeat("a", 64)
 		return nil
 	})
 	c := New(Options{Store: st})
 	old := st.Get()
+	c.publishPair(PairStatus{DeviceID: old.DeviceID, Paired: true}, eventIdentity(old))
 	r, err := c.newRequest(context.Background(), "GET", "/bridge/stream", nil)
 	if err != nil || r.Header.Get("Authorization") != "" || r.Header.Get("X-Salcara-Device-Secret") != old.DeviceSecret || r.Header.Get("X-Salcara-Device-Id") != old.DeviceID {
 		t.Fatal("device identity mixed with model key")
@@ -73,6 +75,7 @@ func TestDeviceOnlyRequestsNeverUseModelKeyAndQueueDoesNotCrossStations(t *testi
 		c.ConnectRemote("https://two.test", "https://two.test/salcara-hub")
 		return nil
 	})
+	c.publishPair(PairStatus{DeviceID: st.Get().DeviceID, Paired: true}, eventIdentity(st.Get()))
 	c.Push(protocol.Event{Type: "notice", Text: "new-station-only"})
 	if len(c.queue) != 1 || c.queue[0].Text != "new-station-only" {
 		t.Fatal("old station events leaked into new station queue")

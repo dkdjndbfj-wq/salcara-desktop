@@ -371,7 +371,9 @@ body #view .btn.primary:disabled { background: var(--surface-3); color: var(--fa
 /* ---------- desktop window: frameless, minimise / close (close = keep running) ---------- */
 .drag-strip { display: none; }
 body.framed .drag-strip { display: block; position: fixed; z-index: 30; left: 0; right: 120px; top: 0; height: 30px; -webkit-app-region: drag; }
-body.framed .hud { -webkit-app-region: drag; }
+/* Native drag hit regions ignore DOM z-index. Keep the full-width header out
+   of the drag region so it cannot swallow the controls above it. */
+body.framed .hud { -webkit-app-region: no-drag; }
 body.framed .hud > * { -webkit-app-region: no-drag; }
 body.framed .hud-brand { -webkit-app-region: drag; }
 .win-ctl { position: fixed; z-index: 90; top: 16px; right: 18px; display: flex; gap: 4px; -webkit-app-region: no-drag; }
@@ -379,6 +381,7 @@ body.framed .hud-brand { -webkit-app-region: drag; }
 .win-ctl button { width: 32px; height: 32px; border-radius: 10px; border: 0; padding: 0; display: grid; place-items: center; cursor: pointer;
   color: var(--text-2); background: transparent; transition: background .18s, color .18s; }
 .win-ctl button svg { width: 15px; height: 15px; }
+.win-ctl, .win-ctl * { -webkit-app-region: no-drag; }
 .win-ctl button:hover { background: rgba(20, 30, 60, .06); color: var(--text); }
 .win-ctl button.x:hover { background: #E5484D; color: #fff; }
 .win-ctl button:focus-visible { outline: 2px solid rgba(47, 107, 255, .35); outline-offset: 1px; }

@@ -55,7 +55,16 @@ addEventListener('pointermove', (e) => {
   }
 }, { passive: true });
 
+const orbFace = $('#orbFace');
+let orbFrame = 0;
+const orbStyles = new Map();
+function orbStyle(node, name, value) {
+  if (orbStyles.get(name) === value) return;
+  orbStyles.set(name, value); node.style.setProperty(name, value);
+}
 function animateOrb() {
+  orbFrame = 0;
+  if (document.hidden) return;
   const r = orb.getBoundingClientRect();
   const cx = r.left + r.width / 2, cy = r.top + r.height / 2;
   let tx = SHELL.mouse.x, ty = SHELL.mouse.y;
@@ -67,17 +76,20 @@ function animateOrb() {
   SHELL.eye.y += (goalY - SHELL.eye.y) * 0.16;
   SHELL.tilt.x += ((-dy / d) * 9 * reach - SHELL.tilt.x) * 0.1;
   SHELL.tilt.y += ((dx / d) * 9 * reach - SHELL.tilt.y) * 0.1;
-  const face = $('#orbFace');
-  face.style.setProperty('--ex', `${SHELL.eye.x.toFixed(2)}px`);
-  face.style.setProperty('--ey', `${SHELL.eye.y.toFixed(2)}px`);
-  orb.style.setProperty('--rx', `${SHELL.tilt.x.toFixed(2)}deg`);
-  orb.style.setProperty('--ry', `${SHELL.tilt.y.toFixed(2)}deg`);
-  orb.style.setProperty('--hx', `${(36 - SHELL.eye.x * 0.5).toFixed(1)}%`);
-  orb.style.setProperty('--hy', `${(30 - SHELL.eye.y * 0.5).toFixed(1)}%`);
-  if (!document.hidden) requestAnimationFrame(animateOrb);
+  const face = orbFace;
+  orbStyle(face, '--ex', `${SHELL.eye.x.toFixed(2)}px`);
+  orbStyle(face, '--ey', `${SHELL.eye.y.toFixed(2)}px`);
+  orbStyle(orb, '--rx', `${SHELL.tilt.x.toFixed(2)}deg`);
+  orbStyle(orb, '--ry', `${SHELL.tilt.y.toFixed(2)}deg`);
+  orbStyle(orb, '--hx', `${(36 - SHELL.eye.x * 0.5).toFixed(1)}%`);
+  orbStyle(orb, '--hy', `${(30 - SHELL.eye.y * 0.5).toFixed(1)}%`);
+  orbFrame = requestAnimationFrame(animateOrb);
 }
-document.addEventListener('visibilitychange', () => { if (!document.hidden) requestAnimationFrame(animateOrb); });
-requestAnimationFrame(animateOrb);
+document.addEventListener('visibilitychange', () => {
+  if (orbFrame) cancelAnimationFrame(orbFrame);
+  orbFrame = document.hidden ? 0 : requestAnimationFrame(animateOrb);
+});
+orbFrame = requestAnimationFrame(animateOrb);
 
 (function blinkLoop() {
   setTimeout(() => {
@@ -137,7 +149,9 @@ route = async function () {
   $('#pageTitle').textContent = PAGES[r].title;
   $('#pageSub').textContent = PAGES[r].sub;
   openPanel();
-  const view = $('#view');
+  // A late renderer retains a detached node, never the new page's content.
+  const oldView = $('#view'), view = oldView.cloneNode(false);
+  oldView.replaceWith(view);
   if (changed) {
     $('#headActions').innerHTML = '';
     view.innerHTML = '<div class="card"><div class="skeleton" style="width:40%"></div><div class="skeleton" style="width:70%;margin-top:12px"></div></div>';
@@ -183,13 +197,3 @@ setTimeout(refreshSetupDot, 800);
 document.addEventListener('click', (e) => {
   $$('details.wb-card-more[open]').forEach((d) => { if (!d.contains(e.target)) d.open = false; });
 });
-
-/* ---------- desktop window controls (Electron preload exposes salcaraWindow) ---------- */
-(function windowControls() {
-  const win = window.salcaraWindow;
-  if (!win) return;
-  document.body.classList.add('framed');
-  $('#winCtl').hidden = false;
-  $('#winMin').addEventListener('click', () => win.minimize());
-  $('#winClose').addEventListener('click', () => win.close());
-})();

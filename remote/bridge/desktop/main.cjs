@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Menu, Notification, Tray, nativeImage, nativeTheme, shell, ipcMain, screen } = require('electron');
+const { app, BrowserWindow, Menu, Notification, Tray, nativeImage, nativeTheme, shell, ipcMain, screen, dialog } = require('electron');
 const { spawn } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -187,8 +187,12 @@ function hideBall() {
 }
 
 function fromConsole(event) {
-  const url = event.senderFrame && event.senderFrame.url;
-  return typeof url === 'string' && url.startsWith(consoleURL);
+  if (!window || window.isDestroyed() || !event || event.sender !== window.webContents
+    || event.senderFrame !== window.webContents.mainFrame) return false;
+  try {
+    const url = new URL(event.senderFrame.url), base = new URL(consoleURL);
+    return url.origin === base.origin && (url.pathname === '/' || url.pathname === '/index.html');
+  } catch { return false; }
 }
 
 // The local start-up page (file://…/loading.html) in the main window.
@@ -212,14 +216,14 @@ function windowBackground() {
 }
 
 function registerIpc() {
+  require('./window-ipc.cjs').registerWindowIpc({ ipcMain, dialog, getWindow: () => window, consoleURL, fromSplash, hide: hideToBall,
+    hideSplash: () => { closedDuringStart = true; if (window && !window.isDestroyed()) window.hide(); }, path });
   ipcMain.on('win:theme', (event, theme) => {
     if (!fromConsole(event) || !['system', 'light', 'dark'].includes(theme) || theme === readAppearance()) return;
     applyAppearance(theme);
     try { fs.mkdirSync(path.dirname(appearanceFile()), { recursive: true }); fs.writeFileSync(appearanceFile(), JSON.stringify({ theme })); } catch { /* best effort */ }
     if (window && !window.isDestroyed()) window.setBackgroundColor(windowBackground());
   });
-  ipcMain.on('win:minimize', (event) => { if ((fromConsole(event) || fromSplash(event)) && window && !window.isDestroyed()) window.minimize(); });
-  ipcMain.on('win:close', (event) => { if (fromConsole(event)) hideToBall(); });
   ipcMain.on('win:show', (event, route) => { if (fromConsole(event)) showWindow(typeof route === 'string' ? route : ''); });
   ipcMain.handle('win:state', (event) => (fromConsole(event) && window && !window.isDestroyed() ? { focused: window.isFocused() && window.isVisible() } : {}));
   // System notifications for the console page (approvals, finished tasks).

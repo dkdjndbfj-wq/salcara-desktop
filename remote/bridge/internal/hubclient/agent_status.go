@@ -28,11 +28,21 @@ type agentAPIStatus struct {
 	AccountID string `json:"accountId,omitempty"`
 }
 
-// remoteAPIOption is one vault entry a phone may pick. No address or key.
+// remoteAPIOption is one vault entry a phone may pick. A matched station is
+// public routing metadata; API addresses and keys are otherwise never sent.
 type remoteAPIOption struct {
-	ID     string   `json:"id"`
-	Name   string   `json:"name"`
-	Models []string `json:"models"`
+	ID      string            `json:"id"`
+	Name    string            `json:"name"`
+	Models  []string          `json:"models"`
+	Station *remoteAPIStation `json:"station,omitempty"`
+}
+
+// remoteAPIStation is public station metadata only. It lets the phone tie a
+// key whose API origin is this relay to an already-paired station record; no
+// device secret or API credential crosses the Hub.
+type remoteAPIStation struct {
+	HubURL   string `json:"hubUrl"`
+	DeviceID string `json:"deviceId"`
 }
 
 type agentStatus struct {
@@ -125,10 +135,17 @@ func (c *Client) agentStatus(ctx context.Context) map[string]any {
 	return map[string]any{"agents": list, "apis": remoteAPIOptions(cfg), "policy": map[string]bool{"autoAll": cfg.AllowPhoneAutoAll}}
 }
 
-// APIHandle is an opaque, per-computer reference to a vault entry. Vault IDs,
-// addresses and keys never leave this computer; the phone only echoes handles.
+// APIHandle is an opaque, per-physical-computer reference to a vault entry.
+// Keeping the salt stable across that computer's saved Hub stations lets the
+// phone perform an atomic A→B station handover without learning a vault ID.
 func APIHandle(cfg config.Config, id string) string {
-	sum := sha256.Sum256([]byte("salcara-remote-api-v1\x00" + cfg.DeviceSecret + "\x00" + cfg.DeviceID + "\x00" + id))
+	salt := cfg.ComputerID
+	if salt == "" {
+		// Legacy installations have no physical identity yet; retain their old
+		// station-scoped behavior until the next QR upgrade establishes one.
+		salt = cfg.DeviceSecret + "\x00" + cfg.DeviceID
+	}
+	sum := sha256.Sum256([]byte("salcara-remote-api-v2\x00" + salt + "\x00" + id))
 	return "api_" + hex.EncodeToString(sum[:10])
 }
 
@@ -174,9 +191,53 @@ func remoteAPIOptions(cfg config.Config) []remoteAPIOption {
 				break
 			}
 		}
-		out = append(out, remoteAPIOption{ID: APIHandle(cfg, a.ID), Name: safeConfirmationLabel(a.Name, "已命名 API", cfg), Models: models})
+		out = append(out, remoteAPIOption{ID: APIHandle(cfg, a.ID), Name: safeConfirmationLabel(a.Name, "已命名 API", cfg), Models: models, Station: stationForAPI(cfg, a)})
 	}
 	return out
+}
+
+// stationForAPI returns a station only when the API origin identifies exactly
+// one saved station. Different API and Hub origins are intentionally left
+// decoupled: a user may route a key through A while the phone remains paired
+// to B, and an ambiguous same-origin setup must never guess.
+func stationForAPI(cfg config.Config, account config.LocalAccount) *remoteAPIStation {
+	// Without the physical identity the opaque API handle is intentionally
+	// station-scoped for legacy installs, so it cannot safely accompany A→B.
+	if cfg.ComputerID == "" {
+		return nil
+	}
+	apiURL, err := url.Parse(strings.TrimSpace(account.BaseURL))
+	if err != nil || apiURL.Scheme == "" || apiURL.Host == "" || apiURL.User != nil || apiURL.RawQuery != "" || apiURL.Fragment != "" {
+		return nil
+	}
+	var matches []remoteAPIStation
+	seen := map[string]bool{}
+	for _, station := range cfg.RemoteConnections {
+		hubURL := config.NormalizeHubURL(station.HubURL)
+		if hubURL == "" || station.DeviceID == "" || station.DeviceSecret == "" {
+			continue
+		}
+		hubParsed, parseErr := url.Parse(hubURL)
+		if parseErr != nil || hubParsed.Scheme == "" || hubParsed.Host == "" || hubParsed.User != nil || hubParsed.RawQuery != "" || hubParsed.Fragment != "" {
+			continue
+		}
+		if !strings.EqualFold(apiURL.Scheme, hubParsed.Scheme) || !strings.EqualFold(apiURL.Host, hubParsed.Host) {
+			continue
+		}
+		key := strings.ToLower(hubURL) + "\x00" + station.DeviceID
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		matches = append(matches, remoteAPIStation{HubURL: hubURL, DeviceID: station.DeviceID})
+		if len(matches) > 1 {
+			return nil
+		}
+	}
+	if len(matches) != 1 {
+		return nil
+	}
+	return &matches[0]
 }
 
 func apiConfirmation(cfg config.Config, target string) agentAPIStatus {

@@ -38,13 +38,21 @@ const (
 
 // Status is a snapshot of the hub connection.
 type Status struct {
-	State     string `json:"state"`
-	Error     string `json:"error,omitempty"`
-	Since     int64  `json:"since"` // ms
-	HubURL    string `json:"hubUrl"`
-	DeviceID  string `json:"deviceId"`
-	Queued    int    `json:"queued"`
-	LastEvent int64  `json:"lastEventSent,omitempty"`
+	State     string      `json:"state"`
+	Error     string      `json:"error,omitempty"`
+	Since     int64       `json:"since"` // ms
+	HubURL    string      `json:"hubUrl"`
+	DeviceID  string      `json:"deviceId"`
+	Queued    int         `json:"queued"`
+	LastEvent int64       `json:"lastEventSent,omitempty"`
+	Pairing   *PairStatus `json:"pairing,omitempty"`
+}
+
+type PairStatus struct {
+	DeviceID         string `json:"deviceId"`
+	Paired           bool   `json:"paired"`
+	Revision         int64  `json:"revision"`
+	PendingExpiresAt int64  `json:"pendingExpiresAt"`
 }
 
 // Options configure a Client. Zero durations use the production defaults.
@@ -100,29 +108,49 @@ type Client struct {
 	modelCatalog      map[string]verifiedModelCatalog
 	modelCatalogEpoch uint64
 
-	mu         sync.Mutex
-	status     Status
-	cancelConn context.CancelFunc
-	lastFP     string
-	lastReg    time.Time
-	tools      []protocol.Tool
+	mu                   sync.Mutex
+	phoneMu              sync.Mutex
+	revokeCleanupMu      sync.Mutex // serialize durable conditional station cleanup
+	revokeWake           chan struct{}
+	uploadAuthorization  string
+	lastPairRevision     int64
+	pairRevisionIdentity string
+	status               Status
+	cancelConn           context.CancelFunc
+	lastFP               string
+	lastReg              time.Time
+	tools                []protocol.Tool
+	toolsAt              time.Time
 
 	wake  chan struct{}
 	regCh chan struct{}
 
-	qmu                sync.Mutex
-	queue              []protocol.Event
-	queueBytes         int
-	inFlight           int // immutable prefix currently being uploaded; never coalesce it
-	queueConfig        config.Config
-	recoveryGeneration uint64
-	recovery           map[string]recoveryMark
-	recoveryAll        bool
-	recoveryOverflow   uint64
-	recoverySeen       map[string]uint64
-	recoverySeenOrder  []string
-	flushNow           chan struct{}
-	lastSent           atomic.Int64
+	qmu sync.Mutex
+	// stationSwitching is set while a remote.station.switch transaction is
+	// validating and committing.  It is guarded by qmu when changed/read by
+	// the queue path so flushLoop cannot take a batch after the switch has
+	// declared the queue idle.  Push still accepts late events; the final
+	// switch check then safely aborts the handover instead of losing them.
+	stationSwitching atomic.Bool
+	// A committed handover or an ordinary Kick has a short interval before
+	// the station sends pair.status. Retain events for the durable phone
+	// generation instead of treating unknown authorization as a revoke.
+	handoverAwaitingAuth atomic.Bool
+	queue                []protocol.Event
+	queueBytes           int
+	inFlight             int             // immutable prefix currently being uploaded; never coalesce it
+	inFlightBatchID      string          // stable across HTTP retries until this prefix is acknowledged
+	inFlightPayload      json.RawMessage // frozen wire bytes, including gap-notice timestamps
+	inFlightRecovery     map[string]recoveryMark
+	queueConfig          config.Config
+	recoveryGeneration   uint64
+	recovery             map[string]recoveryMark
+	recoveryAll          bool
+	recoveryOverflow     uint64
+	recoverySeen         map[string]uint64
+	recoverySeenOrder    []string
+	flushNow             chan struct{}
+	lastSent             atomic.Int64
 
 	streamHTTP *http.Client
 }
@@ -177,9 +205,11 @@ func New(o Options) *Client {
 		wake:       make(chan struct{}, 1),
 		regCh:      make(chan struct{}, 1),
 		flushNow:   make(chan struct{}, 1),
+		revokeWake: make(chan struct{}, 1),
 		streamHTTP: &http.Client{Transport: tr, CheckRedirect: o.HTTP.CheckRedirect},
 	}
 	c.status = Status{State: StateNotLoggedIn, Since: nowMS()}
+	c.lastPairRevision = -1
 	return c
 }
 
@@ -198,15 +228,19 @@ func (c *Client) manager() agents.Manager {
 
 // Status returns the current connection status.
 func (c *Client) Status() Status {
+	// Keep the lock order consistent with Push/flushLoop. Those paths hold
+	// qmu while checking canUpload (which takes mu); taking mu first here could
+	// deadlock exactly when a status refresh races an event upload.
+	c.qmu.Lock()
+	queued := len(c.queue)
+	c.qmu.Unlock()
 	c.mu.Lock()
 	s := c.status
 	c.mu.Unlock()
 	cfg := c.o.Store.Get()
 	s.HubURL = cfg.EffectiveHubURL()
 	s.DeviceID = cfg.DeviceID
-	c.qmu.Lock()
-	s.Queued = len(c.queue)
-	c.qmu.Unlock()
+	s.Queued = queued
 	s.LastEvent = c.lastSent.Load()
 	return s
 }
@@ -240,7 +274,16 @@ func (c *Client) setState(state, errText string) {
 
 // Kick drops the current connection and reconnects immediately (after login/config changes).
 func (c *Client) Kick() {
+	// A normal reconnect also has an authorization gap before pair.status.
+	// Retain progress for the same durable phone generation during that gap;
+	// an explicit revoke clears PhoneHash and therefore cannot enter this gate.
+	cfg := c.o.Store.Get()
+	if cfg.PhoneBindingID != "" && cfg.PhoneHash != "" {
+		c.handoverAwaitingAuth.Store(true)
+	}
 	c.mu.Lock()
+	c.status.Pairing = nil // unknown until the new station's authenticated snapshot
+	c.uploadAuthorization = ""
 	if c.cancelConn != nil {
 		c.cancelConn()
 	}
@@ -263,6 +306,7 @@ func (c *Client) Reregister() {
 func (c *Client) Run(ctx context.Context) {
 	go c.flushLoop(ctx)
 	go c.registerLoop(ctx)
+	go c.phoneRevokeLoop(ctx)
 	backoff := c.o.BackoffMin
 	for ctx.Err() == nil {
 		cfg := c.o.Store.Get()
@@ -363,6 +407,10 @@ func (c *Client) requestFor(ctx context.Context, cfg config.Config, method, path
 		req.Header.Set("X-Salcara-Device-Id", cfg.DeviceID)
 	}
 	req.Header.Set("User-Agent", "SalcaraBridge/"+c.o.Version)
+	if path == "/bridge/events" && cfg.PhoneBindingID != "" {
+		req.Header.Set("X-Salcara-Binding-Id", cfg.PhoneBindingID)
+		req.Header.Set("X-Salcara-Phone-Hash", cfg.PhoneHash)
+	}
 	if hasBody {
 		req.Header.Set("Content-Type", "application/json")
 	}
@@ -377,16 +425,50 @@ func (c *Client) PairStart(ctx context.Context) (string, int64, error) {
 }
 
 type PairInfo struct {
-	Code      string `json:"code"`
-	Ticket    string `json:"ticket"`
-	ExpiresAt int64  `json:"expires_at"`
+	Code       string `json:"code"`
+	Ticket     string `json:"ticket"`
+	ExpiresAt  int64  `json:"expires_at"`
+	ComputerID string `json:"-"`
+	Revision   int64  `json:"revision"`
+	AttemptID  string `json:"attemptId"`
 }
 
-func (c *Client) StartPair(ctx context.Context) (PairInfo, error) {
+func (c *Client) StartPair(ctx context.Context) (result PairInfo, retErr error) {
+	c.phoneMu.Lock()
+	defer c.phoneMu.Unlock()
 	if c.Status().State != StateConnected {
 		return PairInfo{}, errors.New("电脑尚未连接中转站")
 	}
-	req, err := c.newRequest(ctx, http.MethodPost, "/bridge/pair/start", map[string]string{"deviceId": c.o.Store.Get().DeviceID})
+	initial := c.o.Store.Get()
+	if initial.RemoteDeviceOnly || initial.PhoneBindingID != "" {
+		if err := c.o.Store.Update(func(cfg *config.Config) error {
+			if cfg.ComputerID == "" {
+				cfg.ComputerID = config.NewUUID()
+			}
+			if cfg.PhoneBindingID == "" {
+				cfg.PhoneBindingID = config.RandomToken(32)
+			}
+			cfg.PhonePairPending = config.RemoteIdentity(*cfg)
+			cfg.PhonePairAttempt = config.RandomToken(32)
+			cfg.PhonePairExpires = nowMS() + (5 * time.Minute).Milliseconds()
+			return nil
+		}); err != nil {
+			return PairInfo{}, errors.New("无法保存本机配对授权")
+		}
+	}
+	cfg := c.o.Store.Get()
+	defer func() {
+		if retErr != nil && cfg.PhonePairAttempt != "" {
+			_ = c.o.Store.Update(func(next *config.Config) error {
+				if next.PhonePairAttempt == cfg.PhonePairAttempt {
+					next.PhonePairPending, next.PhonePairAttempt, next.PhonePairExpires = "", "", 0
+				}
+				return nil
+			})
+		}
+	}()
+	body, _ := json.Marshal(map[string]string{"deviceId": cfg.DeviceID, "bindingId": cfg.PhoneBindingID, "phoneHash": cfg.PhoneHash, "computerId": cfg.ComputerID, "attemptId": cfg.PhonePairAttempt})
+	req, err := c.requestFor(ctx, cfg, http.MethodPost, "/bridge/pair/start", bytes.NewReader(body), true)
 	if err != nil {
 		return PairInfo{}, err
 	}
@@ -398,7 +480,6 @@ func (c *Client) StartPair(ctx context.Context) (PairInfo, error) {
 	if resp.StatusCode/100 != 2 {
 		return PairInfo{}, checkResp(resp)
 	}
-	var result PairInfo
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 4096)).Decode(&result); err != nil {
 		return PairInfo{}, err
 	}
@@ -406,13 +487,28 @@ func (c *Client) StartPair(ctx context.Context) (PairInfo, error) {
 		return PairInfo{}, errors.New("中转站返回的配对码无效")
 	}
 	if c.o.Store.Get().RemoteDeviceOnly && len(result.Ticket) != 64 {
-		return PairInfo{}, errors.New("本站插件没有返回安全扫码凭证，请更新插件")
+		return PairInfo{}, errors.New("本站远程服务没有返回安全扫码凭证，请更新服务")
 	}
+	// New Hubs echo the attempt marker and are checked strictly. Older paired
+	// Hubs have only the single-use ticket/expiry; keep that compatibility path
+	// without treating a missing marker as proof of a newer state.
+	if cfg.PhonePairAttempt != "" && result.AttemptID != "" && (result.AttemptID != cfg.PhonePairAttempt || result.ExpiresAt <= nowMS() || result.ExpiresAt > cfg.PhonePairExpires+30_000 || result.Revision < 0) {
+		return PairInfo{}, errors.New("本站远程服务未确认配对请求，请更新服务后重新扫码")
+	}
+	// The active station can change while the HTTP request is in flight. Do
+	// not publish an A-side QR/revision into the newly selected B connection;
+	// the deferred cleanup is conditional on the old attempt marker.
+	if config.RemoteIdentity(cfg) != config.RemoteIdentity(c.o.Store.Get()) {
+		return PairInfo{}, errors.New("中转站已切换，请重新生成二维码")
+	}
+	c.pairRevisionIdentity, c.lastPairRevision = config.RemoteIdentity(cfg), result.Revision
+	c.publishPair(PairStatus{DeviceID: cfg.DeviceID, Paired: cfg.PhoneHash != "" && c.canUpload(cfg), Revision: result.Revision, PendingExpiresAt: result.ExpiresAt}, c.currentUploadAuthorization())
+	result.ComputerID = cfg.ComputerID
 	return result, nil
 }
 
 func (c *Client) RevokePair(ctx context.Context) error {
-	return c.post(ctx, "/bridge/pair/revoke", map[string]string{"deviceId": c.o.Store.Get().DeviceID})
+	return c.revokePhone(ctx)
 }
 
 func (c *Client) post(ctx context.Context, path string, body any) error {
@@ -465,10 +561,29 @@ func (c *Client) Device(ctx context.Context) protocol.Device {
 		Projects: cfg.Projects,
 	}
 	if m := c.manager(); m != nil {
-		for _, a := range m.Agents() {
-			dctx, cancel := context.WithTimeout(ctx, 15*time.Second)
-			d.Tools = append(d.Tools, a.Detect(dctx))
-			cancel()
+		c.mu.Lock()
+		cached := !c.toolsAt.IsZero() && time.Since(c.toolsAt) < c.o.ToolCheckEvery
+		if cached {
+			d.Tools = append([]protocol.Tool{}, c.tools...)
+		}
+		c.mu.Unlock()
+		if !cached {
+			list := m.Agents()
+			d.Tools = make([]protocol.Tool, len(list))
+			var wg sync.WaitGroup
+			for i, a := range list {
+				wg.Add(1)
+				go func(i int, a agents.Agent) {
+					defer wg.Done()
+					dctx, cancel := context.WithTimeout(ctx, 4*time.Second)
+					defer cancel()
+					d.Tools[i] = a.Detect(dctx)
+				}(i, a)
+			}
+			wg.Wait()
+			c.mu.Lock()
+			c.toolsAt = time.Now()
+			c.mu.Unlock()
 		}
 	}
 	c.mu.Lock()
@@ -538,6 +653,13 @@ func (c *Client) stream(ctx context.Context) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	cfg := c.o.Store.Get()
+	if config.RemoteIdentity(cfg) != config.RemoteIdentity(c.o.Store.Get()) {
+		return errors.New("中转站已切换，不连接旧站点")
+	}
+	c.phoneMu.Lock()
+	c.pairRevisionIdentity = config.RemoteIdentity(cfg)
+	c.lastPairRevision = -1 // Hub revisions are memory-local and may reset after restart.
+	c.phoneMu.Unlock()
 	req, err := c.requestFor(ctx, cfg, http.MethodGet, "/bridge/stream?deviceId="+cfg.DeviceID, nil, false)
 	if err != nil {
 		return err
@@ -625,6 +747,10 @@ func (c *Client) handleSSEFor(_ context.Context, name, data string, cfg config.C
 	if config.RemoteIdentity(cfg) != config.RemoteIdentity(c.o.Store.Get()) {
 		return
 	}
+	if name == "pair.status" {
+		c.acceptPairState(cfg, data)
+		return
+	}
 	if name != "command" && name != "" {
 		return
 	}
@@ -644,10 +770,36 @@ func (c *Client) executeFor(env protocol.CommandEnvelope, cfg config.Config) {
 	if config.RemoteIdentity(cfg) != config.RemoteIdentity(c.o.Store.Get()) {
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 44*time.Second)
+	// Leave time for /bridge/reply within the Hub's default 45 s deadline.
+	ctx, cancel := context.WithTimeout(context.Background(), 38*time.Second)
 	defer cancel()
 	typ, _ := env.Command["type"].(string)
-	res, err := c.Dispatch(ctx, env.Command)
+	stationSwitch := typ == "remote.station.switch"
+	var res any
+	var err error
+	if env.DeviceID != cfg.DeviceID && (env.DeviceID != "" || cfg.RemoteDeviceOnly) || typ != "device.ping" && (!phoneMatches(c.o.Store.Get(), env.BindingID, env.PhoneHash) || !c.canUpload(c.o.Store.Get())) {
+		err = errors.New("手机绑定已失效，请重新扫码")
+	} else {
+		// Dispatch can wait for another task/API mutation. Freeze the identity
+		// observed at admission and re-check it after that wait, otherwise an old
+		// A command could run against the newly selected B station.
+		guarded := withCommandGuard(ctx, commandGuard{identity: config.RemoteIdentity(cfg), deviceID: cfg.DeviceID, bindingID: env.BindingID, phoneHash: env.PhoneHash})
+		res, err = c.Dispatch(guarded, env.Command)
+	}
+	// Recheck after long reads, before any private history leaves the computer.
+	identityChanged := config.RemoteIdentity(cfg) != config.RemoteIdentity(c.o.Store.Get())
+	// A station switch commits the new identity before the old Hub receives its
+	// reply.  The phone binding can be revoked in that small window, which may
+	// turn the reply into an authorization error even though B is already the
+	// active station.  Remember the commit separately so the old SSE is still
+	// kicked and the Bridge cannot remain attached to A forever.
+	stationCommitted := stationSwitch && identityChanged
+	if (!stationSwitch && identityChanged) || typ != "device.ping" && !stationSwitch && (!phoneMatches(c.o.Store.Get(), env.BindingID, env.PhoneHash) || !c.canUpload(c.o.Store.Get())) {
+		res, err = nil, errors.New("手机绑定已失效，请重新扫码")
+	}
+	if stationSwitch && err == nil && !phoneMatches(c.o.Store.Get(), env.BindingID, env.PhoneHash) {
+		res, err = nil, errors.New("手机绑定已失效，请重新扫码")
+	}
 	rep := protocol.Reply{DeviceID: cfg.DeviceID, CommandID: env.CommandID, OK: err == nil, Result: res}
 	if err != nil {
 		rep.Error = err.Error()
@@ -661,10 +813,23 @@ func (c *Client) executeFor(env protocol.CommandEnvelope, cfg config.Config) {
 		perr := c.postFor(rctx, cfg, "/bridge/reply", rep)
 		rcancel()
 		if perr == nil {
+			if stationCommitted {
+				// The old Hub must receive the acknowledgement before its stream is
+				// dropped. ReconnectLoop will then read the new active station from
+				// the atomically-saved config.
+				c.Kick()
+			}
 			return
 		}
 		c.log.Printf("hub: reply %s: %v", env.CommandID, perr)
 		time.Sleep(time.Duration(i+1) * 500 * time.Millisecond)
+	}
+	// switchStation has already committed the new identity before the reply is
+	// attempted. If A disappeared after that commit, all reply retries can fail
+	// even though B is the only correct destination. Do not leave the stream
+	// attached to A until its heartbeat happens to end; reconnect immediately.
+	if stationCommitted {
+		c.Kick()
 	}
 }
 
@@ -678,12 +843,19 @@ func (c *Client) Push(ev protocol.Event) {
 	}
 	c.qmu.Lock()
 	cfg := c.o.Store.Get()
-	if config.RemoteIdentity(cfg) != config.RemoteIdentity(c.queueConfig) {
+	if eventIdentity(cfg) != eventIdentity(c.queueConfig) {
 		c.queue = nil
 		c.queueBytes = 0
 		c.inFlight = 0
+		c.inFlightBatchID = ""
+		c.inFlightPayload = nil
+		c.inFlightRecovery = nil
 		c.clearRecoveryLocked()
 		c.queueConfig = cfg
+	}
+	if !c.canUpload(cfg) && !(c.handoverAwaitingAuth.Load() && cfg.PhoneHash != "") {
+		c.qmu.Unlock()
+		return
 	}
 	weight := eventWeight(ev)
 	if weight > maxEventWeight || weight > c.o.QueueBytes {
@@ -748,23 +920,49 @@ func (c *Client) flushLoop(ctx context.Context) {
 		}
 		for {
 			c.qmu.Lock()
+			if c.stationSwitching.Load() {
+				c.qmu.Unlock()
+				break
+			}
 			n := len(c.queue)
 			if n == 0 && len(c.recovery) == 0 {
 				c.qmu.Unlock()
 				break
 			}
-			n = uploadCount(c.queue)
+			if c.inFlightBatchID == "" {
+				n = uploadCount(c.queue)
+				upload, recoveryMarks := c.recoveryBatchLocked(c.queue[:n])
+				batchID := config.NewUUID()
+				payload, err := json.Marshal(map[string]any{"deviceId": c.queueConfig.DeviceID, "batchId": batchID, "events": upload})
+				if err != nil {
+					c.qmu.Unlock()
+					c.log.Printf("hub: cannot encode event batch: %v", err)
+					break
+				}
+				c.inFlight, c.inFlightBatchID = n, batchID
+				c.inFlightPayload, c.inFlightRecovery = payload, recoveryMarks
+			}
+			n = c.inFlight
 			batch := append([]protocol.Event(nil), c.queue[:n]...)
-			upload, recoveryMarks := c.recoveryBatchLocked(batch)
-			c.inFlight = n
+			batchID := c.inFlightBatchID
+			payload, recoveryMarks := c.inFlightPayload, c.inFlightRecovery
 			cfg := c.queueConfig
 			c.qmu.Unlock()
-			if config.RemoteIdentity(cfg) != config.RemoteIdentity(c.o.Store.Get()) {
+			if eventIdentity(cfg) != eventIdentity(c.o.Store.Get()) || !c.canUpload(cfg) {
+				// The active identity is already B, but its authenticated pair.status
+				// has not arrived yet. Retain the queue for that bounded reconnect;
+				// publishPair clears the gate on success or revocation.
+				if c.handoverAwaitingAuth.Load() && cfg.PhoneHash != "" && eventIdentity(cfg) == eventIdentity(c.o.Store.Get()) {
+					break
+				}
 				c.qmu.Lock()
-				if config.RemoteIdentity(c.queueConfig) == config.RemoteIdentity(cfg) {
+				if eventIdentity(c.queueConfig) == eventIdentity(cfg) {
 					c.queue = nil
 					c.queueBytes = 0
 					c.inFlight = 0
+					c.inFlightBatchID = ""
+					c.inFlightPayload = nil
+					c.inFlightRecovery = nil
 					c.clearRecoveryLocked()
 				}
 				c.qmu.Unlock()
@@ -772,14 +970,12 @@ func (c *Client) flushLoop(ctx context.Context) {
 			}
 
 			pctx, cancel := context.WithTimeout(ctx, 20*time.Second)
-			err := c.postFor(pctx, cfg, "/bridge/events", map[string]any{"deviceId": cfg.DeviceID, "events": upload})
+			err := c.postFor(pctx, cfg, "/bridge/events", payload)
 			cancel()
 			if err != nil {
-				c.qmu.Lock()
-				if config.RemoteIdentity(c.queueConfig) == config.RemoteIdentity(cfg) {
-					c.inFlight = 0
-				}
-				c.qmu.Unlock()
+				// Keep the prefix, exact serialized payload and recovery marks
+				// immutable until acknowledgement. A lost reply may mean the Hub
+				// already accepted this digest; new progress belongs to the next ID.
 				fails++
 				d := time.Duration(fails) * time.Second
 				if d > 30*time.Second {
@@ -792,7 +988,7 @@ func (c *Client) flushLoop(ctx context.Context) {
 			fails = 0
 			c.lastSent.Store(nowMS())
 			c.qmu.Lock()
-			if config.RemoteIdentity(c.queueConfig) != config.RemoteIdentity(cfg) {
+			if eventIdentity(c.queueConfig) != eventIdentity(cfg) || c.inFlightBatchID != batchID {
 				c.qmu.Unlock()
 				break
 			}
@@ -807,6 +1003,9 @@ func (c *Client) flushLoop(ctx context.Context) {
 				c.queueBytes -= eventWeight(event)
 			}
 			c.acknowledgeRecoveryLocked(recoveryMarks)
+			c.inFlightBatchID = ""
+			c.inFlightPayload = nil
+			c.inFlightRecovery = nil
 			c.qmu.Unlock()
 		}
 	}

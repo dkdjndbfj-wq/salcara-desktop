@@ -223,6 +223,34 @@ func waitFor(t *testing.T, what string, cond func() bool) {
 	t.Fatalf("timeout waiting for %s", what)
 }
 
+func TestStatusAndPushDoNotDeadlock(t *testing.T) {
+	c, _ := newTestClient(t, "https://hub.invalid", "key", nil)
+	statusDone := make(chan struct{})
+	go func() {
+		defer close(statusDone)
+		for i := 0; i < 2000; i++ {
+			_ = c.Status()
+		}
+	}()
+	pushDone := make(chan struct{})
+	go func() {
+		defer close(pushDone)
+		for i := 0; i < 2000; i++ {
+			c.Push(protocol.Event{Type: "message", SessionKey: "codex:fixture", ID: fmt.Sprintf("m-%d", i), Text: "fixture"})
+		}
+	}()
+	select {
+	case <-statusDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Status blocked while event upload admission was in progress")
+	}
+	select {
+	case <-pushDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Push blocked while status was being read")
+	}
+}
+
 // ---- tests ----
 
 func TestRegisterCommandReplyAndEvents(t *testing.T) {

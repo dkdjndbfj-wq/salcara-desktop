@@ -87,11 +87,21 @@ type Server struct {
 	usageKey     string
 	usageData    map[string]any
 	usageErr     string
+	nativeMu     sync.Mutex
+	nativeAt     time.Time
+	nativeState  desktopcompanion.NativeConnection
+	nativeFlight *nativeStatusFlight
+	nativeEpoch  uint64
 	pairMu       sync.Mutex
 	pairPNG      []byte
 	pairExpires  int64
 	pairIdentity string
 }
+
+// nativeStatusFlight coalesces the expensive local desktop probe. The cache is
+// only for console presentation; Hub dispatch and API changes always perform
+// their own authoritative lease validation.
+type nativeStatusFlight struct{ done chan struct{} }
 
 type sseMsg struct {
 	event string
@@ -327,6 +337,9 @@ func (s *Server) Attribute(ev protocol.Event) protocol.Event {
 
 // BroadcastStatus pushes a hub status change.
 func (s *Server) BroadcastStatus(st hubclient.Status) {
+	if st.Pairing != nil && st.Pairing.PendingExpiresAt == 0 {
+		s.clearQR()
+	}
 	b, _ := json.Marshal(st)
 	s.publish(sseMsg{event: "status", data: b})
 }

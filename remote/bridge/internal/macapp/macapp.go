@@ -17,6 +17,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 )
@@ -34,17 +35,20 @@ const EnvInstalledFrom = "SALCARA_INSTALLED_FROM"
 const EnvDetached = "SALCARA_DETACHED"
 
 // InstallDir is ~/Applications.
-func InstallDir(home string) string { return filepath.Join(home, "Applications") }
+func macClean(value string) string { return path.Clean(strings.ReplaceAll(value, `\`, "/")) }
+
+func InstallDir(home string) string { return path.Join(macClean(home), "Applications") }
 
 // InstallPath is ~/Applications/Salcara Bridge.app.
-func InstallPath(home string) string { return filepath.Join(InstallDir(home), AppName) }
+func InstallPath(home string) string { return path.Join(InstallDir(home), AppName) }
 
 // BundleOf returns the enclosing "*.app" of exe (<X.app>/Contents/MacOS/<exe>), or "".
 func BundleOf(exe string) string {
-	macos := filepath.Dir(exe)
-	contents := filepath.Dir(macos)
-	app := filepath.Dir(contents)
-	if filepath.Base(macos) == "MacOS" && filepath.Base(contents) == "Contents" && strings.HasSuffix(strings.ToLower(app), ".app") {
+	exe = macClean(exe)
+	macos := path.Dir(exe)
+	contents := path.Dir(macos)
+	app := path.Dir(contents)
+	if path.Base(macos) == "MacOS" && path.Base(contents) == "Contents" && strings.HasSuffix(strings.ToLower(app), ".app") {
 		return app
 	}
 	return ""
@@ -54,9 +58,9 @@ func under(p, dir string) bool {
 	if dir == "" {
 		return false
 	}
-	dir = filepath.Clean(dir)
-	p = filepath.Clean(p)
-	return p == dir || strings.HasPrefix(p, dir+string(filepath.Separator))
+	dir = macClean(dir)
+	p = macClean(p)
+	return p == dir || strings.HasPrefix(p, strings.TrimRight(dir, "/")+"/")
 }
 
 // Transient reports whether a bundle path is somewhere autostart must not point to, with a short reason.
@@ -67,7 +71,7 @@ func Transient(bundle, home, tmp string) (string, bool) {
 		return "translocated", true // Gatekeeper's random read-only copy
 	case under(bundle, "/Volumes"):
 		return "volume", true // opened straight from a .dmg or USB stick
-	case home != "" && under(lower, strings.ToLower(filepath.Join(home, "Downloads"))):
+	case home != "" && under(lower, strings.ToLower(path.Join(macClean(home), "Downloads"))):
 		return "downloads", true
 	case under(bundle, "/private/var/folders"), under(bundle, "/var/folders"), under(bundle, "/tmp"), under(bundle, "/private/tmp"):
 		return "temp", true // e.g. opened from inside an archive viewer
@@ -191,7 +195,7 @@ var ErrNotBundle = errors.New("不是 Salcara Bridge 程序包")
 
 // ExecutableIn returns <bundle>/Contents/MacOS/SalcaraBridge if it exists.
 func ExecutableIn(bundle string) (string, error) {
-	p := filepath.Join(bundle, "Contents", "MacOS", Executable)
+	p := filepath.Join(macClean(bundle), "Contents", "MacOS", Executable)
 	if st, err := os.Stat(p); err != nil || !st.Mode().IsRegular() {
 		return "", ErrNotBundle
 	}

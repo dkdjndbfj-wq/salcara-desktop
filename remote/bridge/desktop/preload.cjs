@@ -7,6 +7,7 @@ contextBridge.exposeInMainWorld('salcaraWindow', {
   close: () => ipcRenderer.send('win:close'), // hides to the floating ball; the Bridge keeps running
   show: (route) => ipcRenderer.send('win:show', typeof route === 'string' ? route : ''),
   state: () => ipcRenderer.invoke('win:state'),
+  chooseDirectory: (initial) => ipcRenderer.invoke('win:choose-directory', typeof initial === 'string' ? initial : ''),
   notify: (title, body, route) => ipcRenderer.send('notify', { title: String(title || ''), body: String(body || ''), route: typeof route === 'string' ? route : '' }),
   updateStatus: () => ipcRenderer.invoke('update:status'),
   checkUpdate: () => ipcRenderer.invoke('update:check'),

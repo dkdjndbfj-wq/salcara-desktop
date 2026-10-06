@@ -1064,18 +1064,23 @@ func (a *codexAgent) onNotify(method string, params json.RawMessage) {
 		t.info.Status = "running"
 		t.info.UpdatedAt = nowMs()
 		info := t.info
+		turnID := t.turnID
 		for _, parent := range a.threads {
 			if _, tracked := parent.childStates[n.ThreadID]; tracked {
 				parent.childStates[n.ThreadID] = "running"
 			}
 		}
 		a.mu.Unlock()
-		a.emit(protocol.Event{SessionKey: sk, Type: "turn", Status: "started"})
+		a.emit(protocol.Event{SessionKey: sk, Type: "turn", Status: "started", TurnID: turnID})
 		a.emit(protocol.Event{SessionKey: sk, Type: "session.updated", Session: ptrInfo(info)})
 
 	case "turn/completed":
 		a.mu.Lock()
 		t := a.threadLocked(n.ThreadID)
+		turnID := t.turnID
+		if n.Turn != nil && n.Turn.ID != "" {
+			turnID = n.Turn.ID
+		}
 		t.turnID = ""
 		t.items = nil
 		usage := t.usage
@@ -1103,7 +1108,7 @@ func (a *codexAgent) onNotify(method string, params json.RawMessage) {
 		}
 		a.mu.Unlock()
 		a.aps.cancelSession(sk)
-		e := protocol.Event{SessionKey: sk, Type: "turn", Status: "completed"}
+		e := protocol.Event{SessionKey: sk, Type: "turn", Status: "completed", TurnID: turnID}
 		if n.Turn != nil {
 			e.Status = codexTurnStatus(n.Turn.Status)
 			if e.Status == "started" {
@@ -1185,7 +1190,9 @@ func (a *codexAgent) onNotify(method string, params json.RawMessage) {
 				it.AggregatedOutput = &out
 			}
 		}
+		turnID := t.turnID
 		e, ok := codexItemEvent(sk, it, completed, cwd)
+		e.TurnID = turnID
 		if ok && !completed && e.Type == "tool" {
 			t.live(it.ID).lastEvent = e
 		}

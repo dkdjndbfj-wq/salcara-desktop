@@ -14,18 +14,76 @@ type companionControl interface {
 	NativeDisconnect(context.Context) error
 }
 
+const nativeStatusCacheTTL = 750 * time.Millisecond
+
+func emptyNativeConnection() desktopcompanion.NativeConnection {
+	return desktopcompanion.NativeConnection{SessionKeys: []string{}}
+}
+
+// invalidateNativeConnection is used after an explicit revoke/install change.
+// It also makes test adapters and a replaced local companion fail closed
+// immediately instead of waiting for the presentation cache to expire.
+func (s *Server) invalidateNativeConnection() {
+	s.nativeMu.Lock()
+	s.nativeEpoch++
+	s.nativeAt = time.Time{}
+	s.nativeState = emptyNativeConnection()
+	s.nativeMu.Unlock()
+}
+
 func (s *Server) nativeConnection(ctx context.Context) desktopcompanion.NativeConnection {
-	st := desktopcompanion.NativeConnection{SessionKeys: []string{}}
+	st := emptyNativeConnection()
 	service, ok := s.d.Companion.(companionControl)
 	if !ok {
 		return st
 	}
-	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
-	defer cancel()
-	if actual, err := service.NativeStatus(ctx); err == nil && desktopcompanion.ValidateNativeConnection(actual, time.Now().UnixMilli()) {
-		return actual
+	now := time.Now()
+	s.nativeMu.Lock()
+	if !s.nativeAt.IsZero() && now.Sub(s.nativeAt) < nativeStatusCacheTTL {
+		actual := s.nativeState
+		s.nativeMu.Unlock()
+		if desktopcompanion.ValidateNativeConnection(actual, now.UnixMilli()) {
+			return actual
+		}
+		return st
 	}
-	return st
+	flight := s.nativeFlight
+	if flight == nil {
+		flight = &nativeStatusFlight{done: make(chan struct{})}
+		s.nativeFlight = flight
+		epoch := s.nativeEpoch
+		go func() {
+			probeCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			actual, err := service.NativeStatus(probeCtx)
+			if err != nil || !desktopcompanion.ValidateNativeConnection(actual, time.Now().UnixMilli()) {
+				actual = st
+			}
+			s.nativeMu.Lock()
+			if s.nativeEpoch == epoch {
+				s.nativeState = actual
+				s.nativeAt = time.Now()
+			}
+			if s.nativeFlight == flight {
+				s.nativeFlight = nil
+			}
+			close(flight.done)
+			s.nativeMu.Unlock()
+		}()
+	}
+	s.nativeMu.Unlock()
+	select {
+	case <-ctx.Done():
+		return st
+	case <-flight.done:
+		s.nativeMu.Lock()
+		actual := s.nativeState
+		s.nativeMu.Unlock()
+		if desktopcompanion.ValidateNativeConnection(actual, time.Now().UnixMilli()) {
+			return actual
+		}
+		return st
+	}
 }
 
 func (s *Server) handleDesktopControl(w http.ResponseWriter, r *http.Request) {
@@ -48,6 +106,7 @@ func (s *Server) handleDisconnectDesktop(w http.ResponseWriter, r *http.Request)
 		writeErr(w, http.StatusConflict, "无法确认桌面授权已撤回；请在 Codex 中取消连接工具调用，或等待授权到期")
 		return
 	}
+	s.invalidateNativeConnection()
 	writeJSON(w, map[string]any{"disconnected": true, "desktopControl": false, "remoteSend": false})
 }
 
@@ -82,6 +141,7 @@ func (s *Server) handleInstallDesktopCompanion(w http.ResponseWriter, r *http.Re
 		writeErr(w, http.StatusConflict, "插件未安装成功；未授权覆盖已有插件或并发修改，请检查本地配置与软件包")
 		return
 	}
+	s.invalidateNativeConnection()
 	writeJSON(w, map[string]any{"status": status, "desktopControl": false, "remoteSend": false})
 }
 
@@ -115,6 +175,7 @@ func (s *Server) handleUninstallDesktopCompanion(w http.ResponseWriter, r *http.
 		writeErr(w, http.StatusConflict, "未完成卸载；配置归属无法确认、已被编辑或有并发修改时不会覆盖，请手动检查")
 		return
 	}
+	s.invalidateNativeConnection()
 	writeJSON(w, map[string]any{"status": status, "desktopControl": false, "remoteSend": false})
 }
 

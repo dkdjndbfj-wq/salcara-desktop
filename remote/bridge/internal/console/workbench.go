@@ -51,6 +51,8 @@ func toolBindings(c config.Config, tools []launcher.Tool, hubState string, nativ
 			if c.RemoteDeviceOnly {
 				lamp.Label, lamp.Detail = "设备验证失败", "本站拒绝了这台电脑的设备身份，请在「手机远程」检查连接"
 			}
+		} else if hubState == "unpaired" {
+			lamp.State, lamp.Label, lamp.Detail = "off", "手机未绑定", "在「手机远程」扫码绑定手机"
 		} else if hubState != hubclient.StateConnected {
 			lamp.State, lamp.Label, lamp.Detail = "connecting", "远程连接中", "正在连接中转站"
 		} else {

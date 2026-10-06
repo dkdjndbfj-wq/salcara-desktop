@@ -178,6 +178,7 @@ func TestCompanionControlReportsOnlyLiveValidScopeAndNoSecrets(t *testing.T) {
 		{Active: true, ExpiresAt: time.Now().Add(31 * 24 * time.Hour).UnixMilli(), SessionKeys: []string{key}},
 	} {
 		f.connection = bad
+		s.invalidateNativeConnection()
 		w = do(h, "GET", path, host, hdr, "")
 		if !strings.Contains(w.Body.String(), `"desktopControl":false`) || strings.Contains(w.Body.String(), "fixture-private") {
 			t.Fatal(w.Body.String())

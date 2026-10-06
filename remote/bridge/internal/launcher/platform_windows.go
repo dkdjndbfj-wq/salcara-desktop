@@ -47,7 +47,7 @@ func platformPackages(ctx context.Context) map[string]Tool {
 	if packageCache.tools != nil && time.Since(packageCache.at) < 30*time.Second {
 		return copyTools(packageCache.tools)
 	}
-	ctx, cancel := context.WithTimeout(ctx, 12*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 4*time.Second)
 	defer cancel()
 	// Fixed package names; no user values are interpolated into this probe.
 	script := `$ErrorActionPreference = 'Stop'
@@ -89,8 +89,10 @@ ConvertTo-Json -InputObject @($items) -Compress`
 				}
 			}
 		}
-		packageCache.at, packageCache.tools = time.Now(), out
 	}
+	// Cache an unsuccessful read too. Restricted/slow Appx environments must
+	// not spawn another PowerShell probe for every card and every click.
+	packageCache.at, packageCache.tools = time.Now(), out
 	return copyTools(out)
 }
 

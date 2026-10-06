@@ -141,7 +141,9 @@ function wbOpenModal(target, error) {
 }
 
 RENDER_overview = async function (view) {
-  const [, local] = await Promise.all([loadState(), api('/api/local/accounts')]);
+  void loadState().catch(() => undefined);
+  const local = await api('/api/local/accounts');
+  if (view.isConnected === false) return;
   S.local = local;
   $('#headActions').innerHTML = `<a class="btn" href="#accounts">${icon('key')}API 密钥</a>`;
   const empty = !local.accounts.length;
@@ -180,11 +182,13 @@ async function wbLoadModels(target, id, quiet) {
     const r = await api('/api/local/models', { id });
     S.local = await api('/api/local/accounts');
     const t = S.local.tools.find((x) => x.id === target), a = accountFor(id);
+    if (!t || bindingFor(t).accountId !== id || !a) return;
     // Suggest the Codex picker override when the catalog has non-GPT models.
     const patch = {};
     if (a && !modelsOf(a).includes(bindingFor(t).model)) patch.model = defaultModel(a, toolKind(t));
     if (t && toolKind(t) === 'codex' && a && mixed(a, 'codex') && !bindingFor(t).override) patch.override = true;
-    await wbBind(target, patch);
+    if (Object.keys(patch).length) await wbBind(target, patch);
+    else { renderAgentCards(); if ($('#wbOpenTitle')) wbOpenModal(target); }
     toast(`加载了 ${r.models.length} 个模型`, 'ok');
   } catch (e) {
     if (!quiet) toast(e.message, 'bad'); else renderAgentCards();

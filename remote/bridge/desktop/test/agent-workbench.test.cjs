@@ -167,7 +167,8 @@ test('modal/editor layout and model rules remain stable after requested picker r
     [workbenchSource, 'wbOpenModal', '68fe245121cfa4b9ae4a41e4eeb7b4fc0d28ebe11724482d7fb9d71fb6adb8ab'],
     [workbenchSource, 'inferProtocol', 'f86fd4e83d8fd50613b471fefba9cc3598268196a9636e23b446d2438ad965dd'],
     [workbenchSource, 'defaultModel', 'e5f40804bc2b4e88ba62973d876bfc7e69abf468dd50b1f17b70f5a0c198520c'],
-    [workbenchSource, 'wbLoadModels', '7ca02c5345baf84d4ce46d495a055dbc58b4cf22e62e3de7944269b9d10e2762'],
+    // Behavior-only: stale binding guard and no redundant bind after catalog load.
+    [workbenchSource, 'wbLoadModels', '2d3e63043854ce9d361c61e44a32d181e8230091afdfc5c834d5cdfe413b1fbd'],
     [workbenchSource, 'wbBind', '05f0e3c29eb0e40d5d2bfd4c39684e27a140e40262ba0f71d307aa2773a280f8'],
     [appSource, 'localEditor', '73728443f6b8e33f51adb2f2aad22f92d2c33d2ee84e17353693ef24dc7fa79d'],
     [appSource, 'desktopRemoteLamp', 'a858dc477860a8e4de441aedfa08ac4a342fe4015914ac04507b9853f51c12da'],

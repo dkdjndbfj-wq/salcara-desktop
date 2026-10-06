@@ -100,7 +100,7 @@ func bundledCodex(path string) bool {
 }
 
 func (s *Server) setupItems(ctx context.Context) []setupItem {
-	tools := s.d.Local.Tools(ctx, s.d.Store.Get().LocalToolPaths)
+	tools := s.d.Local.Inventory(ctx, s.d.Store.Get().LocalToolPaths)
 	byID := map[string]launcher.Tool{}
 	for _, t := range tools {
 		byID[t.ID] = t
@@ -249,6 +249,9 @@ func (s *Server) handleSetupInstall(w http.ResponseWriter, r *http.Request) {
 			job.State = "done"
 		}
 		setupState.mu.Unlock()
+		if s.d.Local != nil {
+			s.d.Local.InvalidateInventory()
+		}
 		s.log.Printf("setup: %s finished state=%s", in.Tool, job.State)
 	}()
 	writeJSON(w, map[string]any{"ok": true, "job": job})

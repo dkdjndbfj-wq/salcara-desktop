@@ -82,21 +82,25 @@ const S = {
 /* ---------------- utilities ---------------- */
 
 async function api(path, body, method) {
-  const opts = { method: method || (body !== undefined ? 'POST' : 'GET'), headers: {}, credentials: 'same-origin' };
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 65000);
+  const opts = { method: method || (body !== undefined ? 'POST' : 'GET'), headers: {}, credentials: 'same-origin', signal: controller.signal };
   if (body !== undefined) {
     opts.headers['Content-Type'] = 'application/json';
     opts.body = JSON.stringify(body);
   }
-  let res;
   try {
-    res = await fetch(path, opts);
+    const res = await fetch(path, opts);
+    let data = null;
+    try { data = await res.json(); } catch (error) { if (controller.signal.aborted) throw error; }
+    if (!res.ok) throw new Error((data && data.error) || `请求失败 (${res.status})`);
+    if (data === null) throw new Error('本机响应不完整，请重试');
+    return data;
   } catch (e) {
-    throw new Error('连不上 Salcara Bridge，程序可能已经退出');
-  }
-  let data = null;
-  try { data = await res.json(); } catch (_) { /* ignore */ }
-  if (!res.ok) throw new Error((data && data.error) || `请求失败 (${res.status})`);
-  return data;
+    if (controller.signal.aborted) throw new Error('本机响应超时，请重试');
+    if (e instanceof TypeError) throw new Error('连不上 Salcara Bridge，程序可能已经退出');
+    throw e;
+  } finally { clearTimeout(timer); }
 }
 
 /* 系统相关的文案：Finder / 资源管理器 / 文件管理器 */
@@ -231,8 +235,10 @@ function setApprovalBadge() {
   b.textContent = S.approvals.length;
 }
 
+let stateRequest = null;
 async function loadState() {
-  S.state = await api('/api/state');
+  if (!stateRequest) stateRequest = api('/api/state').finally(() => { stateRequest = null; });
+  S.state = await stateRequest;
   setConn(S.state.hub);
   $('#sideVer').textContent = `v${S.state.version} · ${({ windows: 'Windows', darwin: 'macOS', linux: 'Linux' })[S.state.os] || S.state.os}`;
   return S.state;
@@ -1230,7 +1236,17 @@ const ACTIONS = {
   },
   copyVal: (b) => copyText(b.dataset.v, b.dataset.w),
   copySecret: async (b) => { try { const r = await api('/api/secret?which=' + b.dataset.which); copyText(r.value, 'Key'); } catch (e) { toast(e.message, 'bad'); } },
-  browse: () => openBrowser($('#projPath').value.trim()),
+  browse: async (button) => {
+    const input = $('#projPath');
+    if (!window.salcaraWindow?.chooseDirectory) {
+      if (window.salcaraWindow) throw new Error('请更新电脑端以使用系统文件夹选择器');
+      return openBrowser(input.value.trim()); // standalone browser console only
+    }
+    await busy(button, async () => {
+      const folder = await window.salcaraWindow.chooseDirectory(input.value.trim());
+      if (folder && input.isConnected) input.value = folder;
+    });
+  },
   fsGo: (b) => S.fsLoad(b.dataset.p),
   fsPick: () => { const c = S.fsCur(); $('#modalRoot').innerHTML = ''; const i = $('#projPath'); if (i && c) { i.value = c.path; ACTIONS.addProj($('[data-act=addProj]')); } },
   closeModal: (b, e) => { if (b.classList.contains('modal-back') && e.target.closest('[data-stop]')) return; $('#modalRoot').innerHTML = ''; },
@@ -1349,10 +1365,12 @@ function connectStream() {
     const st = JSON.parse(m.data);
     if (S.state) S.state.hub = st;
     setConn(st);
+    if (typeof rmPairStatus === 'function') rmPairStatus(st);
     refreshWorkbenchStatus();
   });
   es.addEventListener('event', (m) => {
     const ev = JSON.parse(m.data);
+    if (typeof NOTIFY !== 'undefined') NOTIFY.onEvent(ev);
     if (ev.type === 'approval.request') {
       if (!S.approvals.find((a) => a.approvalId === ev.approvalId)) S.approvals.push(ev);
       setApprovalBadge(); renderApprovalsBox();

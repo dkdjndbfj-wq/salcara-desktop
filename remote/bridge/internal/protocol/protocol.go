@@ -22,6 +22,11 @@ type Device struct {
 	Projects []Project `json:"projects"`
 }
 
+// RemoteStationSwitch is intentionally represented as a normal command on the
+// existing authenticated phone channel. The phone supplies only a saved
+// station's public URL/device id and an opaque API handle; the desktop resolves
+// the device secret and local vault entry itself.
+
 type SessionInfo struct {
 	SessionKey   string `json:"sessionKey"`
 	Tool         string `json:"tool"`
@@ -145,6 +150,9 @@ type CommandEnvelope struct {
 	CommandID string         `json:"commandId"`
 	DeviceID  string         `json:"deviceId"`
 	Command   map[string]any `json:"command"`
+	BindingID string         `json:"bindingId,omitempty"`
+	PhoneHash string         `json:"phoneHash,omitempty"`
+	Phone     bool           `json:"phone,omitempty"`
 }
 
 type Reply struct {

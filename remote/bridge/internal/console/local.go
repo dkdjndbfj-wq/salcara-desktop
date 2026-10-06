@@ -7,9 +7,11 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"salcara/bridge/internal/config"
+	"salcara/bridge/internal/desktopcompanion"
 	"salcara/bridge/internal/launcher"
 	"salcara/bridge/internal/toolcfg"
 )
@@ -158,12 +160,24 @@ func (s *Server) handleLocalAccounts(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := ctxTimeout(r, 15*time.Second)
 	defer cancel()
-	tools := s.d.Local.Tools(ctx, c.LocalToolPaths)
+	// Tool discovery may invoke the Windows package manager and the native
+	// desktop lease probe may contact a local companion. They are independent;
+	// doing them serially made the first Agent page wait for both timeouts.
+	var tools []launcher.Tool
+	var native desktopcompanion.NativeConnection
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() { defer wg.Done(); tools = s.d.Local.Inventory(ctx, c.LocalToolPaths) }()
+	go func() { defer wg.Done(); native = s.nativeConnection(ctx) }()
+	wg.Wait()
 	hubState := "not_logged_in"
 	if s.d.Hub != nil {
-		hubState = s.d.Hub.Status().State
+		status := s.d.Hub.Status()
+		hubState = status.State
+		if c.RemoteDeviceOnly && hubState == "connected" && (status.Pairing == nil || !status.Pairing.Paired) {
+			hubState = "unpaired"
+		}
 	}
-	native := s.nativeConnection(ctx)
 	bindings := toolBindings(c, tools, hubState, native)
 	writeJSON(w, map[string]any{"accounts": accounts, "activeCodexAccount": c.ActiveCodexAccount, "activeClaudeAccount": c.ActiveClaudeAccount, "tools": tools, "toolPaths": c.LocalToolPaths, "bindings": bindings, "desktopControl": native.Active, "nativeConnection": native})
 }
@@ -517,6 +531,9 @@ func (s *Server) handleLocalToolPaths(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeErr(w, 400, err.Error())
 		return
+	}
+	if s.d.Local != nil {
+		s.d.Local.InvalidateInventory()
 	}
 	writeJSON(w, map[string]bool{"ok": true})
 }

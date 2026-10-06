@@ -22,19 +22,74 @@ const (
 	maxOpenEvents = 400
 )
 
+type commandGuardKey struct{}
+
+// commandGuard freezes the remote station/phone identity at SSE admission.
+// Dispatch may wait on taskConfigMu while another command changes the active
+// station; rechecking after that wait prevents an old A command from mutating
+// workers that are already owned by B.
+type commandGuard struct {
+	identity  string
+	deviceID  string
+	bindingID string
+	phoneHash string
+}
+
+func withCommandGuard(ctx context.Context, guard commandGuard) context.Context {
+	return context.WithValue(ctx, commandGuardKey{}, guard)
+}
+
+func (c *Client) validateCommandGuard(ctx context.Context, typ string) error {
+	guard, ok := ctx.Value(commandGuardKey{}).(commandGuard)
+	if !ok || c.o.Store == nil {
+		return nil
+	}
+	cfg := c.o.Store.Get()
+	if cfg.DeviceID != guard.deviceID || config.RemoteIdentity(cfg) != guard.identity {
+		return errors.New("连接已变化，请刷新后重试")
+	}
+	if typ != "device.ping" && (!phoneMatches(cfg, guard.bindingID, guard.phoneHash) || !c.canUpload(cfg)) {
+		return errors.New("手机绑定已失效，请重新扫码")
+	}
+	return nil
+}
+
 // Dispatch executes one Command (PROTOCOL.md §3) and returns its result. The local console uses it too.
 func (c *Client) Dispatch(ctx context.Context, cmd map[string]any) (any, error) {
 	if handled, result, err := c.dispatchClaudeDesktopHistory(ctx, cmd); handled {
 		return result, err
 	}
 	typ := str(cmd, "type")
-	if typ == "agents.api.set" || typ == "session.start" || typ == "session.send" || typ == "desktop.session.send" {
+	if typ == "agents.api.set" || typ == "remote.station.switch" || typ == "remote.station.receipt" || typ == "session.start" || typ == "session.send" || typ == "desktop.session.send" {
 		c.taskConfigMu.Lock()
 		defer c.taskConfigMu.Unlock()
+		if err := c.validateCommandGuard(ctx, typ); err != nil {
+			return nil, err
+		}
 		c.expireUpdateLocked()
 		if c.updatePrepared {
 			return nil, errors.New("程序正在更新，请稍后重试")
 		}
+	}
+	if typ == "remote.station.switch" {
+		return c.switchStation(ctx, stationSwitchCommand{
+			TargetHubURL: str(cmd, "targetHubUrl"), TargetDeviceID: str(cmd, "targetDeviceId"), TargetComputerID: str(cmd, "targetComputerId"),
+			Agent: str(cmd, "agent"), AccountID: str(cmd, "accountId"), Model: str(cmd, "model"), SessionKey: str(cmd, "sessionKey"), OperationID: str(cmd, "operationId"),
+		})
+	}
+	if typ == "remote.station.receipt" {
+		operationID := str(cmd, "operationId")
+		if !stationSwitchOperationID(operationID) {
+			return nil, errors.New("切换请求编号无效")
+		}
+		cfg := c.o.Store.Get()
+		return map[string]any{
+			"committed":   cfg.RemoteHandoverOperation == operationID,
+			"operationId": cfg.RemoteHandoverOperation,
+			"payloadHash": cfg.RemoteHandoverPayloadHash,
+			"hubUrl":      config.NormalizeHubURL(cfg.EffectiveHubURL()),
+			"deviceId":    cfg.DeviceID,
+		}, nil
 	}
 	if typ == "device.ping" {
 		// A transport probe must work before agent startup and must never open

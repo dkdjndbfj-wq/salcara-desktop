@@ -37,10 +37,16 @@ type Result struct {
 type Service struct {
 	Dir string
 	// Start is injectable to verify the complete launch plan without opening apps.
-	Start     func(context.Context, Plan) (int, error)
-	FindTools func(context.Context, map[string]string) []Tool
-	Stop      func(context.Context, Plan) error
-	mu        sync.Mutex
+	Start           func(context.Context, Plan) (int, error)
+	FindTools       func(context.Context, map[string]string) []Tool
+	Stop            func(context.Context, Plan) error
+	mu              sync.Mutex
+	inventoryMu     sync.Mutex
+	inventoryKey    string
+	inventoryAt     time.Time
+	inventory       []Tool
+	inventoryFlight *inventoryProbe
+	inventoryEpoch  uint64
 }
 
 func New(dir string) *Service {

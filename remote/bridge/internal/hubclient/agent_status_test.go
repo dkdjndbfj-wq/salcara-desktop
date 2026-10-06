@@ -248,3 +248,32 @@ func TestAgentsStatusAppliedMetadataContainsOnlyTheFiniteContract(t *testing.T) 
 		}
 	}
 }
+
+func TestRemoteAPIOptionCarriesOnlyAnUnambiguousSavedStation(t *testing.T) {
+	cfg := config.Config{
+		ComputerID:    "physical-pc",
+		LocalAccounts: []config.LocalAccount{{ID: "api-b", Name: "B", Kind: "api", BaseURL: "https://b.example/v1", Key: "private-key"}},
+		RemoteConnections: []config.RemoteConnection{
+			{HubURL: "https://a.example/salcara-hub", DeviceID: "a-device", DeviceSecret: "a-secret"},
+			{HubURL: "https://b.example/salcara-hub", DeviceID: "b-device", DeviceSecret: "b-secret"},
+		},
+	}
+	result, err := statusFixture(t, cfg).Dispatch(context.Background(), map[string]any{"type": "agents.status"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	options := result.(map[string]any)["apis"].([]remoteAPIOption)
+	if len(options) != 1 || options[0].Station == nil || options[0].Station.HubURL != "https://b.example/salcara-hub" || options[0].Station.DeviceID != "b-device" {
+		t.Fatalf("missing unambiguous station metadata: %+v", options)
+	}
+	// Same-origin stations are ambiguous and must not make the phone guess.
+	cfg.RemoteConnections = append(cfg.RemoteConnections, config.RemoteConnection{HubURL: "https://b.example/another-hub", DeviceID: "b-device-2", DeviceSecret: "b-secret-2"})
+	result, err = statusFixture(t, cfg).Dispatch(context.Background(), map[string]any{"type": "agents.status"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	options = result.(map[string]any)["apis"].([]remoteAPIOption)
+	if options[0].Station != nil {
+		t.Fatalf("ambiguous station was advertised: %+v", options[0].Station)
+	}
+}
