@@ -10,6 +10,7 @@
 
 - [开发、测试与构建](DEVELOPMENT.md)。
 - [签名发布与自动更新](AUTO-UPDATE.md)。
+- [1.6.2 发布验收](maintainers/RELEASE-1.6.2-VERIFICATION.md)。
 - [1.6.1 安装器与发布复核](maintainers/RELEASE-1.6.1-REVIEW.md)。
 - [1.6.0 发布与 Windows 权限复核](maintainers/RELEASE-1.6.0-VERIFICATION.md)。
 - [早期 Bridge 试验摘要](maintainers/BRIDGE-HISTORY.md)：历史证据，不是安装流程。

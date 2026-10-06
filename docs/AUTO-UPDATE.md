@@ -4,7 +4,7 @@
 
 ## 信任身份
 
-自 1.6.0 起，正式客户端固定使用 `dkdjndbfj-wq/salcara-desktop` 与 package.json 中的 Ed25519 公钥；1.6.1 保持不变。未配置公钥/通道的早期开发版需手动首次安装。
+自 1.6.0 起，正式客户端固定使用 `dkdjndbfj-wq/salcara-desktop` 与 package.json 中的 Ed25519 公钥；1.6.2 保持不变。未配置公钥/通道的早期开发版需手动首次安装。
 
 发布私钥只在仓库外或 GitHub repository secret `SALCARA_DESKTOP_UPDATE_PRIVATE_KEY` 保存。不要运行 keygen 来替换已有身份，不要提交、打印或写入日志。更新签名不是 Windows Authenticode 证书或 macOS notarization。
 

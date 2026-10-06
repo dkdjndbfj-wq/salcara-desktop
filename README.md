@@ -4,7 +4,7 @@
 
 本地使用不需要注册 Salcara 账号，也不需要部署服务器。API 可以自行命名，同一组 API 可以供多个 Agent 使用，不绑定某个品牌。
 
-[下载 Windows 安装包](https://github.com/dkdjndbfj-wq/salcara-desktop/releases/download/v1.6.1/Salcara-Desktop-1.6.1-win32-x64-setup.exe) · [全部版本](https://github.com/dkdjndbfj-wq/salcara-desktop/releases) · [使用教程](docs/USER-GUIDE.zh.md) · [反馈问题](https://github.com/dkdjndbfj-wq/salcara-desktop/issues)
+[下载 Windows 安装包](https://github.com/dkdjndbfj-wq/salcara-desktop/releases/download/v1.6.2/Salcara-Desktop-1.6.2-win32-x64-setup.exe) · [全部版本](https://github.com/dkdjndbfj-wq/salcara-desktop/releases) · [使用教程](docs/USER-GUIDE.zh.md) · [反馈问题](https://github.com/dkdjndbfj-wq/salcara-desktop/issues)
 
 ## 可以做什么
 
@@ -21,8 +21,8 @@
 
 | 下载文件 | 用途 |
 | --- | --- |
-| `Salcara-Desktop-1.6.1-win32-x64-setup.exe` | 推荐。安装向导、开始菜单快捷方式、Windows 卸载入口 |
-| `Salcara-Bridge-1.6.1-win32-x64.zip` | 免安装便携版，解压完整文件夹后运行 |
+| `Salcara-Desktop-1.6.2-win32-x64-setup.exe` | 推荐。安装向导、开始菜单快捷方式、Windows 卸载入口 |
+| `Salcara-Bridge-1.6.2-win32-x64.zip` | 免安装便携版，解压完整文件夹后运行 |
 | `SHA256SUMS.txt` | 下载文件的 SHA-256 校验清单 |
 
 双击安装包，按向导安装到当前用户目录，然后从开始菜单打开 **Salcara Desktop**。无需管理员权限。为了兼容已有配置，应用窗口和可执行文件仍使用 `Salcara Bridge` 名称。
