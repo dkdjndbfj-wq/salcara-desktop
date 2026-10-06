@@ -4,7 +4,7 @@
 
 ## 信任身份
 
-自 1.6.0 起，正式客户端固定使用 `dkdjndbfj-wq/salcara-desktop` 与 package.json 中的 Ed25519 公钥；1.6.2 保持不变。未配置公钥/通道的早期开发版需手动首次安装。
+自 1.6.0 起，正式客户端固定使用 `dkdjndbfj-wq/salcara-desktop` 与 package.json 中的 Ed25519 公钥；1.6.3 保持不变。未配置公钥/通道的早期开发版需手动首次安装。
 
 1.6.3 沿用同一身份，修复 Windows helper 交接和卸载后重装。旧版更新器本身无法由尚未安装的新包修复；1.6.1 / 1.6.2 若内置更新失败，先手动运行新 setup。细节与测试边界见 [1.6.3 修复记录](maintainers/RELEASE-1.6.3-REPAIR.md)。检查周期为 2 小时，提示和下载不停止任务，仅显式安装经过 idle/admission 检查。
 
@@ -52,4 +52,4 @@ Inno Setup 仅为当前用户安装，payload 在独立 `app` 子目录。既有
 - helper 和安装许可准备好后才退出；新版本健康启动后随机令牌确认，失败回退或保留恢复备份，不强杀仍活着的未确认进程。
 - 不扫描删除任意历史 sibling 目录；开发运行、不可写目录或无法验证的散装包转为手动下载。
 
-Windows 安装器实测、合成目录替换和签名检查必须分别记录，不用 CI 打包成功冒充真实 Electron A/B 或手机链路验收。Mac/Linux 当前未提供正式安装包。历史 1.6.0 验证见 [维护记录](maintainers/RELEASE-1.6.0-VERIFICATION.md)，本轮改动见 [1.6.1 维护记录](maintainers/RELEASE-1.6.1-REVIEW.md)。
+Windows 安装器实测、合成目录替换和签名检查必须分别记录，不用 CI 打包成功冒充真实 Electron A/B 或手机链路验收。Mac/Linux 当前未提供正式安装包。历史 1.6.0 验证见 [维护记录](maintainers/RELEASE-1.6.0-VERIFICATION.md)，本轮改动与验收见 [1.6.3 维护记录](maintainers/RELEASE-1.6.3-REPAIR.md)。

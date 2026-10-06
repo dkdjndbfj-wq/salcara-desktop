@@ -23,7 +23,7 @@
 - Windows 隔离用户安装测试：真实 installer 安装、重装、锁与链接拒绝、降级保护、卸载、保留 staging/recovery/user files 后直接重装、模拟旧版无 marker 的恢复。
 - Linux / Windows CI、完整包与旧公钥签名核验完成后才公开新版本；不能替换 v1.6.2 的既有资产。
 
-当前为修复源码阶段，构建/发布结果将在验收后追加。合成宿主测试不代表用户真实桌面鼠标命中或公网远程弱网验收；不承诺所有 Windows 安全软件、环境或外部任务竞态无误。
+下列构建与发布验收已完成。合成宿主测试不代表用户真实桌面鼠标命中或公网远程弱网验收；不承诺所有 Windows 安全软件、环境或外部任务竞态无误。
 
 本轮完整重跑曾发现 Windows 合成宿主测试的收尾竞态：健康日志早于 helper 删除精确旧备份，测试过早断言“备份已消失”。现等待记录中的监督进程结束后再断言，保留原备份清理断言与超时，不通过跳过或放宽业务断言绕过失败。`git diff --check` 与安装烟测 PowerShell parser 通过；没有修改 Agent 页面布局快照。
 
@@ -32,3 +32,15 @@
 1.6.2 仍含相同旧更新逻辑，下载它不能消除上述缺陷。旧版内置更新发生失败的用户应手动运行 1.6.3 setup 一次，不删除 API/配对配置或 Agent 会话。旧缓存保留以便恢复；安装器不强行结束任何进程。
 
 本记录不包含真实配置、密钥、更新随机令牌或私人安装路径。实现使用 Inno 的 [uninsneveruninstall](https://jrsoftware.org/ishelp/topic_filessection.htm) 和隔离的 [child process](https://nodejs.org/api/child_process.html) 生命周期；实际行为以相应测试为准。
+
+## 最终发布验收（2026-10-07）
+
+- 被测源码：`9c0605d82d10b9e18d165d9ae0d61df9e1091ab6`；仅新建版本，不覆盖 1.6.2 标签或资产。
+- Linux source-check：[37493426135](https://github.com/dkdjndbfj-wq/salcara-desktop/actions/runs/37493426135) 成功，含 Node、companion、Go unit/vet/race。
+- Windows build：[37493435182](https://github.com/dkdjndbfj-wq/salcara-desktop/actions/runs/37493435182) 成功；包含完整 updater 成功交接/失败回退、Inno 编译、一次性用户安装/重装/降级拒绝/卸载、保留残留直接重装与模拟旧版无身份恢复。
+- 独立核验/draft：[37494456591](https://github.com/dkdjndbfj-wq/salcara-desktop/actions/runs/37494456591) 成功，使用上述精确被测源码与原 build artifact，而非重构建替代文件。
+- 六份 Release 资产已下载到仓库外，全部 checksum、原公钥 Ed25519、完整 USTAR、安全路径、setup PE 和便携目录再次本地核验通过。
+- 更新 tar：199,978,224 bytes，SHA-256 `d99ecd1c3d3bcbcf95f7ed9561e73988c141031cdfa011ba1a98a77cf371c729`。
+- setup：142,525,478 bytes，SHA-256 `3623f5968d53de291e82800254374663a02ee7203c66ea3a9d3c0910d6aef698`。
+- [v1.6.3](https://github.com/dkdjndbfj-wq/salcara-desktop/releases/tag/v1.6.3) 已公开为正式 latest。公开后再次下载三份元数据，确认与独立核验文件逐字相同；公开资产 size/digest 和被核验的安装包/更新包一致。
+- 源码提交使用 GitHub noreply；未上传本机诊断、API/配对配置、服务器凭据或签名私钥。没有 Authenticode 证书，不将更新签名描述为系统信任签名。
