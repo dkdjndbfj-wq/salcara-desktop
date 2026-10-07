@@ -69,6 +69,7 @@ const S = {
   pairQR: '',
   remoteDiscovery: null,
   local: null,
+  toolcfg: null,
   localFilter: '',
   localKind: '',
   localDraftModels: [],
@@ -325,7 +326,7 @@ function toolCard(t, extra) {
 RENDER_overview = async function (view) {
   const [st, local] = await Promise.all([loadState(), api('/api/local/accounts')]);
   S.local = local;
-  const c = st.config;
+  const c = st.config || {};
   const hub = st.hub || {};
   const s = hub.state || 'not_logged_in';
   $('#headActions').innerHTML = `<button class="btn" data-act="refresh">${icon('refresh')}重新检测</button><a class="btn primary" href="#accounts">${icon('key')}API 密钥库</a>`;
@@ -455,6 +456,7 @@ async function refreshWorkbenchStatus() {
       if (cliLamp) cliLamp.innerHTML = remoteLampHTML(b?.cliRemote);
       if (cliDetail) cliDetail.textContent = (b?.cliRemote?.detail || '') + ' 此项使用对应 CLI 卡片的 API 设置，不是桌面远控。';
     }
+    return local;
   } catch (_) { /* connection pill reports a disconnected core */ }
   finally { S.bindingLoading = false; }
 }
@@ -497,14 +499,27 @@ function renderLocalCards() {
   if (count) count.textContent = `${accounts.length} / ${S.local.accounts.length} 个密钥`;
 }
 
-RENDER_accounts = async function (view) {
-  const [st, local] = await Promise.all([loadState(), api('/api/local/accounts')]);
-  S.local = local;
+function renderAccountsPage(view, local) {
   $('#headActions').innerHTML = `<button class="btn primary" data-act="localNew">${icon('plus')}添加</button>`;
   view.innerHTML = `${local.accounts.length > 5 ? `<div class="local-toolbar"><input class="input" id="localSearch" type="search" aria-label="搜索 API" placeholder="搜索名称或地址" value="${esc(S.localFilter)}"><span class="muted small" id="localCount"></span></div>` : ''}
     <div class="wb-grid" id="localAccountList"></div>
     <p class="su-foot">${icon('lock')} Key 只保存在这台电脑上，不会发给中转站或手机。</p>`;
   renderLocalCards();
+}
+
+RENDER_accounts = function (view) {
+  const target = view;
+  const cached = S.local;
+  if (cached) renderAccountsPage(target, cached);
+  void loadState().catch(() => undefined);
+  void api('/api/local/accounts').then((local) => {
+    if (!local || target.isConnected === false || S.route !== 'accounts') return;
+    S.local = local;
+    renderAccountsPage(target, local);
+  }).catch((e) => {
+    if (cached || target.isConnected === false || S.route !== 'accounts') return;
+    target.innerHTML = `<div class="callout bad">${ico('warn')}<div>${esc(e.message)}</div></div>`;
+  });
 };
 
 function localEditor(a, kind) {
@@ -661,8 +676,11 @@ RENDER_login = async function (view) {
 
 /* ---------------- 工具配置 ---------------- */
 
-RENDER_tools = async function (view) {
-  const [st, tc] = await Promise.all([loadState(), api('/api/toolcfg')]);
+function renderToolsPage(view, st, rawTc) {
+  const tc = Object.assign({ os: st.os || 'windows', codexAuthMode: 'token', envKeyName: 'OPENAI_API_KEY', claude: {}, codex: {}, desktop: {} }, rawTc || {});
+  tc.claude = Object.assign({}, tc.claude || {});
+  tc.codex = Object.assign({}, tc.codex || {});
+  tc.desktop = Object.assign({}, tc.desktop || {});
   const c = st.config;
   const loggedIn = c.loggedIn && !c.remoteDeviceOnly;
   const cl = tc.claude, cx = tc.codex;
@@ -725,13 +743,27 @@ RENDER_tools = async function (view) {
     </ol>
     <div class="callout">${ico('info')}<div>Claude 桌面版里 <b>Code</b> 标签页的会话本质上就是 Claude Code 会话，会出现在「会话」页面里（标记为 Claude Desktop），手机上也能看到。</div></div>
   </div>`;
+}
+
+RENDER_tools = function (view) {
+  const target = view;
+  const cachedState = S.state || { os: 'windows', config: {}, tools: [] };
+  const cachedConfig = S.toolcfg;
+  if (cachedConfig || S.state) renderToolsPage(target, cachedState, cachedConfig);
+  void Promise.all([loadState(), api('/api/toolcfg')]).then(([st, tc]) => {
+    if (target.isConnected === false || S.route !== 'tools') return;
+    S.toolcfg = tc;
+    renderToolsPage(target, st, tc);
+  }).catch((e) => {
+    if (!cachedConfig && !S.state && target.isConnected !== false && S.route === 'tools') target.innerHTML = `<div class="callout bad">${ico('warn')}<div>${esc(e.message)}</div></div>`;
+  });
 };
 
 /* ---------------- 项目文件夹 ---------------- */
 
-RENDER_projects = async function (view) {
-  const st = await loadState();
-  const ps = st.config.projects || [];
+function renderProjectsPage(view, st) {
+  const cfg = st.config || {};
+  const ps = cfg.projects || [];
   view.innerHTML = `
   <div class="callout">${ico('info')}<div>为了安全，手机只能在下面这些文件夹（以及它们的子文件夹）里新建任务。会话里的命令也在这些文件夹里执行。</div></div>
   <div class="card">
@@ -749,6 +781,18 @@ RENDER_projects = async function (view) {
       <button class="btn sm danger" data-act="rmProj" data-path="${esc(p.path)}">${icon('trash')}移除</button></div>`).join('')}</div>`
       : `<div class="empty"><div class="big">还没有允许任何文件夹</div>添加你平时写代码的项目文件夹，手机上就能选它来发任务</div>`}
   </div>`;
+}
+
+RENDER_projects = function (view) {
+  const target = view;
+  const cached = S.state || { os: 'windows', home: '', config: { projects: [] } };
+  if (S.state) renderProjectsPage(target, cached);
+  void loadState().then((st) => {
+    if (target.isConnected === false || S.route !== 'projects') return;
+    renderProjectsPage(target, st);
+  }).catch((e) => {
+    if (!S.state && target.isConnected !== false && S.route === 'projects') target.innerHTML = `<div class="callout bad">${ico('warn')}<div>${esc(e.message)}</div></div>`;
+  });
 };
 
 async function openBrowser(start) {
@@ -921,9 +965,8 @@ async function openSession(key, keepScroll) {
 
 /* ---------------- 设置 ---------------- */
 
-RENDER_settings = async function (view) {
-  const st = await loadState();
-  const c = st.config;
+function renderSettingsPage(view, st) {
+  const c = st.config || {};
   const pol = [
     ['ask', '每次都询问', '执行命令、修改文件前都要你在手机或电脑上批准（推荐）', ''],
     ['auto_edits', '自动批准改文件', '修改项目内的文件自动通过，运行命令仍然询问', ''],
@@ -969,6 +1012,23 @@ RENDER_settings = async function (view) {
       <button class="btn danger" data-act="quit">${icon('power')}退出 Salcara Bridge</button></div>
   </div>`;
   loadLogs();
+}
+
+RENDER_settings = function (view) {
+  const target = view;
+  const fallback = { version: '', os: 'windows', appBundle: '', exe: '', config: {
+    approval: 'ask', projects: [], autostart: false, openConsoleOnStart: false,
+    allowPhoneAutoAll: false, deviceId: '', configPath: '', effectiveHubUrl: ''
+  } };
+  const cached = S.state || fallback;
+  renderSettingsPage(target, cached);
+  void loadState().then((st) => {
+    if (target.isConnected === false || S.route !== 'settings') return;
+    renderSettingsPage(target, st);
+    if (typeof window.__salcaraAttachSettingsPrefs === 'function') window.__salcaraAttachSettingsPrefs(target);
+  }).catch((e) => {
+    if (!S.state && target.isConnected !== false && S.route === 'settings') target.innerHTML = `<div class="callout bad">${ico('warn')}<div>${esc(e.message)}</div></div>`;
+  });
 };
 
 async function loadLogs() {
@@ -1359,6 +1419,7 @@ document.addEventListener('keydown', (e) => {
 
 /* ---------------- live stream ---------------- */
 
+let bootApprovalChanges = null;
 function connectStream() {
   const es = new EventSource('/api/stream');
   es.addEventListener('status', (m) => {
@@ -1370,6 +1431,7 @@ function connectStream() {
   });
   es.addEventListener('event', (m) => {
     const ev = JSON.parse(m.data);
+    if (bootApprovalChanges && (ev.type === 'approval.request' || ev.type === 'approval.resolved')) bootApprovalChanges.set(ev.approvalId, ev);
     if (typeof NOTIFY !== 'undefined') NOTIFY.onEvent(ev);
     if (ev.type === 'approval.request') {
       if (!S.approvals.find((a) => a.approvalId === ev.approvalId)) S.approvals.push(ev);
@@ -1395,16 +1457,27 @@ function connectStream() {
   };
 }
 
-async function boot() {
+function boot() {
   window.addEventListener('hashchange', route);
-  try {
-    const r = await api('/api/approvals');
-    S.approvals = r.approvals || [];
-    setApprovalBadge();
-  } catch (_) { /* ignore */ }
   $$('[data-icon]').forEach((el) => { el.innerHTML = icon(el.dataset.icon); });
+  const approvalChanges = new Map();
+  bootApprovalChanges = approvalChanges;
   connectStream();
-  route();
+  void route();
+  void loadState().catch(() => undefined);
+  // Paint the local shell before reading approvals or any optional status.
+  void api('/api/approvals').then((r) => {
+    // The event stream is already live. A late startup snapshot must neither
+    // erase new questions nor resurrect permissions resolved during this read.
+    const approvals = new Map((r.approvals || []).map(item => [item.approvalId, item]));
+    for (const [id, event] of approvalChanges) {
+      if (event.type === 'approval.request') approvals.set(id, event);
+      else approvals.delete(id);
+    }
+    S.approvals = [...approvals.values()];
+    setApprovalBadge();
+    renderApprovalsBox();
+  }).catch(() => undefined).finally(() => { if (bootApprovalChanges === approvalChanges) bootApprovalChanges = null; });
 }
 // Boot after every page script (remote.js, workbench.js) has registered its renderers.
 if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot); else setTimeout(boot, 0);

@@ -5,11 +5,13 @@ package autostart
 import (
 	"os"
 	"os/exec"
-	"strings"
 	"syscall"
+
+	"golang.org/x/sys/windows/registry"
 )
 
-const runKey = `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`
+const nativeRunKey = `Software\Microsoft\Windows\CurrentVersion\Run`
+const runKey = `HKCU\` + nativeRunKey
 
 // Command builds an exec.Cmd that never flashes a console window (the bridge is a GUI-subsystem binary).
 func Command(name string, args ...string) *exec.Cmd {
@@ -33,8 +35,15 @@ func Disable() error {
 
 // Enabled reports whether the Run value exists.
 func Enabled() bool {
-	out, err := Command("reg", "query", runKey, "/v", AppName).Output()
-	return err == nil && strings.Contains(string(out), AppName)
+	key, err := registry.OpenKey(registry.CURRENT_USER, nativeRunKey, registry.QUERY_VALUE)
+	if err != nil {
+		return false
+	}
+	defer key.Close()
+	// This status is read on every local state request. Use the OS API instead
+	// of starting a reg.exe child process on each navigation or refresh.
+	_, _, err = key.GetStringValue(AppName)
+	return err == nil
 }
 
 // OpenBrowser opens url in the default browser.

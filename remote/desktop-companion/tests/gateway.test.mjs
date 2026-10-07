@@ -131,6 +131,20 @@ test("updated native schema uses ten-turn pages and verifies lease-bound opaque 
   } finally { f.controller.abort(); await f.done; }
 });
 
+test("small first history page passes its turn limit and invalid limits never reach native tools", async () => {
+  const f = await fixture();
+  try {
+    const initial = await f.rpc({ type: "read", sessionKey: key, limit: 2 });
+    assert.equal(initial.status, 200);
+    assert.equal(f.calls.at(-1).args.turnLimit, 2);
+    for (const limit of [0, 11, 1.5, "2", null]) {
+      const before = f.calls.length;
+      assert.equal((await f.rpc({ type: "read", sessionKey: key, limit })).status, 400);
+      assert.equal(f.calls.length, before);
+    }
+  } finally { f.controller.abort(); await f.done; }
+});
+
 test("operation IDs prevent duplicate native sends and reject changed retry bodies", async () => {
   const f = await fixture();
   try {

@@ -44,7 +44,7 @@ async function renderUpdateRow() {
     : ready ? `新版本 <b>${esc(st.update.version)}</b> 已下载好，重启即可完成更新`
     : busy ? `正在下载新版本 <b>${esc(st.update.version)}</b>…`
     : has ? `新版本 <b>${esc(st.update.version)}</b> 已发布`
-    : '每 6 小时自动检查一次；有新版本会弹出更新窗口';
+    : '每 2 小时自动检查一次；有新版本会弹出更新窗口';
   row.innerHTML = `<div class="setting-row"><div class="txt"><div class="t">版本更新 <span class="muted small">当前 ${esc(st.current || '')}</span></div>
       <div class="d">${desc}</div></div>
     <div class="row" style="gap:8px">${has ? `<button class="btn sm primary" type="button" id="openUpdate">${icon('download')}${ready ? '重启并更新' : busy ? '查看进度' : '查看更新'}</button>` : ''}
@@ -62,8 +62,10 @@ async function renderUpdateRow() {
 
 (function wrapSettings() {
   const base = RENDER_settings;
-  RENDER_settings = async function (view) {
-    await base(view);
+  function attachSettingsPrefs(view) {
+    if (!view || view.isConnected === false || S.route !== 'settings') return;
+    const existing = view.querySelector('#prefsCard');
+    if (existing && typeof existing.remove === 'function') existing.remove();
     const anchor = view.querySelector('.set-link');
     const holder = document.createElement('div');
     holder.innerHTML = prefsCard();
@@ -78,5 +80,11 @@ async function renderUpdateRow() {
       if (e.target.checked && !window.salcaraWindow && 'Notification' in window && Notification.permission === 'default') Notification.requestPermission().catch(() => {});
     });
     renderUpdateRow();
+  }
+  window.__salcaraAttachSettingsPrefs = attachSettingsPrefs;
+  RENDER_settings = function (view) {
+    const result = base(view);
+    Promise.resolve(result).then(() => attachSettingsPrefs(view));
+    return result;
   };
 })();

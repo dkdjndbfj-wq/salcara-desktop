@@ -98,7 +98,7 @@ type gatewayReply struct {
 
 // Only authenticated fixed pre-dispatch errors prove the desktop was not called.
 // Host/native failures and lost responses remain uncertain.
-type gatewayUnsentError struct{}
+type gatewayUnsentError struct{ code string }
 
 func (gatewayUnsentError) Error() string { return ErrDesktopRequestUnsent.Error() }
 
@@ -121,7 +121,7 @@ func (s *Service) activeDescriptor(ctx context.Context) (activeDescriptor, error
 		return d, ErrActivationRequired
 	}
 	var own ownership
-	if json.Unmarshal(plan.state.data, &own) != nil || own.Version != Version {
+	if json.Unmarshal(plan.state.data, &own) != nil || !hasPermissionHook(own.Version) {
 		return d, ErrActivationRequired
 	}
 	p := plan.p
@@ -210,7 +210,7 @@ func gatewayRPC(ctx context.Context, d activeDescriptor, body map[string]any, ti
 	if !reply.OK && (resp.StatusCode == http.StatusBadRequest || resp.StatusCode == http.StatusTooManyRequests) {
 		switch reply.Error {
 		case "REQUEST_INVALID", "REQUEST_TOO_LARGE", "CONTROL_BUSY", "SESSION_NOT_ALLOWED", "CAPABILITY_UNAVAILABLE", "OPERATION_STORAGE_UNAVAILABLE", "APPROVAL_EXPIRED":
-			return nil, gatewayUnsentError{}
+			return nil, gatewayUnsentError{code: reply.Error}
 		}
 	}
 	if resp.StatusCode != http.StatusOK || !reply.OK || len(reply.Result) == 0 {
@@ -329,6 +329,17 @@ func nativeStatus(raw json.RawMessage) string {
 }
 
 func (s *Service) NativeList(ctx context.Context) ([]protocol.SessionInfo, error) {
+	return s.nativeList(ctx, false)
+}
+
+// A lease authorizes access; it is not proof that an AI turn is still running.
+// Only explicit idle states for every authorized target allow a station move.
+func (s *Service) NativeStationIdle(ctx context.Context) error {
+	_, err := s.nativeList(ctx, true)
+	return err
+}
+
+func (s *Service) nativeList(ctx context.Context, requireIdle bool) ([]protocol.SessionInfo, error) {
 	d, err := s.activeDescriptor(ctx)
 	if err != nil {
 		return nil, err
@@ -361,6 +372,9 @@ func (s *Service) NativeList(ctx context.Context) ([]protocol.SessionInfo, error
 			continue
 		}
 		seen[key] = true
+		if requireIdle && !nativeThreadIdle(t.Status) {
+			return nil, errors.New("Codex 桌面仍有任务或状态未确认，请稍后切换中转站")
+		}
 		info := sessionFromNative(t, d.ExpiresAt)
 		info.SidebarIndex = len(sessions) + 1
 		if index < len(list.PinnedThreads) {
@@ -371,8 +385,26 @@ func (s *Service) NativeList(ctx context.Context) ([]protocol.SessionInfo, error
 		}
 		sessions = append(sessions, info)
 	}
+	if requireIdle && len(seen) != len(d.SessionKeys) {
+		return nil, errors.New("无法确认全部桌面任务状态，请刷新后重试")
+	}
 	// Preserve actual native pinned order, followed by sidebar recency order.
 	return sessions, nil
+}
+
+func nativeThreadIdle(raw json.RawMessage) bool {
+	var status string
+	if json.Unmarshal(raw, &status) != nil {
+		var object struct {
+			Type        string   `json:"type"`
+			ActiveFlags []string `json:"activeFlags"`
+		}
+		if json.Unmarshal(raw, &object) != nil || len(object.ActiveFlags) != 0 {
+			return false
+		}
+		status = object.Type
+	}
+	return status == "idle" || status == "systemError" || status == "failed"
 }
 
 func (s *Service) NativeOpen(ctx context.Context, key string) (protocol.SessionInfo, []protocol.Event, error) {
@@ -381,6 +413,20 @@ func (s *Service) NativeOpen(ctx context.Context, key string) (protocol.SessionI
 }
 
 func (s *Service) NativeOpenPage(ctx context.Context, key, cursor string) (protocol.SessionInfo, []protocol.Event, string, error) {
+	return s.NativeOpenPageLimited(ctx, key, cursor, 10)
+}
+
+// NativeOpenPageLimited keeps the first phone render small. The optional
+// limit is bounded by the companion gateway; older callers retain the 10-turn
+// default through NativeOpenPage above.
+func (s *Service) NativeOpenPageLimited(ctx context.Context, key, cursor string, limit int) (protocol.SessionInfo, []protocol.Event, string, error) {
+	return s.nativeOpenPage(ctx, key, cursor, limit, false)
+}
+
+func (s *Service) nativeOpenPage(ctx context.Context, key, cursor string, limit int, messages bool) (protocol.SessionInfo, []protocol.Event, string, error) {
+	if limit < 1 || limit > 10 {
+		return protocol.SessionInfo{}, nil, "", ErrDesktopRequestUnsent
+	}
 	if len(cursor) > 4096 || strings.ContainsAny(cursor, "\x00\r\n") {
 		return protocol.SessionInfo{}, nil, "", ErrDesktopRequestUnsent
 	}
@@ -403,7 +449,18 @@ func (s *Service) NativeOpenPage(ctx context.Context, key, cursor string) (proto
 	if cursor != "" {
 		command["cursor"] = cursor
 	}
+	command["limit"] = limit
 	raw, err := gatewayRPC(ctx, d, command, 45*time.Second)
+	effectiveLimit := limit
+	var unsent gatewayUnsentError
+	if errors.As(err, &unsent) && unsent.code == "REQUEST_INVALID" {
+		// The already installed 0.4.0 gateway did not accept a limit field.
+		// Only its authenticated pre-dispatch rejection permits this read-only
+		// compatibility retry. Never retry a send or an ambiguous host failure.
+		delete(command, "limit")
+		raw, err = gatewayRPC(ctx, d, command, 45*time.Second)
+		effectiveLimit = 10
+	}
 	if err != nil {
 		return protocol.SessionInfo{}, nil, "", err
 	}
@@ -411,7 +468,7 @@ func (s *Service) NativeOpenPage(ctx context.Context, key, cursor string) (proto
 	if err = nativeJSON(raw, &read); err != nil {
 		return protocol.SessionInfo{}, nil, "", err
 	}
-	if read.SchemaVersion != 1 || read.Turns == nil || len(read.Turns) > 10 || len(read.Page.NextCursor) > 4096 || strings.ContainsAny(read.Page.NextCursor, "\x00\r\n") || read.Page.HasMore && read.Page.NextCursor == "" || cursor != "" && read.Page.NextCursor == cursor {
+	if read.SchemaVersion != 1 || read.Turns == nil || len(read.Turns) > effectiveLimit || len(read.Page.NextCursor) > 4096 || strings.ContainsAny(read.Page.NextCursor, "\x00\r\n") || read.Page.HasMore && read.Page.NextCursor == "" || cursor != "" && read.Page.NextCursor == cursor {
 		return protocol.SessionInfo{}, nil, "", ErrDesktopUnavailable
 	}
 	if read.Thread.Kind != "codex" || read.Thread.HostID != "local" || "codex:"+read.Thread.ID != key {
@@ -421,7 +478,7 @@ func (s *Service) NativeOpenPage(ctx context.Context, key, cursor string) (proto
 	events := nativeEvents(key, read, d.SessionKeys)
 	// A page budget failure is explicit; never label silently discarded items
 	// as a complete native history page.
-	if len(events) > 400 {
+	if !messages && len(events) > 400 || len(events) > 16000 {
 		return protocol.SessionInfo{}, nil, "", ErrDesktopUnavailable
 	}
 	hooks, err := nativeApprovalEvents(key, read.ApprovalEvents, time.Now().UnixMilli())

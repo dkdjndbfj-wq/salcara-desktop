@@ -35,6 +35,14 @@ func pageArguments(cmd map[string]any, maximum int) (string, int, error) {
 	}
 	return cursor, limit, nil
 }
+
+func messagePageLimit(cmd map[string]any) (int, error) {
+	if raw, exists := cmd["messageLimit"]; exists {
+		_, limit, err := pageArguments(map[string]any{"limit": raw}, 10)
+		return limit, err
+	}
+	return 0, nil
+}
 func dispatchSessionsPage(ctx context.Context, m agents.Manager, cmd map[string]any) (map[string]any, error) {
 	tool := str(cmd, "tool")
 	client := str(cmd, "client")
@@ -101,6 +109,10 @@ func dispatchHistoryPage(ctx context.Context, m agents.Manager, cmd map[string]a
 	if err != nil {
 		return nil, err
 	}
+	messageLimit, err := messagePageLimit(cmd)
+	if err != nil {
+		return nil, err
+	}
 	cursor, limit, err := pageArguments(cmd, maxOpenEvents)
 	if err != nil {
 		return nil, err
@@ -109,7 +121,10 @@ func dispatchHistoryPage(ctx context.Context, m agents.Manager, cmd map[string]a
 	var events []protocol.Event
 	next := ""
 	paged := false
-	if pager, ok := agent.(agents.HistoryPager); ok {
+	if pager, ok := agent.(agents.MessageHistoryPager); ok && messageLimit != 0 {
+		info, events, next, err = pager.OpenMessagesPage(ctx, id, cursor, messageLimit)
+		paged = true
+	} else if pager, ok := agent.(agents.HistoryPager); ok {
 		info, events, next, err = pager.OpenPage(ctx, id, cursor, limit)
 		paged = true
 	} else {

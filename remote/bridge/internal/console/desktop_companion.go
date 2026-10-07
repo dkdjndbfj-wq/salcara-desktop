@@ -86,6 +86,26 @@ func (s *Server) nativeConnection(ctx context.Context) desktopcompanion.NativeCo
 	}
 }
 
+// A local key-library read does not need to wait for desktop authorization.
+// Return the last valid presentation snapshot and refresh it independently.
+func (s *Server) nativeConnectionSnapshot() (desktopcompanion.NativeConnection, bool) {
+	if _, ok := s.d.Companion.(companionControl); !ok {
+		return emptyNativeConnection(), false
+	}
+	s.nativeMu.Lock()
+	actual, fresh := s.nativeState, !s.nativeAt.IsZero() && time.Since(s.nativeAt) < nativeStatusCacheTTL
+	if !fresh && s.nativeFlight == nil {
+		// nativeConnection owns/coalesces its own bounded probe. Do not perform
+		// network work while holding this lock or the HTTP request goroutine.
+		go func() { s.nativeConnection(context.Background()) }()
+	}
+	s.nativeMu.Unlock()
+	if !desktopcompanion.ValidateNativeConnection(actual, time.Now().UnixMilli()) {
+		actual = emptyNativeConnection()
+	}
+	return actual, !fresh
+}
+
 func (s *Server) handleDesktopControl(w http.ResponseWriter, r *http.Request) {
 	st := s.nativeConnection(r.Context())
 	writeJSON(w, map[string]any{"desktopControl": st.Active, "remoteSend": st.Active, "nativeConnection": st, "activationRequired": !st.Active})

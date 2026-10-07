@@ -38,6 +38,7 @@ type activeFixture struct {
 	capabilities      *NativeCapabilities
 	approvalTransport string
 	gatewayFailure    string
+	legacyReadLimit   bool
 }
 
 func gatewayFixture(t *testing.T) *activeFixture {
@@ -72,9 +73,13 @@ func gatewayFixture(t *testing.T) *activeFixture {
 			if f.approvalTransport != "" {
 				result.(map[string]any)["approvalTransport"] = f.approvalTransport
 			}
-		} else if f.gatewayFailure != "" {
+		} else if f.gatewayFailure != "" || cmd["type"] == "read" && f.legacyReadLimit && cmd["limit"] != nil {
 			w.WriteHeader(http.StatusBadRequest)
-			_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": f.gatewayFailure})
+			code := f.gatewayFailure
+			if code == "" {
+				code = "REQUEST_INVALID"
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": code})
 			return
 		} else if handler != nil {
 			result = handler(cmd)
@@ -139,6 +144,40 @@ func TestNativeLeaseStatusScopedListReadSend(t *testing.T) {
 	f.mu.Unlock()
 	if last["operationId"] != operationID || last["text"] != "继续" || len(last) != 4 {
 		t.Fatal("send included unexpected fields", last)
+	}
+}
+
+func TestNativeSmallReadRemainsCompatibleWithAlreadyInstalledLegacyGateway(t *testing.T) {
+	f := gatewayFixture(t)
+	f.legacyReadLimit = true
+	f.result = func(map[string]any) any {
+		return nativeEnvelope(map[string]any{"schemaVersion": 1,
+			"thread": map[string]any{"id": targetID, "kind": "codex", "hostId": "local"},
+			"turns":  []any{map[string]any{"id": "fixture-turn", "status": "completed", "items": []any{map[string]any{"id": "answer", "type": "agentMessage", "text": "fixture"}}}}})
+	}
+	_, events, _, err := f.service.NativeOpenPageLimited(context.Background(), "codex:"+targetID, "", 2)
+	if err != nil || len(events) == 0 {
+		t.Fatal("legacy gateway no longer readable", err)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.calls) != 3 || f.calls[1]["limit"] != float64(2) || f.calls[2]["limit"] != nil {
+		t.Fatal("unexpected compatibility retry")
+	}
+}
+
+func TestNativeSmallReadDoesNotRetryCapabilityOrHostFailures(t *testing.T) {
+	for _, code := range []string{"CAPABILITY_UNAVAILABLE", "NATIVE_CALL_FAILED"} {
+		t.Run(code, func(t *testing.T) {
+			f := gatewayFixture(t)
+			f.gatewayFailure = code
+			if _, _, _, err := f.service.NativeOpenPageLimited(context.Background(), "codex:"+targetID, "", 2); err == nil {
+				t.Fatal("failure accepted")
+			}
+			if f.count() != 2 {
+				t.Fatal("unproven failure retried")
+			}
+		})
 	}
 }
 

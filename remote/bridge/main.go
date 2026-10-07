@@ -268,6 +268,14 @@ func run(background bool) error {
 
 	settings := func() agents.Settings {
 		c := store.Get()
+		if c.LocalToolPaths == nil {
+			c.LocalToolPaths = map[string]string{}
+		}
+		for id, path := range localLauncher.RememberedPaths() {
+			if c.LocalToolPaths[id] == "" {
+				c.LocalToolPaths[id] = path
+			}
+		}
 		s := agents.SettingsWithGateway(c, LocalPort)
 		s.BridgeExe, s.LocalPort, s.LocalToken = exe, LocalPort, localToken
 		return s

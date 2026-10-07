@@ -2,6 +2,7 @@ package hubclient
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -542,6 +543,10 @@ func (c *Client) dispatchDesktop(ctx context.Context, cmd map[string]any) (any, 
 		if tool := str(cmd, "tool"); tool != "" && tool != "codex" {
 			return nil, errors.New("当前原生桌面实验仅支持 Codex Desktop")
 		}
+		cursor, limit, err := pageArguments(cmd, maxSessions)
+		if err != nil {
+			return nil, err
+		}
 		ss, err := c.o.Desktop.NativeList(ctx)
 		if err != nil {
 			return nil, err
@@ -549,20 +554,67 @@ func (c *Client) dispatchDesktop(ctx context.Context, cmd map[string]any) (any, 
 		if ss == nil {
 			ss = []protocol.SessionInfo{}
 		}
-		return map[string]any{"sessions": ss}, nil
+		offset := 0
+		if cursor != "" {
+			decoded, decodeErr := base64.RawURLEncoding.DecodeString(cursor)
+			var boundary struct {
+				Version int    `json:"v"`
+				Anchor  string `json:"a"`
+			}
+			if decodeErr != nil || len(decoded) > 256 || json.Unmarshal(decoded, &boundary) != nil || boundary.Version != 1 || boundary.Anchor == "" {
+				return nil, errors.New("桌面会话读取位置无效")
+			}
+			// A stable thread boundary, not a numeric offset: a new task at the
+			// head must not shift the user's next page into a gap or duplicate.
+			offset = -1
+			for i, item := range ss {
+				if item.SessionKey == boundary.Anchor {
+					offset = i + 1
+					break
+				}
+			}
+			if offset < 0 {
+				return nil, errors.New("桌面目录已变化，请刷新")
+			}
+		}
+		if limit > len(ss)-offset {
+			limit = len(ss) - offset
+		}
+		end := offset + limit
+		next := ""
+		if end < len(ss) {
+			raw, _ := json.Marshal(struct {
+				Version int    `json:"v"`
+				Anchor  string `json:"a"`
+			}{1, ss[end-1].SessionKey})
+			next = base64.RawURLEncoding.EncodeToString(raw)
+		}
+		return map[string]any{"sessions": ss[offset:end], "nextCursor": next, "pagination": "v1"}, nil
 	case "desktop.session.open":
 		key := str(cmd, "sessionKey")
 		if _, err := desktoplink.CodexURL(key); err != nil {
 			return nil, desktopcompanion.ErrDesktopScope
 		}
-		cursor, _, err := pageArguments(cmd, maxOpenEvents)
+		cursor, limit, err := pageArguments(cmd, 10)
 		if err != nil {
 			return nil, err
 		}
 		var info protocol.SessionInfo
 		var events []protocol.Event
 		next := ""
+		messages, err := messagePageLimit(cmd)
+		if err != nil {
+			return nil, err
+		}
 		if pager, ok := c.o.Desktop.(interface {
+			NativeOpenMessagesPage(context.Context, string, string, int) (protocol.SessionInfo, []protocol.Event, string, error)
+		}); ok && messages != 0 {
+			info, events, next, err = pager.NativeOpenMessagesPage(ctx, key, cursor, messages)
+		} else if pager, ok := c.o.Desktop.(interface {
+			NativeOpenPageLimited(context.Context, string, string, int) (protocol.SessionInfo, []protocol.Event, string, error)
+		}); ok {
+			info, events, next, err = pager.NativeOpenPageLimited(ctx, key, cursor, limit)
+		} else if pager, ok := c.o.Desktop.(interface {
 			NativeOpenPage(context.Context, string, string) (protocol.SessionInfo, []protocol.Event, string, error)
 		}); ok {
 			info, events, next, err = pager.NativeOpenPage(ctx, key, cursor)

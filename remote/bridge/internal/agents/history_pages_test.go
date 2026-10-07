@@ -43,6 +43,60 @@ func TestHistoryPagesWalkAllEventsAndNewAppendDoesNotShiftCursor(t *testing.T) {
 		t.Fatal("older history omitted", len(seen))
 	}
 }
+
+func TestCodexPageDoesNotAppendEveryPreviouslyLoadedThread(t *testing.T) {
+	f := newFixture(t, "ask")
+	a := f.m.Get("codex").(*codexAgent)
+	a.mu.Lock()
+	for i := 0; i < 40; i++ {
+		id := fmt.Sprintf("cached-%d", i)
+		a.threads[id] = &codexThread{id: id, loaded: true, info: protocol.SessionInfo{SessionKey: "codex:" + id, Tool: "codex"}}
+	}
+	a.mu.Unlock()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	page, _, err := a.SessionsPage(ctx, "", 2, "")
+	if err != nil || len(page) != 2 {
+		t.Fatal("a bounded page was expanded by remembered threads", len(page), err)
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.threads["cached-0"] == nil {
+		t.Fatal("paged read removed a live thread from memory")
+	}
+}
+
+func TestMessageHistoryCountsMessagesAndRetainsTheirToolsAndStatuses(t *testing.T) {
+	all := []protocol.Event{}
+	for i := 0; i < 12; i++ {
+		all = append(all, protocol.Event{Type: "message", ID: fmt.Sprintf("m%d", i), Role: "assistant", Text: "fixture"},
+			protocol.Event{Type: "tool", ID: fmt.Sprintf("tool%d", i)}, protocol.Event{Type: "turn", ID: fmt.Sprintf("turn%d", i), Status: "completed"})
+	}
+	page, cursor, err := paginateMessageHistory("codex:original", all, "", 2)
+	if err != nil || len(page) != 6 || page[0].ID != "m10" || page[5].ID != "turn11" || cursor == "" {
+		t.Fatal("first page counted raw events instead of messages")
+	}
+	all = append(all, protocol.Event{Type: "message", ID: "appended", Role: "assistant"})
+	older, next, err := paginateMessageHistory("codex:original", all, cursor, 10)
+	if err != nil || len(older) != 30 || older[0].ID != "m0" || older[29].ID != "turn9" || next != "" {
+		t.Fatal("message history cursor skipped an older message")
+	}
+	if _, _, err := paginateMessageHistory("codex:other", all, cursor, 10); err == nil {
+		t.Fatal("cross-session cursor accepted")
+	}
+}
+
+func TestMessageHistoryStillHasEventAndByteBudgets(t *testing.T) {
+	all := []protocol.Event{{Type: "message", ID: "prompt", Role: "user"}}
+	for i := 0; i < 1000; i++ {
+		all = append(all, protocol.Event{Type: "tool", ID: fmt.Sprint(i), Text: "fixture"})
+	}
+	all = append(all, protocol.Event{Type: "message", ID: "reply", Role: "assistant"})
+	page, cursor, err := paginateMessageHistory("codex:original", all, "", 2)
+	if err != nil || len(page) > maxHistoryEvents || cursor == "" {
+		t.Fatal("message limit disabled event safety cap")
+	}
+}
 func TestHistoryPageIdentityStaleAndByteBudget(t *testing.T) {
 	all := []protocol.Event{}
 	for i := 0; i < 30; i++ {
@@ -113,6 +167,36 @@ func TestClaudeDirectoryPagesBeyondOneHundredAndSeparateClients(t *testing.T) {
 		if len(seen) != want {
 			t.Fatal(client, len(seen), want)
 		}
+	}
+}
+
+func TestClaudeDirectoryReadsOnlyOnePageOfContentSummaries(t *testing.T) {
+	root := t.TempDir()
+	project := filepath.Join(root, "projects", "fixture")
+	if err := os.MkdirAll(project, 0700); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 35; i++ {
+		id := fmt.Sprintf("fixture-%03d", i)
+		raw, _ := json.Marshal(map[string]any{"type": "user", "sessionId": id, "cwd": root, "entrypoint": "cli", "message": map[string]any{"role": "user", "content": "fixture"}})
+		path := filepath.Join(project, id+".jsonl")
+		if err := os.WriteFile(path, append(raw, '\n'), 0600); err != nil {
+			t.Fatal(err)
+		}
+		when := time.Unix(1700000000-int64(i), 0)
+		if err := os.Chtimes(path, when, when); err != nil {
+			t.Fatal(err)
+		}
+	}
+	a := newClaudeAgent(func(protocol.Event) {}, func() Settings { return Settings{} }, "not-launched", root)
+	defer a.Close()
+	page, cursor, err := a.SessionsPage(context.Background(), "", 10, "code")
+	if err != nil || len(page) != 10 || cursor == "" || len(a.hist.cache) != 11 || a.hist.cache[filepath.Join(project, "fixture-034.jsonl")] != nil {
+		t.Fatal("the first page scanned older unrequested content", len(page), len(a.hist.cache), err)
+	}
+	page, _, err = a.SessionsPage(context.Background(), cursor, 10, "code")
+	if err != nil || len(page) != 10 || page[0].SessionKey != "claude:fixture-010" || len(a.hist.cache) != 21 {
+		t.Fatal("next page rescanned or skipped its boundary", len(page), len(a.hist.cache), err)
 	}
 }
 func TestHistoryCursorStableWhenEarlierChildEventArrives(t *testing.T) {

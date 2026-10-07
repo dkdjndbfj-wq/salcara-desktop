@@ -55,4 +55,4 @@ npm run installer
 
 发布步骤、长期公钥及验收要求见 [AUTO-UPDATE.md](AUTO-UPDATE.md)。CI 只构建或生成经过验证的草稿；维护者确认后才公开 Release。不要覆盖已有标签或签名资产。发布私钥必须保存在仓库外或 GitHub Secret，不能提交。
 
-本轮安装器与文档改动记录：[1.6.1 维护记录](maintainers/RELEASE-1.6.1-REVIEW.md)。
+本轮远程内核、安装器兼容和文档改动记录：[1.6.4 版本说明](RELEASE-1.6.4.md)。

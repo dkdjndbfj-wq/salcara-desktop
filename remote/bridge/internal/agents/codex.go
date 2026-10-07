@@ -40,20 +40,22 @@ type codexAgent struct {
 }
 
 type codexThread struct {
-	id            string
-	info          protocol.SessionInfo
-	path          string
-	loaded        bool // started/resumed on our app-server
-	policy        string
-	turnID        string
-	baseline      *int64 // total tokens (in,out) at turn start
-	baseOut       int64
-	usage         protocol.Usage
-	items         map[string]*cxLive
-	opened        bool              // phone opened it: stream new history items while it runs elsewhere
-	seen          map[string]bool   // history item keys already sent (external threads)
-	childStates   map[string]string // latest native collab state; a completed parent turn can leave a child running
-	childOverflow bool              // fail closed if native child activity exceeds the bounded tracker
+	id               string
+	info             protocol.SessionInfo
+	path             string
+	loaded           bool // started/resumed on our app-server
+	policy           string
+	turnID           string
+	baseline         *int64 // total tokens (in,out) at turn start
+	baseOut          int64
+	usage            protocol.Usage
+	items            map[string]*cxLive
+	opened           bool              // phone opened it: stream new history items while it runs elsewhere
+	seen             map[string]bool   // history item keys already sent (external threads)
+	tailHistory      bool              // opened through bounded official turn history
+	tailBaselineTurn string            // newest turn known when opened/refreshed
+	childStates      map[string]string // latest native collab state; a completed parent turn can leave a child running
+	childOverflow    bool              // fail closed if native child activity exceeds the bounded tracker
 }
 
 // cxLive accumulates streaming state for one item.
@@ -311,8 +313,10 @@ func (a *codexAgent) ensure(ctx context.Context) (*rpcConn, error) {
 	ictx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	init := map[string]any{
-		"clientInfo":   map[string]any{"name": "salcara_bridge", "title": "Salcara Bridge", "version": "1.0.0"},
-		"capabilities": map[string]any{"experimentalApi": false, "requestAttestation": false},
+		"clientInfo": map[string]any{"name": "salcara_bridge", "title": "Salcara Bridge", "version": "1.0.0"},
+		// Needed only for the official read-only turn pager. This does not
+		// change approval/sandbox policy or authorize any new mutation.
+		"capabilities": map[string]any{"experimentalApi": true, "requestAttestation": false},
 	}
 	if err := c.Call(ictx, "initialize", init, nil); err != nil {
 		c.Kill()
@@ -632,6 +636,7 @@ func (a *codexAgent) Open(ctx context.Context, id string) (protocol.SessionInfo,
 	a.mu.Lock()
 	t := a.applyThreadLocked(th)
 	t.opened = true
+	t.tailHistory = false
 	t.seen = map[string]bool{}
 	for _, k := range historyKeys(th) {
 		t.seen[k] = true

@@ -1,6 +1,6 @@
 {
   "name": "salcara-desktop-companion-probe",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "private": true,
   "type": "module",
   "description": "Experimental, explicitly authorized and time-scoped Codex desktop companion",

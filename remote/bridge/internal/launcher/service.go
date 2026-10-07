@@ -47,17 +47,26 @@ type Service struct {
 	inventory       []Tool
 	inventoryFlight *inventoryProbe
 	inventoryEpoch  uint64
+	locationsMu     sync.Mutex
+	locations       map[string]toolLocation
 }
 
 func New(dir string) *Service {
-	return &Service{Dir: dir, Start: startPlatform, FindTools: Discover, Stop: stopPlatform}
+	s := &Service{Dir: dir, Start: startPlatform, FindTools: Discover, Stop: stopPlatform}
+	s.loadLocations()
+	return s
 }
 
 func (s *Service) Tools(ctx context.Context, paths map[string]string) []Tool {
+	var tools []Tool
 	if s.FindTools != nil {
-		return s.FindTools(ctx, paths)
+		tools = s.FindTools(ctx, paths)
+	} else {
+		tools = Discover(ctx, paths)
 	}
-	return Discover(ctx, paths)
+	tools = s.applyLocations(tools, paths)
+	s.rememberLocations(tools)
+	return tools
 }
 
 func (s *Service) Prepare(a config.LocalAccount, t Tool, workspace string) (Plan, error) {

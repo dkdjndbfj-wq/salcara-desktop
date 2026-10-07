@@ -64,8 +64,47 @@ func (s *Server) setupRoutes(m *http.ServeMux) {
 
 var versionRe = regexp.MustCompile(`\d+\.\d+(?:\.\d+)?(?:[-+][0-9A-Za-z.]+)?`)
 
+type setupVersionEntry struct {
+	mod     time.Time
+	version string
+	pending bool
+}
+
+var setupVersions = struct {
+	sync.Mutex
+	entries map[string]setupVersionEntry
+}{entries: map[string]setupVersionEntry{}}
+
+// Executing a shim or asking Windows for a version is never on the HTTP
+// rendering path. Cache even unsuccessful checks until the binary changes.
+func setupVersionSnapshot(exe string) (string, bool) {
+	info, err := os.Stat(exe)
+	if err != nil || !info.Mode().IsRegular() {
+		return "", false
+	}
+	mod := info.ModTime()
+	setupVersions.Lock()
+	if cached, ok := setupVersions.entries[exe]; ok && cached.mod.Equal(mod) {
+		setupVersions.Unlock()
+		return cached.version, cached.pending
+	}
+	setupVersions.entries[exe] = setupVersionEntry{mod: mod, pending: true}
+	setupVersions.Unlock()
+	go func() {
+		version := toolVersion(context.Background(), exe)
+		setupVersions.Lock()
+		if entry := setupVersions.entries[exe]; entry.mod.Equal(mod) {
+			setupVersions.entries[exe] = setupVersionEntry{mod: mod, version: version}
+		}
+		setupVersions.Unlock()
+	}()
+	return "", true
+}
+
 func toolVersion(ctx context.Context, exe string) string {
-	ctx, cancel := context.WithTimeout(ctx, 6*time.Second)
+	// Version text is decorative. Never make the Environment page wait for a
+	// broken shim, PowerShell prompt or a sleeping package install.
+	ctx, cancel := context.WithTimeout(ctx, 750*time.Millisecond)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, exe, "--version")
 	agents.PrepareChild(cmd)
@@ -99,8 +138,8 @@ func bundledCodex(path string) bool {
 	return strings.Contains(p, "/resources/") || strings.Contains(p, ".app/contents/")
 }
 
-func (s *Server) setupItems(ctx context.Context) []setupItem {
-	tools := s.d.Local.Inventory(ctx, s.d.Store.Get().LocalToolPaths)
+func (s *Server) setupItems() ([]setupItem, bool) {
+	tools, pending := s.d.Local.InventorySnapshot(s.d.Store.Get().LocalToolPaths)
 	byID := map[string]launcher.Tool{}
 	for _, t := range tools {
 		byID[t.ID] = t
@@ -123,20 +162,20 @@ func (s *Server) setupItems(ctx context.Context) []setupItem {
 	items = append(items, setupItem{ID: "codex-desktop", Name: "Codex App", Role: "桌面应用（可选）", Installed: cd.Available, Path: cd.Path, Download: "https://chatgpt.com/codex"})
 	cl := byID["claude-desktop"]
 	items = append(items, setupItem{ID: "claude-desktop", Name: "Claude Desktop", Role: "桌面应用（可选）", Installed: cl.Available, Path: cl.Path, Download: "https://claude.ai/download"})
-	var wg sync.WaitGroup
 	for i := range items {
 		if items[i].Installed && items[i].Path != "" && (items[i].ID == "claude" || items[i].ID == "codex" || items[i].ID == "git") {
-			wg.Add(1)
-			go func(it *setupItem) { defer wg.Done(); it.Version = toolVersion(ctx, it.Path) }(&items[i])
+			var versionPending bool
+			items[i].Version, versionPending = setupVersionSnapshot(items[i].Path)
+			pending = pending || versionPending
 		}
 	}
-	wg.Wait()
-	return items
+	return items, pending
 }
 
 func (s *Server) handleSetupStatus(w http.ResponseWriter, r *http.Request) {
-	ctx, cancel := ctxTimeout(r, 20*time.Second)
-	defer cancel()
+	if r.URL.Query().Get("refresh") == "1" {
+		s.d.Local.InvalidateInventory()
+	}
 	setupState.mu.Lock()
 	var job *setupJob
 	if setupState.job != nil {
@@ -145,7 +184,8 @@ func (s *Server) handleSetupStatus(w http.ResponseWriter, r *http.Request) {
 		job = &j
 	}
 	setupState.mu.Unlock()
-	writeJSON(w, map[string]any{"os": runtime.GOOS, "items": s.setupItems(ctx), "job": job})
+	items, pending := s.setupItems()
+	writeJSON(w, map[string]any{"os": runtime.GOOS, "items": items, "job": job, "discoveryPending": pending})
 }
 
 // installCommand returns the official installer for a tool on this OS.

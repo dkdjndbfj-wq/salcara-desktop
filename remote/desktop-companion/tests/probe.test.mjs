@@ -1,7 +1,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import { KNOWN_RESOURCES_PATH, createHostPolicy } from "../src/host-policy.mjs";
-import { createProbe, ProbeError } from "../src/probe.mjs";
+import { createProbe, ProbeError, PROBE_VERSION } from "../src/probe.mjs";
+
+test("packaged runtime and probe advertise the same version", async () => {
+  const manifest = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
+  assert.equal(PROBE_VERSION, manifest.version);
+});
 
 const pipe = String.raw`\\.\pipe\codex-browser-use-a1a1a1a1-2222-4333-8444-555555555555`;
 const thread = "01a0ae56-e9f6-7933-9ad4-5e08cd7874e5";

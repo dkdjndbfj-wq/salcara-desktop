@@ -89,7 +89,7 @@ export function createDesktopConnect({ inspectHost, catalog, nativeCall, directo
       const names = await catalog({ pipePath: host.pipePath }); checkActive();
       if (!["list_threads", "read_thread", "send_message_to_thread"].every((name) => names.includes(name))) throw new DesktopError("CATALOG_UNAVAILABLE");
       const invoke = (tool, argumentsValue) => nativeCall({ pipePath: host.pipePath, context, tool, args: argumentsValue, signal: controller.signal });
-      scopedList(await invoke("list_threads", { limit: 50 }), allowed); checkActive();
+      scopedList(await invoke("list_threads", { limit: MAX_SESSIONS }), allowed); checkActive();
       // Older allowed targets need not be in the first list page; the original
       // identity is proven by an actual successful local read, not title matching.
       scopedRead(await invoke("read_thread", { threadId: args.sessionKeys[0].slice(6), hostId: "local", turnLimit: 10, includeOutputs: true, maxOutputCharsPerItem: 10000 }), args.sessionKeys[0]);
@@ -122,15 +122,17 @@ export function createDesktopConnect({ inspectHost, catalog, nativeCall, directo
           if (!keysOnly(command, ["type"])) throw new DesktopError("REQUEST_INVALID");
           if (command.type === "status") return status();
           if (command.type === "disconnect") return { disconnected: true };
-          return scopedList(await invoke("list_threads", { limit: 50 }), allowed);
+          return scopedList(await invoke("list_threads", { limit: MAX_SESSIONS }), allowed);
         }
-        if (!["read", "send"].includes(command.type) || !keysOnly(command, command.type === "read" ? ["type", "sessionKey", "cursor"] : ["type", "sessionKey", "text", "operationId"])) throw new DesktopError("REQUEST_INVALID");
+        if (!["read", "send"].includes(command.type) || !keysOnly(command, command.type === "read" ? ["type", "sessionKey", "cursor", "limit"] : ["type", "sessionKey", "text", "operationId"])) throw new DesktopError("REQUEST_INVALID");
         if (!allowed.has(command.sessionKey)) throw new DesktopError("SESSION_NOT_ALLOWED");
         if (command.type === "read") {
           const cursor = cursors.decode(command.sessionKey, command.cursor);
-          const read = textJson(scopedRead(await invoke("read_thread", { threadId: command.sessionKey.slice(6), hostId: "local", turnLimit: 10,
+          const turnLimit = command.limit === undefined ? 10 : command.limit;
+          if (!Number.isInteger(turnLimit) || turnLimit < 1 || turnLimit > 10) throw new DesktopError("REQUEST_INVALID");
+          const read = textJson(scopedRead(await invoke("read_thread", { threadId: command.sessionKey.slice(6), hostId: "local", turnLimit,
             includeOutputs: true, maxOutputCharsPerItem: 10000, ...(cursor === undefined ? {} : { cursor }) }), command.sessionKey));
-          if (read.schemaVersion !== 1 || !Array.isArray(read.turns) || read.turns.length > 10) throw new DesktopError("NATIVE_RESPONSE_INVALID");
+          if (read.schemaVersion !== 1 || !Array.isArray(read.turns) || read.turns.length > turnLimit) throw new DesktopError("NATIVE_RESPONSE_INVALID");
           if (read.page !== undefined) {
             if (!isRecord(read.page) || read.page.hasMore && read.page.nextCursor == null || cursor !== undefined && read.page.nextCursor === cursor) throw new DesktopError("NATIVE_RESPONSE_INVALID");
             read.page.nextCursor = cursors.encode(command.sessionKey, read.page.hasMore ? read.page.nextCursor : null);

@@ -59,15 +59,19 @@ func (c *Client) stationSwitchBusy() bool {
 // the lock, flushLoop observes the flag and cannot start a new upload before
 // the final queue check and config commit.
 func (c *Client) beginStationSwitch() error {
+	return c.beginStationSwitchMode(false)
+}
+
+func (c *Client) beginStationSwitchMode(transfer bool) error {
 	c.qmu.Lock()
 	defer c.qmu.Unlock()
-	if len(c.queue) > 0 || c.inFlight > 0 || len(c.recovery) > 0 {
+	if !transfer && (len(c.queue) > 0 || c.inFlight > 0 || len(c.recovery) > 0) {
 		return errors.New("当前站点还有未同步的会话进度，请稍后再切换")
 	}
 	if c.stationSwitching.Load() {
 		return errors.New("中转站正在切换，请稍候")
 	}
-	if c.handoverAwaitingAuth.Load() {
+	if !transfer && c.handoverAwaitingAuth.Load() {
 		return errors.New("中转站正在重新连接，请稍候")
 	}
 	c.stationSwitching.Store(true)
@@ -85,13 +89,27 @@ func (c *Client) endStationSwitch() {
 // A) or read the committed B config; there must not be an unlocked gap between
 // the check and the write. All network probes run before taking this lock.
 func (c *Client) commitStationSwitch(update func(*config.Config) error) error {
+	return c.commitStationSwitchMode(update, false)
+}
+
+func (c *Client) commitStationSwitchMode(update func(*config.Config) error, transfer bool) error {
 	c.qmu.Lock()
 	defer c.qmu.Unlock()
-	if len(c.queue) > 0 || c.inFlight > 0 || len(c.recovery) > 0 {
+	if transfer && len(c.queue) > 0 && eventIdentity(c.queueConfig) != eventIdentity(c.o.Store.Get()) {
+		return errors.New("旧绑定的同步队列不能迁移，请刷新后重试")
+	}
+	if !transfer && (len(c.queue) > 0 || c.inFlight > 0 || len(c.recovery) > 0) {
 		return errors.New("当前站点还有未同步的会话进度，请稍后再切换中转站")
 	}
 	err := c.o.Store.Update(update)
 	if err == nil {
+		if transfer {
+			// A may be unreachable with a frozen batch. Keep its events/recovery
+			// marks, but give B a fresh batch identity and authorization gate.
+			// Late A acknowledgements cannot clear this newly scoped queue.
+			c.queueConfig = c.o.Store.Get()
+			c.inFlight, c.inFlightBatchID, c.inFlightPayload, c.inFlightRecovery = 0, "", nil, nil
+		}
 		// Set this while qmu is still held. Push cannot observe the new B
 		// identity without also seeing the retention gate.
 		c.handoverAwaitingAuth.Store(true)
@@ -166,6 +184,10 @@ func (c *Client) verifyStationSwitch(ctx context.Context, target config.RemoteCo
 // when requested, the API used by the selected remote agent. The caller sends
 // the reply through the old Hub before Kick reconnects the new one.
 func (c *Client) switchStation(ctx context.Context, in stationSwitchCommand) (map[string]any, error) {
+	return c.switchStationMode(ctx, in, false)
+}
+
+func (c *Client) switchStationMode(ctx context.Context, in stationSwitchCommand, transfer bool) (map[string]any, error) {
 	if c.o.Store == nil {
 		return nil, errors.New("程序还在启动，请稍后再试")
 	}
@@ -205,7 +227,7 @@ func (c *Client) switchStation(ctx context.Context, in stationSwitchCommand) (ma
 	// history would have a silent tail. Keep the queue admission closed while
 	// the target station is probed; a late event makes the final check fail and
 	// leaves A active for a safe retry.
-	if err := c.beginStationSwitch(); err != nil {
+	if err := c.beginStationSwitchMode(transfer); err != nil {
 		return nil, err
 	}
 	defer c.endStationSwitch()
@@ -222,17 +244,15 @@ func (c *Client) switchStation(ctx context.Context, in stationSwitchCommand) (ma
 	// selected session key is still checked against its exact native lease.
 	for _, candidate := range config.RemoteFamilies {
 		sessionKey := ""
-		if candidate == family {
+		if candidate == family && in.Agent != "" {
 			sessionKey = in.SessionKey
 		}
 		if err := c.checkRemoteAPIChange(ctx, candidate, sessionKey); err != nil {
 			return nil, err
 		}
 	}
-	if c.o.Desktop != nil {
-		if native, err := c.o.Desktop.NativeStatus(ctx); err == nil && desktopcompanion.ValidateNativeConnection(native, nowMS()) {
-			return nil, errors.New("Codex 桌面实时连接正在使用，请先结束后再切换中转站")
-		}
+	if err := c.checkNativeStationIdle(ctx); err != nil {
+		return nil, err
 	}
 	next, err := c.verifyStationSwitch(ctx, target)
 	if err != nil {
@@ -241,8 +261,11 @@ func (c *Client) switchStation(ctx context.Context, in stationSwitchCommand) (ma
 	// The target probe can take several seconds. Re-check immediately before
 	// the atomic write so a turn or recovery event that started during that
 	// probe cannot be stranded on A.
-	if c.stationSwitchBusy() {
+	if !transfer && c.stationSwitchBusy() {
 		return nil, errors.New("当前站点还有未同步的会话进度，请稍后再切换中转站")
+	}
+	if err := c.checkNativeStationIdle(ctx); err != nil {
+		return nil, err
 	}
 	selectedID := ""
 	selectedSnapshot := config.LocalAccount{}
@@ -268,7 +291,7 @@ func (c *Client) switchStation(ctx context.Context, in stationSwitchCommand) (ma
 	}
 	identity := config.RemoteIdentity(current)
 	expectedBinding, expectedPhone := current.PhoneBindingID, current.PhoneHash
-	if err := c.commitStationSwitch(func(cfg *config.Config) error {
+	if err := c.commitStationSwitchMode(func(cfg *config.Config) error {
 		if config.RemoteIdentity(*cfg) != identity {
 			return errors.New("连接已变化，请刷新后重试")
 		}
@@ -303,7 +326,7 @@ func (c *Client) switchStation(ctx context.Context, in stationSwitchCommand) (ma
 			}
 		}
 		return nil
-	}); err != nil {
+	}, transfer); err != nil {
 		return nil, err
 	}
 	if selectedID != "" && strings.TrimSpace(in.Model) == "" {
@@ -314,4 +337,24 @@ func (c *Client) switchStation(ctx context.Context, in stationSwitchCommand) (ma
 	return map[string]any{"switched": true, "alreadyCommitted": false, "operationId": in.OperationID,
 		"payloadHash": handoverPayloadHash(in), "hubUrl": config.NormalizeHubURL(target.HubURL), "deviceId": target.DeviceID,
 		"agent": in.Agent, "apiChanged": in.Agent != ""}, nil
+}
+
+func (c *Client) checkNativeStationIdle(ctx context.Context) error {
+	if c.o.Desktop == nil {
+		return nil
+	}
+	native, err := c.o.Desktop.NativeStatus(ctx)
+	if errors.Is(err, desktopcompanion.ErrActivationRequired) {
+		return nil
+	}
+	if err != nil {
+		return errors.New("无法确认桌面任务状态，请刷新后重试")
+	}
+	if !desktopcompanion.ValidateNativeConnection(native, nowMS()) {
+		return nil
+	}
+	if reader, ok := c.o.Desktop.(interface{ NativeStationIdle(context.Context) error }); ok {
+		return reader.NativeStationIdle(ctx)
+	}
+	return errors.New("桌面连接暂不支持空闲迁移，请先结束桌面实时连接")
 }

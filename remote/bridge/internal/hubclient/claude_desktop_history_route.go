@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"strings"
 
+	"salcara/bridge/internal/agents"
 	"salcara/bridge/internal/protocol"
 )
 
@@ -106,7 +107,18 @@ func (c *Client) dispatchClaudeDesktopHistory(ctx context.Context, cmd map[strin
 		result = map[string]any{"sessions": sessions, "nextCursor": next, "pagination": "v1"}
 	} else {
 		id := strings.TrimPrefix(key, "claude-desktop:")
-		info, events, next, err := provider.OpenPage(ctx, id, cursor, limit)
+		messageLimit, err := messagePageLimit(cmd)
+		if err != nil {
+			return true, nil, err
+		}
+		var info protocol.SessionInfo
+		var events []protocol.Event
+		var next string
+		if pager, ok := provider.(agents.MessageHistoryPager); ok && messageLimit != 0 {
+			info, events, next, err = pager.OpenMessagesPage(ctx, id, cursor, messageLimit)
+		} else {
+			info, events, next, err = provider.OpenPage(ctx, id, cursor, limit)
+		}
 		if err != nil {
 			return fail("Claude Desktop 本地历史读取失败，请检查原应用后重试")
 		}

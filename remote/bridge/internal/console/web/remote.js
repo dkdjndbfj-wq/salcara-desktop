@@ -43,8 +43,7 @@ function rmPairStatus(st) {
   if (consumed && pair.paired) toast('手机绑定成功', 'ok');
 }
 
-RENDER_login = async function (view) {
-  const st = await loadState();
+function renderRemoteLoginPage(view, st) {
   if (view.isConnected === false) return;
   const c = st.config, state = rmHubState();
   const linked = c.loggedIn;
@@ -99,6 +98,17 @@ RENDER_login = async function (view) {
   rmTickQR();
   rmLoadAgents();
   rmLoadLive();
+}
+
+RENDER_login = function (view) {
+  const target = view;
+  if (S.state) renderRemoteLoginPage(target, S.state);
+  void loadState().then((st) => {
+    if (target.isConnected === false || S.route !== 'login') return;
+    renderRemoteLoginPage(target, st);
+  }).catch((e) => {
+    if (!S.state && target.isConnected !== false && S.route === 'login') target.innerHTML = `<div class="rm-error" style="margin:20px">${esc(e.message)}</div>`;
+  });
 };
 
 const LIVE_PROMPT = '请开启 Salcara 实时桌面模式：用你的工具列出本机最近的 Codex 对话（最多 200 个，排除当前这个对话），然后调用 salcara_desktop_connect，参数 allowRemoteControl 为 true，durationSeconds 为 2592000，sessionKeys 为这些对话的 codex:真实对话ID 数组。保持这次调用一直运行，不要在这个对话里做别的事。';

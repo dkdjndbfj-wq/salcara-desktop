@@ -16,7 +16,7 @@ Object.assign(ICONS, {
   route: '<circle cx="6" cy="18" r="2"/><circle cx="18" cy="6" r="2"/><path d="M8 18h5a4 4 0 0 0 0-8h-2a4 4 0 0 1 0-8h5"/>',
 });
 
-const WB = { query: '', target: null, manual: {} };
+const WB = { query: '', target: null, manual: {}, poll: 0 };
 const NATIVE = { codex: 'responses', claude: 'anthropic' };
 const WIRE_LABEL = { responses: 'Responses', chat: 'Chat Completions', anthropic: 'Claude Messages' };
 
@@ -140,10 +140,12 @@ function wbOpenModal(target, error) {
   </div></div>`;
 }
 
-RENDER_overview = async function (view) {
-  void loadState().catch(() => undefined);
-  const local = await api('/api/local/accounts');
-  if (view.isConnected === false) return;
+const wbPlaceholderTools = () => ['codex-desktop', 'codex', 'claude', 'claude-desktop'].map((id) => ({
+  id, kind: toolKind({ id }), name: TOOL_LABEL[id] || id, available: false, path: '', custom: false,
+}));
+function renderWorkbench(view, local) {
+  if (view.isConnected === false || S.route !== 'overview') return;
+  if (!local.tools?.length && local.discoveryPending) local = { ...local, tools: wbPlaceholderTools() };
   S.local = local;
   $('#headActions').innerHTML = `<a class="btn" href="#accounts">${icon('key')}API 密钥</a>`;
   const empty = !local.accounts.length;
@@ -151,7 +153,31 @@ RENDER_overview = async function (view) {
     <div id="approvalsBox"></div>
     <div class="wb-grid" id="agentToolList">${ordered(local.tools).map(wbCard).join('')}</div>`;
   renderApprovalsBox();
+}
+RENDER_overview = function (view) {
+  // Paint immediately from the last local snapshot. Tool discovery (including
+  // Windows AppX/PowerShell) refreshes the same cards in the background.
+  const cached = S.local || { accounts: [], tools: wbPlaceholderTools(), bindings: {}, toolPaths: {} };
+  renderWorkbench(view, cached);
+  clearTimeout(WB.poll);
+  const target = view;
+  void api('/api/local/accounts').then((local) => {
+    if (target.isConnected === false || S.route !== 'overview') return;
+    renderWorkbench(target, local);
+    if (local.discoveryPending || local.nativePending) wbPollDiscovery(target);
+  }).catch(() => undefined);
 };
+
+function wbPollDiscovery(view) {
+  clearTimeout(WB.poll);
+  WB.poll = setTimeout(async () => {
+    if (view.isConnected === false || S.route !== 'overview') return;
+    const local = await refreshWorkbenchStatus();
+    if (view.isConnected === false || S.route !== 'overview') return;
+    if (local) renderAgentCards();
+    if (local?.discoveryPending || local?.nativePending || !local && S.bindingLoading) wbPollDiscovery(view);
+  }, 500);
+}
 
 const TOOL_ORDER = ['codex-desktop', 'codex', 'claude', 'claude-desktop'];
 const ordered = (tools) => [...tools].sort((x, y) => TOOL_ORDER.indexOf(x.id) - TOOL_ORDER.indexOf(y.id));

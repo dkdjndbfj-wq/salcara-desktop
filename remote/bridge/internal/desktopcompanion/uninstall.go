@@ -193,7 +193,7 @@ func (s *Service) planUninstall(ctx context.Context) (uninstallPlan, error) {
 	plan.state = state
 	var own ownership
 	if state.exists {
-		if json.Unmarshal(state.data, &own) != nil || own.Schema != 1 || own.Owner != rootOwner || own.Config != p.config || (own.Version != Version && own.Version != "0.3.0" && own.Version != "0.1.0") || !ownerID.MatchString(own.ID) {
+		if json.Unmarshal(state.data, &own) != nil || own.Schema != 1 || own.Owner != rootOwner || own.Config != p.config || (!hasPermissionHook(own.Version) && own.Version != "0.3.0" && own.Version != "0.1.0") || !ownerID.MatchString(own.ID) {
 			return plan, errors.New("现有安装记录不是本安装器所有，已拒绝卸载")
 		}
 		p.payload = filepath.Join(p.root, "v"+own.Version)
@@ -201,7 +201,7 @@ func (s *Service) planUninstall(ctx context.Context) (uninstallPlan, error) {
 	}
 	servers, exists := doc["mcp_servers"]
 	if !exists {
-		if state.exists && own.Version == Version && (permissionHookCount(doc, p) != 0 || installerMarkerExists(config.data, own.ID)) {
+		if state.exists && hasPermissionHook(own.Version) && (permissionHookCount(doc, p) != 0 || installerMarkerExists(config.data, own.ID)) {
 			return plan, errors.New("MCP 配置已移除但审批 hook 或安装标记仍在，未归档记录；请手动检查")
 		}
 		return plan, nil
@@ -212,7 +212,7 @@ func (s *Service) planUninstall(ctx context.Context) (uninstallPlan, error) {
 	}
 	value, exists := m[ServerName]
 	if !exists {
-		if state.exists && own.Version == Version && (permissionHookCount(doc, p) != 0 || installerMarkerExists(config.data, own.ID)) {
+		if state.exists && hasPermissionHook(own.Version) && (permissionHookCount(doc, p) != 0 || installerMarkerExists(config.data, own.ID)) {
 			return plan, errors.New("MCP 配置已移除但审批 hook 或安装标记仍在，未归档记录；请手动检查")
 		}
 		return plan, nil
@@ -229,7 +229,7 @@ func (s *Service) planUninstall(ctx context.Context) (uninstallPlan, error) {
 	if !reflect.DeepEqual(entry, expectedEntryVersion(p, own.Version)) {
 		return plan, errors.New("已安装 MCP 配置的路径或策略已改变，已拒绝卸载")
 	}
-	if own.Version == Version && (own.HookHash != entryHash(expectedPermissionHook(p)) || permissionHookCount(doc, p) != 1) {
+	if hasPermissionHook(own.Version) && (own.HookHash != entryHash(expectedPermissionHook(p)) || permissionHookCount(doc, p) != 1) {
 		return plan, errors.New("已安装审批 hook 的路径或策略已改变，已拒绝卸载")
 	}
 	start, end, err := ownedBlockRange(config.data, own, p)
@@ -246,7 +246,7 @@ func (s *Service) planUninstall(ctx context.Context) (uninstallPlan, error) {
 			return plan, errors.New("无法验证插件配置已完整移除，已拒绝卸载")
 		}
 	}
-	if own.Version == Version && permissionHookCount(after, p) != 0 {
+	if hasPermissionHook(own.Version) && permissionHookCount(after, p) != 0 {
 		return plan, errors.New("无法验证审批 hook 已完整移除，已拒绝卸载")
 	}
 	plan.installed = true

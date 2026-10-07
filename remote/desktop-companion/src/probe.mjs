@@ -1,4 +1,4 @@
-export const PROBE_VERSION = "0.4.0";
+export const PROBE_VERSION = "0.4.1";
 
 export const CATALOG_TOOL_ALLOWLIST = Object.freeze([
   "list_threads",

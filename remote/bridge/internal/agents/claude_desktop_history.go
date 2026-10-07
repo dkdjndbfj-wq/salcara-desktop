@@ -519,6 +519,12 @@ func (h *ClaudeDesktopHistory) transcriptPath(ctx context.Context, record claude
 // reads the same JSONL message shape, but events stay under a distinct desktop
 // key and no pending approvals or controllable leases are manufactured.
 func (h *ClaudeDesktopHistory) OpenPage(ctx context.Context, id, cursor string, limit int) (protocol.SessionInfo, []protocol.Event, string, error) {
+	return h.openHistoryPage(ctx, id, cursor, limit, paginateHistory)
+}
+func (h *ClaudeDesktopHistory) OpenMessagesPage(ctx context.Context, id, cursor string, limit int) (protocol.SessionInfo, []protocol.Event, string, error) {
+	return h.openHistoryPage(ctx, id, cursor, limit, paginateMessageHistory, true)
+}
+func (h *ClaudeDesktopHistory) openHistoryPage(ctx context.Context, id, cursor string, limit int, paginate historyPaginator, messages ...bool) (protocol.SessionInfo, []protocol.Event, string, error) {
 	if !claudeDesktopLocalID.MatchString(id) {
 		return protocol.SessionInfo{}, nil, "", errors.New("Claude Desktop 会话编号无效")
 	}
@@ -540,6 +546,10 @@ func (h *ClaudeDesktopHistory) OpenPage(ctx context.Context, id, cursor string, 
 		return info, nil, "", err
 	}
 	defer f.Close()
+	if len(messages) > 0 && messages[0] {
+		events, next, err := readClaudeTail(ctx, f, st, h.scopeID+":"+info.SessionKey, info, cursor, limit, *record.CLISessionID, true)
+		return info, events, next, err
+	}
 	if st.Size() > claudeDesktopTranscriptBytes {
 		return info, nil, "", errors.New("历史文件过大，请在电脑查看")
 	}
@@ -590,6 +600,6 @@ func (h *ClaudeDesktopHistory) OpenPage(ctx context.Context, id, cursor string, 
 	// Scope-bind history cursors as well as directory cursors. An imported local
 	// UUID may be present under more than one independently authorized account.
 	pageKey := h.scopeID + ":" + info.SessionKey
-	events, next, err := paginateHistory(pageKey, all, cursor, limit)
+	events, next, err := paginate(pageKey, all, cursor, limit)
 	return info, events, next, err
 }

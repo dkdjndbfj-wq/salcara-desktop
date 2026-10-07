@@ -28,7 +28,7 @@ import (
 )
 
 const (
-	Version        = "0.4.0"
+	Version        = "0.4.1"
 	ServerName     = "salcara_desktop_probe"
 	ConnectTool    = "salcara_desktop_connect"
 	maxFileBytes   = 4 << 20
@@ -362,7 +362,7 @@ func expectedEntry(p paths) map[string]any {
 func expectedEntryVersion(p paths, version string) map[string]any {
 	tools := []any{ServerName}
 	timeout := int64(15)
-	if version == Version || version == "0.3.0" {
+	if hasPermissionHook(version) || version == "0.3.0" {
 		tools = append(tools, ConnectTool)
 		timeout = 2592060
 	}
@@ -375,7 +375,7 @@ func entryTOMLVersion(p paths, version string) string {
 	q := func(v string) string { b, _ := json.Marshal(v); return string(b) }
 	tools := q(ServerName)
 	timeout := "15"
-	if version == Version || version == "0.3.0" {
+	if hasPermissionHook(version) || version == "0.3.0" {
 		tools += ", " + q(ConnectTool)
 		timeout = "2592060"
 	}
@@ -413,13 +413,15 @@ func expectedPermissionHook(p paths) map[string]any {
 }
 
 func hookTOMLVersion(p paths, version string) string {
-	if version != Version {
+	if !hasPermissionHook(version) {
 		return ""
 	}
 	command, _ := json.Marshal(permissionHookCommand(p))
 	commandWindows, _ := json.Marshal(permissionHookCommandWindows(p))
 	return "\n[[hooks.PermissionRequest]]\n\n[[hooks.PermissionRequest.hooks]]\ntype = \"command\"\ncommand = " + string(command) + "\ncommand_windows = " + string(commandWindows) + "\ntimeout = 120\nasync = false\n"
 }
+
+func hasPermissionHook(version string) bool { return version == Version || version == "0.4.0" }
 
 func installedBlockTOML(p paths, version string) string {
 	return entryTOMLVersion(p, version) + hookTOMLVersion(p, version)
@@ -521,7 +523,7 @@ func sameOtherSettings(before, after map[string]any, p paths, version string) bo
 				out["mcp_servers"] = copyServers
 			}
 		}
-		if version == Version {
+		if hasPermissionHook(version) {
 			if hooks, ok := src["hooks"].(map[string]any); ok {
 				copyHooks := make(map[string]any, len(hooks))
 				for k, v := range hooks {

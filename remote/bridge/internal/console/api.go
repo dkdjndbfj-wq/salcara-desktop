@@ -109,7 +109,8 @@ func (s *Server) tools(ctx context.Context) []protocol.Tool {
 	}
 	if len(tools) == 0 {
 		// Navigation needs availability, not a new --version process per Agent.
-		for _, t := range s.d.Local.Inventory(ctx, s.d.Store.Get().LocalToolPaths) {
+		inventory, _ := s.d.Local.InventorySnapshot(s.d.Store.Get().LocalToolPaths)
+		for _, t := range inventory {
 			if t.ID == "codex" || t.ID == "claude" {
 				tools = append(tools, protocol.Tool{ID: t.ID, Name: t.Name, Available: t.Available})
 			}

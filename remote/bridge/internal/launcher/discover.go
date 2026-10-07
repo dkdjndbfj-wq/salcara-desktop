@@ -32,6 +32,7 @@ func ValidTarget(id string) bool { _, ok := toolNames[id]; return ok }
 
 func Discover(ctx context.Context, paths map[string]string) []Tool {
 	packages := platformPackages(ctx)
+	var running map[string]Tool
 	list := []Tool{}
 	for _, id := range []string{"codex-desktop", "codex", "claude-desktop", "claude"} {
 		t := Tool{ID: id, Name: toolNames[id], Kind: strings.Split(id, "-")[0]}
@@ -52,6 +53,14 @@ func Discover(ctx context.Context, paths map[string]string) []Tool {
 				}
 			}
 		}
+		if !t.Available && !t.Custom && strings.HasSuffix(id, "-desktop") {
+			if running == nil {
+				running = runningDesktopTools(ctx)
+			}
+			if live, ok := running[t.Kind]; ok && fileExists(live.Path) {
+				t.Path, t.Family, t.AppID, t.Available = live.Path, live.Family, live.AppID, true
+			}
+		}
 		// Custom Store paths must retain package identity as well.
 		if t.Custom && strings.HasSuffix(id, "-desktop") {
 			if pkg, ok := packages[t.Kind]; ok && strings.EqualFold(t.Path, pkg.Path) {
@@ -60,7 +69,36 @@ func Discover(ctx context.Context, paths map[string]string) []Tool {
 		}
 		list = append(list, t)
 	}
+	// A nonstandard desktop installation can still provide its bundled CLI.
+	// Resolve from the detected app location instead of relying on PATH.
+	for i := range list {
+		if list[i].ID != "codex" || list[i].Available || list[i].Custom {
+			continue
+		}
+		for _, desktop := range list {
+			if desktop.ID != "codex-desktop" || !desktop.Available {
+				continue
+			}
+			for _, p := range bundledCLICandidates(desktop.Path) {
+				if fileExists(p) {
+					list[i].Path, list[i].Available = p, true
+					break
+				}
+			}
+		}
+	}
 	return list
+}
+
+func bundledCLICandidates(exe string) []string {
+	dir := filepath.Dir(exe)
+	if runtime.GOOS == "darwin" {
+		return []string{filepath.Join(dir, "..", "Resources", "codex"), filepath.Join(dir, "..", "Resources", "bin", "codex")}
+	}
+	if runtime.GOOS == "windows" {
+		return []string{filepath.Join(dir, "resources", "codex.exe"), filepath.Join(dir, "resources", "bin", "codex.exe")}
+	}
+	return nil
 }
 
 func desktopExecutable(path, kind string) string {

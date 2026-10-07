@@ -2,7 +2,9 @@ package hubclient
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -33,6 +35,102 @@ func (d *routeDesktop) NativeSend(_ context.Context, key, text, op string) error
 
 func liveDesktop(key string) desktopcompanion.NativeConnection {
 	return desktopcompanion.NativeConnection{Active: true, ExpiresAt: time.Now().Add(time.Hour).UnixMilli(), SessionKeys: []string{key}, Capabilities: desktopcompanion.NativeCapabilities{List: true, Read: true, Send: true}}
+}
+
+type pagedRouteDesktop struct {
+	routeDesktop
+	list   []protocol.SessionInfo
+	limits []int
+}
+
+func (d *pagedRouteDesktop) NativeList(context.Context) ([]protocol.SessionInfo, error) {
+	return d.list, nil
+}
+func (d *pagedRouteDesktop) NativeOpenPageLimited(_ context.Context, key, cursor string, limit int) (protocol.SessionInfo, []protocol.Event, string, error) {
+	d.limits = append(d.limits, limit)
+	return protocol.SessionInfo{SessionKey: key, Tool: "codex", ControlSurface: "desktop", Controllable: true, ControlExpiresAt: time.Now().Add(time.Hour).UnixMilli()}, nil, "", nil
+}
+
+func TestNativeHistoryLimitDefaultsRemainCompatibleAndBounded(t *testing.T) {
+	key := "codex:01a0ae56-e9f6-4933-9ad4-5e08cd7874e5"
+	c, a := surfaceClient(t)
+	d := &pagedRouteDesktop{routeDesktop: routeDesktop{st: liveDesktop(key)}}
+	c.o.Desktop = d
+	for _, limit := range []int{0, 2, 10} {
+		cmd := map[string]any{"type": "desktop.session.open", "sessionKey": key, "controlSurface": "desktop"}
+		if limit != 0 {
+			cmd["limit"] = limit
+		}
+		if _, err := c.Dispatch(context.Background(), cmd); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if fmt.Sprint(d.limits) != "[10 2 10]" {
+		t.Fatal("native default or small first page lost")
+	}
+	if _, err := c.Dispatch(context.Background(), map[string]any{"type": "desktop.session.open", "controlSurface": "desktop", "sessionKey": key, "limit": 11}); err == nil {
+		t.Fatal("unbounded native read accepted")
+	}
+	if len(a.opened) != 0 {
+		t.Fatal("native read reached CLI")
+	}
+}
+
+func TestNativeDirectoryPagesTenAtATimeAndRejectsInvalidPositions(t *testing.T) {
+	c, _ := surfaceClient(t)
+	d := &pagedRouteDesktop{}
+	for i := 0; i < 25; i++ {
+		d.list = append(d.list, protocol.SessionInfo{SessionKey: fmt.Sprintf("codex:%d", i)})
+	}
+	c.o.Desktop = d
+	cursor := ""
+	for _, expected := range []int{10, 10, 5} {
+		cmd := map[string]any{"type": "desktop.sessions.list", "controlSurface": "desktop", "limit": 10}
+		if cursor != "" {
+			cmd["cursor"] = cursor
+		}
+		result, err := c.Dispatch(context.Background(), cmd)
+		if err != nil {
+			t.Fatal(err)
+		}
+		page := result.(map[string]any)
+		if len(page["sessions"].([]protocol.SessionInfo)) != expected {
+			t.Fatal("incorrect native page")
+		}
+		cursor = page["nextCursor"].(string)
+	}
+	if cursor != "" {
+		t.Fatal("last page still advertises more")
+	}
+	for _, bad := range []string{"10junk", " 10", "+10", "01", "-1", "26"} {
+		cmd := map[string]any{"type": "desktop.sessions.list", "controlSurface": "desktop", "limit": 10, "cursor": base64.RawURLEncoding.EncodeToString([]byte(bad))}
+		if _, err := c.Dispatch(context.Background(), cmd); err == nil {
+			t.Fatal("invalid native position accepted")
+		}
+	}
+}
+
+func TestNativeDirectoryNewHeadDoesNotShiftTheNextPageBoundary(t *testing.T) {
+	c, _ := surfaceClient(t)
+	d := &pagedRouteDesktop{}
+	for i := 0; i < 25; i++ {
+		d.list = append(d.list, protocol.SessionInfo{SessionKey: fmt.Sprintf("codex:%d", i)})
+	}
+	c.o.Desktop = d
+	first, err := c.Dispatch(context.Background(), map[string]any{"type": "desktop.sessions.list", "controlSurface": "desktop", "limit": 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cursor := first.(map[string]any)["nextCursor"].(string)
+	d.list = append([]protocol.SessionInfo{{SessionKey: "codex:new"}}, d.list...)
+	second, err := c.Dispatch(context.Background(), map[string]any{"type": "desktop.sessions.list", "controlSurface": "desktop", "limit": 10, "cursor": cursor})
+	if err != nil {
+		t.Fatal(err)
+	}
+	page := second.(map[string]any)["sessions"].([]protocol.SessionInfo)
+	if len(page) != 10 || page[0].SessionKey != "codex:10" || page[9].SessionKey != "codex:19" {
+		t.Fatal("new head shifted the older page")
+	}
 }
 
 type approvalDesktop struct {

@@ -71,6 +71,7 @@ type Options struct {
 	QueueBytes       int           // 8 MiB conservative retained/wire budget
 	ReregisterEvery  time.Duration // 5m
 	ToolCheckEvery   time.Duration // 60s
+	StandbyEvery     time.Duration // 15s; short polls to already paired alternate stations
 
 	OnStatus func(Status) // called on every state change
 	// NavigateDesktop only opens an existing native desktop chat. It does not send a turn.
@@ -185,6 +186,9 @@ func New(o Options) *Client {
 	}
 	if o.ToolCheckEvery == 0 {
 		o.ToolCheckEvery = 60 * time.Second
+	}
+	if o.StandbyEvery <= 0 {
+		o.StandbyEvery = 15 * time.Second
 	}
 	if o.HTTP == nil {
 		o.HTTP = &http.Client{Timeout: 30 * time.Second}
@@ -307,6 +311,7 @@ func (c *Client) Run(ctx context.Context) {
 	go c.flushLoop(ctx)
 	go c.registerLoop(ctx)
 	go c.phoneRevokeLoop(ctx)
+	go c.standbyLoop(ctx)
 	backoff := c.o.BackoffMin
 	for ctx.Err() == nil {
 		cfg := c.o.Store.Get()

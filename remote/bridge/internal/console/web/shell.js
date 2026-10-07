@@ -186,6 +186,7 @@ setApprovalBadge = function () {
 async function refreshSetupDot() {
   try {
     const r = await api('/api/setup');
+    if (r.discoveryPending) { setTimeout(refreshSetupDot, 500); return; }
     const missing = (r.items || []).some((item) => item.required && !item.installed);
     $('#setupDot').hidden = !missing;
     if (missing) { const hint = $('#hint'); hint.textContent = '环境未就绪 · 打开「环境」一键安装'; hint.classList.remove('gone'); }

@@ -339,6 +339,14 @@ func (a *codexAgent) pollOnce(ctx context.Context, prev map[string]protocol.Sess
 }
 
 func (a *codexAgent) streamNewItems(ctx context.Context, id string) {
+	a.mu.Lock()
+	item := a.threadLocked(id)
+	tail, baseline := item.tailHistory, item.tailBaselineTurn
+	a.mu.Unlock()
+	if tail {
+		a.streamTailItems(ctx, id, baseline)
+		return
+	}
 	th, err := a.readThread(ctx, id)
 	if err != nil {
 		return
