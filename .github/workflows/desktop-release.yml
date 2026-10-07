@@ -23,8 +23,13 @@ jobs:
       - name: Canonical runner-owned temporary directory
         shell: pwsh
         run: |
-          # Short-path aliases must not weaken production descriptor policy.
-          $fixtureTemp = node -e "console.log(require('node:fs').realpathSync(process.env.RUNNER_TEMP))"
+          # Keep fixtures on a canonical, runner-owned child rather than the
+          # shared RUNNER_TEMP root. The child receives the current runner
+          # identity as its owner, which is required by the descriptor ACL
+          # tests on Windows 2025 while still avoiding short-path aliases.
+          $fixtureTemp = Join-Path $env:RUNNER_TEMP 'salcara-fixtures'
+          New-Item -ItemType Directory -Path $fixtureTemp -Force | Out-Null
+          $fixtureTemp = node -e "console.log(require('node:fs').realpathSync(process.argv[1]))" $fixtureTemp
           "TEMP=$fixtureTemp" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           "TMP=$fixtureTemp" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
       - name: Desktop tests (including synthetic Windows swap and rollback)
