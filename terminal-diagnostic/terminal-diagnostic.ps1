@@ -1,8 +1,8 @@
 param(
   [Parameter(Mandatory=$true)][string]$RepositoryRoot,
   [Parameter(Mandatory=$true)][string]$OutputDirectory,
-  [ValidateSet('baseline','normal-std-handles','no-psreadline','detached','normal-std-handles-detached')]
-  [string[]]$Variants=@('baseline','normal-std-handles','no-psreadline','detached','normal-std-handles-detached')
+  [ValidateSet('baseline','normal-std-handles','no-psreadline','detached','normal-std-handles-detached','inbox-modules')]
+  [string[]]$Variants=@('baseline','inbox-modules')
 )
 $ErrorActionPreference='Stop'
 $PSNativeCommandUseErrorActionPreference=$false
@@ -12,6 +12,16 @@ $commonSourcePath=Join-Path $bridgeRoot 'internal/hubclient/workspace_terminal.g
 $diagnosticSourcePath=Join-Path $PSScriptRoot 'probe/terminal_diagnostic_test.go'
 $terminalSource=[IO.File]::ReadAllText($terminalSourcePath)
 $commonSource=[IO.File]::ReadAllText($commonSourcePath)
+$diagnosticSource=[IO.File]::ReadAllText($diagnosticSourcePath)
+$oldWrite=@'
+[IO.File]::WriteAllText('%s',$m); Write-Output $m
+'@
+$observedWrite=@'
+$host.UI.WriteLine(('HOST_'+'BEFORE')); [IO.File]::WriteAllText('%s',$m); Write-Output $m; $host.UI.WriteLine(('HOST_'+'AFTER'))
+'@
+if(-not $diagnosticSource.Contains($oldWrite)){throw 'Command observation diagnostic patch no longer matches probe'}
+$diagnosticSource=$diagnosticSource.Replace($oldWrite,$observedWrite)
+$diagnosticSource=$diagnosticSource.Replace('visible := d.waitText(marker, 5*time.Second)','visible := d.waitText(marker, 5*time.Second); if visible { d.waitText("HOST_AFTER", time.Second) }')
 $environmentStart=$commonSource.IndexOf('func terminalEnvironment() []string {')
 if($environmentStart -lt 0){throw 'Production terminalEnvironment function not found'}
 $helperHeader=@'
@@ -44,9 +54,17 @@ foreach($variant in $Variants){
     if(-not $caseSource.Contains($needle)){throw 'PSReadLine diagnostic patch no longer matches production source'}
     $caseSource=$caseSource.Replace($needle,'args := []string{shell, "-NoLogo", "-NoProfile", "-NoExit", "-Command", "Remove-Module PSReadLine -ErrorAction SilentlyContinue"}')
   }
+  if($variant -eq 'inbox-modules'){
+    $needle='args := []string{shell, "-NoLogo", "-NoProfile", "-NoExit"}'
+    if(-not $caseSource.Contains($needle)){throw 'Inbox module diagnostic patch no longer matches production source'}
+    $bootstrap=@'
+args := []string{shell, "-NoLogo", "-NoProfile", "-NoExit", "-Command", `Import-Module -Name ($PSHOME + '\Modules\Microsoft.PowerShell.Utility\Microsoft.PowerShell.Utility.psd1') -ErrorAction Stop; Import-Module -Name ($PSHOME + '\Modules\Microsoft.PowerShell.Management\Microsoft.PowerShell.Management.psd1') -ErrorAction Stop; Import-Module -Name ($PSHOME + '\Modules\Microsoft.PowerShell.Host\Microsoft.PowerShell.Host.psd1') -ErrorAction Stop`}
+'@
+    $caseSource=$caseSource.Replace($needle,$bootstrap)
+  }
   [IO.File]::WriteAllText((Join-Path $caseRoot 'workspace_terminal_windows.go'),$caseSource)
   [IO.File]::WriteAllText((Join-Path $caseRoot 'terminal_environment.go'),$helpers)
-  Copy-Item -LiteralPath $diagnosticSourcePath -Destination (Join-Path $caseRoot 'terminal_diagnostic_test.go')
+  [IO.File]::WriteAllText((Join-Path $caseRoot 'terminal_diagnostic_test.go'),$diagnosticSource)
   Copy-Item -LiteralPath (Join-Path $bridgeRoot 'go.sum') -Destination (Join-Path $caseRoot 'go.sum')
   [IO.File]::WriteAllText((Join-Path $caseRoot 'go.mod'),$goMod)
   $env:SALCARA_TERMINAL_DIAG_VARIANT=$variant
