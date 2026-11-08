@@ -7,11 +7,13 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"os"
 	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"salcara/bridge/internal/protocol"
 )
@@ -19,16 +21,73 @@ import (
 // NativeConnection is a short-lived, explicitly approved experimental desktop
 // lease. It contains no local HTTP token, caller identity, pipe or file path.
 type NativeConnection struct {
-	Active            bool               `json:"active"`
-	ExpiresAt         int64              `json:"expiresAt"`
-	SessionKeys       []string           `json:"sessionKeys"`
-	Capabilities      NativeCapabilities `json:"capabilities"`
-	ApprovalTransport string             `json:"approvalTransport,omitempty"`
+	Active                 bool                `json:"active"`
+	ExpiresAt              int64               `json:"expiresAt"`
+	SessionKeys            []string            `json:"sessionKeys"`
+	Capabilities           NativeCapabilities  `json:"capabilities"`
+	ApprovalTransport      string              `json:"approvalTransport,omitempty"`
+	ModelOverrideTransport string              `json:"modelOverrideTransport,omitempty"`
+	ModelOptions           *NativeModelSupport `json:"modelOptions,omitempty"`
+}
+
+const NativeModelOverrideTransport = "codex-tool-schema-v1"
+
+// Only the exact runtime tool schema enables model/effort overrides. This is
+// not a promise that the host accepts a particular model or grants its quota.
+type NativeModelSupport struct {
+	Model    bool     `json:"model"`
+	Thinking []string `json:"thinking"`
+}
+
+type NativeSendOptions struct {
+	Model    string
+	Thinking string
+	// A local guard supplied by Bridge, never serialized to the companion.
+	ValidateSource func() error `json:"-"`
+}
+
+func validNativeModelSupport(enabled bool, transport string, support *NativeModelSupport) bool {
+	if !enabled {
+		return transport == "" && support == nil
+	}
+	if transport != NativeModelOverrideTransport || support == nil || !support.Model || len(support.Thinking) > 8 {
+		return false
+	}
+	seen := map[string]bool{}
+	for _, value := range support.Thinking {
+		if !protocol.ValidModelEffort(value) || value == "" || seen[value] {
+			return false
+		}
+		seen[value] = true
+	}
+	return true
+}
+
+func NativeOptionsSupported(st NativeConnection, options NativeSendOptions) bool {
+	if options.Model == "" && options.Thinking == "" {
+		return true
+	}
+	if !st.Capabilities.Send || !st.Capabilities.ModelOverride || !validNativeModelSupport(true, st.ModelOverrideTransport, st.ModelOptions) {
+		return false
+	}
+	if len(options.Model) > 200 || strings.IndexFunc(options.Model, unicode.IsControl) >= 0 || options.Model != "" && strings.TrimSpace(options.Model) == "" {
+		return false
+	}
+	if options.Thinking != "" {
+		for _, value := range st.ModelOptions.Thinking {
+			if value == options.Thinking {
+				return true
+			}
+		}
+		return false
+	}
+	return true
 }
 
 // Desktop transport is deliberately smaller than the app-server/CLI protocol.
 // Missing metadata (older companion) means unsupported, never guessed support.
 type NativeCapabilities struct {
+	Navigate      bool `json:"navigate"`
 	List          bool `json:"list"`
 	Read          bool `json:"read"`
 	Send          bool `json:"send"`
@@ -51,7 +110,7 @@ func ValidateNativeConnection(st NativeConnection, now int64) bool {
 	if !st.Active || st.ExpiresAt <= now || st.ExpiresAt-now > MaxLeaseMillis || len(st.SessionKeys) == 0 || len(st.SessionKeys) > MaxLeaseSessions {
 		return false
 	}
-	if st.Capabilities.Interrupt || st.Capabilities.Attachments || st.Capabilities.ModelOverride || !validApprovalTransport(st.Capabilities.Approval, st.ApprovalTransport) {
+	if st.Capabilities.Interrupt || st.Capabilities.Attachments || st.Capabilities.ModelOverride && !st.Capabilities.Send || !validNativeModelSupport(st.Capabilities.ModelOverride, st.ModelOverrideTransport, st.ModelOptions) || !validApprovalTransport(st.Capabilities.Approval, st.ApprovalTransport) {
 		return false
 	}
 	seen := map[string]bool{}
@@ -64,8 +123,8 @@ func ValidateNativeConnection(st NativeConnection, now int64) bool {
 	return true
 }
 
-var ErrActivationRequired = errors.New("desktop_activation_required: 请在 Codex Desktop 中明确授权 Salcara 桌面连接；不会改用 CLI")
-var ErrDesktopUnavailable = errors.New("desktop_connection_unavailable: 桌面连接已断开或原生工具拒绝请求；不会改用 CLI")
+var ErrActivationRequired = errors.New("desktop_activation_required: 请先在电脑上打开 Codex 或 Claude Desktop，然后在「手机远程」里点击授权；不会改用 CLI")
+var ErrDesktopUnavailable = errors.New("desktop_connection_unavailable: 桌面连接已断开，请检查电脑上的 Codex/Claude Desktop 是否正常运行，重连后重试；不会改用 CLI")
 var ErrDesktopScope = errors.New("desktop_session_not_authorized: 会话不在当前桌面授权范围内")
 var ErrDesktopDeliveryUncertain = errors.New("command_delivery_uncertain: 桌面消息可能已被原会话接收，暂时无法确认；请恢复连接后查看原会话，不要作为新任务重复发送")
 var ErrDesktopCapability = errors.New("desktop_capability_unavailable: 当前桌面接口不支持此操作；请在电脑中处理，不会改用 CLI")
@@ -131,11 +190,81 @@ func (s *Service) activeDescriptor(ctx context.Context) (activeDescriptor, error
 			return d, ErrActivationRequired
 		}
 	}
+	// The descriptor is a live activation artifact, not a durable login. A
+	// process that starts after a Codex/Codex Desktop instance has already left
+	// this file behind must not silently adopt that old activation. Codex (or
+	// the companion it explicitly authorized) must renew it after this process
+	// starts, which also makes restart order fail closed.
+	info, err := os.Stat(path)
+	if err != nil || !info.Mode().IsRegular() || !info.ModTime().After(s.startupAt) {
+		return activeDescriptor{}, ErrActivationRequired
+	}
 	b, err := readRegular(path, 16384)
 	if err != nil || strictJSON(b, &d) != nil || !validDescriptor(d, time.Now().UnixMilli()) {
 		return activeDescriptor{}, ErrActivationRequired
 	}
+	// In the production Bridge the callback is installed by main and an empty
+	// identity means that no Salcara-managed source is currently selected. Do
+	// not let a native Codex process (or another proxy) turn that into a usable
+	// desktop lease. Nil remains a compatibility path for isolated tests and
+	// embedded callers that do not own account selection.
+	if s.o.NativeSourceIdentity != nil && s.sourceIdentity() == "" {
+		return activeDescriptor{}, ErrActivationRequired
+	}
+	if s.o.RequireManagedLaunch {
+		s.leaseMu.Lock()
+		managedLaunch := s.managedLaunchAt.After(s.startupAt)
+		s.leaseMu.Unlock()
+		if !managedLaunch {
+			return activeDescriptor{}, ErrActivationRequired
+		}
+	}
+	if err := s.checkSourceBinding(d.Token); err != nil {
+		return activeDescriptor{}, err
+	}
 	return d, nil
+}
+
+func (s *Service) sourceIdentity() string {
+	if s.o.NativeSourceIdentity == nil {
+		return ""
+	}
+	identity := strings.TrimSpace(s.o.NativeSourceIdentity())
+	if len(identity) > 1024 {
+		return ""
+	}
+	return identity
+}
+
+// checkSourceBinding rejects a token that was authorized while a different
+// API/provider source was selected. A changed token is allowed to proceed to
+// the authenticated status check; bindSourceIdentity then commits the new
+// token only after that check succeeds.
+func (s *Service) checkSourceBinding(token string) error {
+	identity := s.sourceIdentity()
+	if identity == "" {
+		return nil
+	}
+	s.leaseMu.Lock()
+	defer s.leaseMu.Unlock()
+	if s.boundToken != "" && s.boundToken == token && s.boundSourceIdentity != identity {
+		return ErrActivationRequired
+	}
+	return nil
+}
+
+func (s *Service) bindSourceIdentity(token, identity string) error {
+	if identity == "" {
+		return nil
+	}
+	s.leaseMu.Lock()
+	defer s.leaseMu.Unlock()
+	if s.boundToken != "" && s.boundToken == token && s.boundSourceIdentity != identity {
+		return ErrActivationRequired
+	}
+	s.boundToken = token
+	s.boundSourceIdentity = identity
+	return nil
 }
 
 func validDescriptor(d activeDescriptor, now int64) bool {
@@ -194,6 +323,13 @@ func gatewayRPC(ctx context.Context, d activeDescriptor, body map[string]any, ti
 	transport := &http.Transport{Proxy: nil, DisableKeepAlives: true}
 	defer transport.CloseIdleConnections()
 	client := &http.Client{Transport: transport, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	if body["type"] == "send" || body["type"] == "approval.respond" {
+		// verifyLive itself awaits the native host. Check the admitted phone
+		// generation after that await and immediately before request dispatch.
+		if err := CheckRemoteAdmission(ctx); err != nil {
+			return nil, gatewayUnsentError{code: "AUTHORIZATION_CHANGED"}
+		}
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, ErrDesktopUnavailable
@@ -219,26 +355,32 @@ func gatewayRPC(ctx context.Context, d activeDescriptor, body map[string]any, ti
 	return reply.Result, nil
 }
 
-func verifyLive(ctx context.Context, d activeDescriptor) (NativeConnection, error) {
+func (s *Service) verifyLive(ctx context.Context, d activeDescriptor) (NativeConnection, error) {
+	identity := s.sourceIdentity()
+	if err := s.checkSourceBinding(d.Token); err != nil {
+		return NativeConnection{}, err
+	}
 	raw, err := gatewayRPC(ctx, d, map[string]any{"type": "status"}, 10*time.Second)
 	if err != nil {
 		return NativeConnection{}, err
 	}
 	var status struct {
-		DesktopControl     bool               `json:"desktopControl"`
-		RemoteSend         bool               `json:"remoteSend"`
-		ExpiresAt          int64              `json:"expiresAt"`
-		ControllerThreadID string             `json:"controllerThreadId"`
-		SessionKeys        []string           `json:"sessionKeys"`
-		Capabilities       NativeCapabilities `json:"capabilities"`
-		ApprovalTransport  string             `json:"approvalTransport"`
+		DesktopControl         bool                `json:"desktopControl"`
+		RemoteSend             bool                `json:"remoteSend"`
+		ExpiresAt              int64               `json:"expiresAt"`
+		ControllerThreadID     string              `json:"controllerThreadId"`
+		SessionKeys            []string            `json:"sessionKeys"`
+		Capabilities           NativeCapabilities  `json:"capabilities"`
+		ApprovalTransport      string              `json:"approvalTransport"`
+		ModelOverrideTransport string              `json:"modelOverrideTransport"`
+		ModelOptions           *NativeModelSupport `json:"modelOptions"`
 	}
 	if strictJSON(raw, &status) != nil || !status.DesktopControl || !status.RemoteSend || status.ExpiresAt != d.ExpiresAt || status.ControllerThreadID != d.ControllerThreadID || len(status.SessionKeys) != len(d.SessionKeys) {
 		return NativeConnection{}, ErrDesktopUnavailable
 	}
 	// Approval is a separately verified hook transport, not an inferred native
 	// catalogue operation. Other unavailable operations remain closed.
-	if status.Capabilities.Interrupt || status.Capabilities.Attachments || status.Capabilities.ModelOverride || !validApprovalTransport(status.Capabilities.Approval, status.ApprovalTransport) {
+	if status.Capabilities.Interrupt || status.Capabilities.Attachments || status.Capabilities.ModelOverride && !status.Capabilities.Send || !validNativeModelSupport(status.Capabilities.ModelOverride, status.ModelOverrideTransport, status.ModelOptions) || !validApprovalTransport(status.Capabilities.Approval, status.ApprovalTransport) {
 		return NativeConnection{}, ErrDesktopUnavailable
 	}
 	seen := map[string]bool{}
@@ -248,7 +390,16 @@ func verifyLive(ctx context.Context, d activeDescriptor) (NativeConnection, erro
 		}
 		seen[key] = true
 	}
-	return NativeConnection{Active: true, ExpiresAt: d.ExpiresAt, SessionKeys: append([]string{}, d.SessionKeys...), Capabilities: status.Capabilities, ApprovalTransport: status.ApprovalTransport}, nil
+	// Re-read the callback after the authenticated round trip. If the user
+	// switched API/provider while status was in flight, do not bind the old
+	// activation to the new source or expose a mixed-source lease.
+	if identity != s.sourceIdentity() {
+		return NativeConnection{}, ErrActivationRequired
+	}
+	if err := s.bindSourceIdentity(d.Token, identity); err != nil {
+		return NativeConnection{}, err
+	}
+	return NativeConnection{Active: true, ExpiresAt: d.ExpiresAt, SessionKeys: append([]string{}, d.SessionKeys...), Capabilities: status.Capabilities, ApprovalTransport: status.ApprovalTransport, ModelOverrideTransport: status.ModelOverrideTransport, ModelOptions: status.ModelOptions}, nil
 }
 
 func (s *Service) NativeStatus(ctx context.Context) (NativeConnection, error) {
@@ -256,7 +407,7 @@ func (s *Service) NativeStatus(ctx context.Context) (NativeConnection, error) {
 	if err != nil {
 		return NativeConnection{}, err
 	}
-	return verifyLive(ctx, d)
+	return s.verifyLive(ctx, d)
 }
 
 func nativeJSON(raw json.RawMessage, target any) error {
@@ -280,14 +431,17 @@ func nativeJSON(raw json.RawMessage, target any) error {
 }
 
 type nativeThread struct {
-	ID          string          `json:"id"`
-	Kind        string          `json:"kind"`
-	HostID      string          `json:"hostId"`
-	Title       string          `json:"title"`
-	Cwd         string          `json:"cwd"`
-	UpdatedAt   int64           `json:"updatedAt"`
-	Status      json.RawMessage `json:"status"`
-	PinnedIndex int             `json:"pinnedIndex"`
+	ID            string          `json:"id"`
+	Kind          string          `json:"kind"`
+	HostID        string          `json:"hostId"`
+	Title         string          `json:"title"`
+	Cwd           string          `json:"cwd"`
+	UpdatedAt     int64           `json:"updatedAt"`
+	Status        json.RawMessage `json:"status"`
+	PinnedIndex   int             `json:"pinnedIndex"`
+	AgentNickname string          `json:"agentNickname"`
+	AgentRole     string          `json:"agentRole"`
+	ForkedFromID  string          `json:"forkedFromId"`
 }
 
 func sessionFromNative(t nativeThread, expiry int64) protocol.SessionInfo {
@@ -298,7 +452,11 @@ func sessionFromNative(t nativeThread, expiry int64) protocol.SessionInfo {
 	if ts > 0 && ts < 100000000000 {
 		ts *= 1000
 	}
-	return protocol.SessionInfo{SessionKey: "codex:" + t.ID, Tool: "codex", Client: "Codex App", ControlSurface: "desktop", ControlExpiresAt: expiry, Title: bounded(t.Title, 2000), Cwd: bounded(t.Cwd, 4096), UpdatedAt: ts, Status: status, Controllable: true}
+	info := protocol.SessionInfo{SessionKey: "codex:" + t.ID, Tool: "codex", Client: "Codex App", ControlSurface: "desktop", ControlExpiresAt: expiry, Title: bounded(t.Title, 2000), Cwd: bounded(t.Cwd, 4096), UpdatedAt: ts, Status: status, Controllable: true, AgentNickname: bounded(strings.TrimSpace(t.AgentNickname), 160), AgentRole: bounded(strings.TrimSpace(t.AgentRole), 160)}
+	if canonicalUUID.MatchString(t.ForkedFromID) && t.ForkedFromID != t.ID {
+		info.ForkedFromSessionKey = "codex:" + t.ForkedFromID
+	}
+	return info
 }
 
 func nativeStatus(raw json.RawMessage) string {
@@ -344,7 +502,7 @@ func (s *Service) nativeList(ctx context.Context, requireIdle bool) ([]protocol.
 	if err != nil {
 		return nil, err
 	}
-	if st, e := verifyLive(ctx, d); e != nil {
+	if st, e := s.verifyLive(ctx, d); e != nil {
 		return nil, e
 	} else if !st.Capabilities.List {
 		return nil, ErrDesktopCapability
@@ -440,7 +598,7 @@ func (s *Service) nativeOpenPage(ctx context.Context, key, cursor string, limit 
 	if !withinScope(d, key) {
 		return protocol.SessionInfo{}, nil, "", ErrDesktopScope
 	}
-	if st, e := verifyLive(ctx, d); e != nil {
+	if st, e := s.verifyLive(ctx, d); e != nil {
 		return protocol.SessionInfo{}, nil, "", e
 	} else if !st.Capabilities.Read {
 		return protocol.SessionInfo{}, nil, "", ErrDesktopCapability
@@ -516,7 +674,7 @@ func (s *Service) NativeRespondApproval(ctx context.Context, key, approvalID, de
 	if !withinScope(d, key) {
 		return ErrDesktopScope
 	}
-	st, err := verifyLive(ctx, d)
+	st, err := s.verifyLive(ctx, d)
 	if err != nil {
 		return err
 	}
@@ -543,6 +701,10 @@ func (s *Service) NativeRespondApproval(ctx context.Context, key, approvalID, de
 }
 
 func (s *Service) NativeSend(ctx context.Context, key, text, operationID string) error {
+	return s.NativeSendWithOptions(ctx, key, text, operationID, NativeSendOptions{})
+}
+
+func (s *Service) NativeSendWithOptions(ctx context.Context, key, text, operationID string, options NativeSendOptions) error {
 	if _, ok := desktopSessionID(key); !ok {
 		return ErrDesktopScope
 	}
@@ -556,15 +718,37 @@ func (s *Service) NativeSend(ctx context.Context, key, text, operationID string)
 	if !withinScope(d, key) {
 		return ErrDesktopScope
 	}
-	if st, e := verifyLive(ctx, d); e != nil {
+	identity := s.sourceIdentity()
+	if st, e := s.verifyLive(ctx, d); e != nil {
 		return e
-	} else if !st.Capabilities.Send {
+	} else if !st.Capabilities.Send || !NativeOptionsSupported(st, options) {
 		return ErrDesktopCapability
 	}
-	raw, err := gatewayRPC(ctx, d, map[string]any{"type": "send", "sessionKey": key, "text": text, "operationId": operationID}, 45*time.Second)
+	// The native app can be slow to answer status. Re-read the source identity
+	// immediately before dispatch so an API card edit cannot turn a verified A
+	// lease into a B request during that gap.
+	if s.o.NativeSourceIdentity != nil && identity != s.sourceIdentity() {
+		return ErrActivationRequired
+	}
+	if options.ValidateSource != nil {
+		if err := options.ValidateSource(); err != nil {
+			return err
+		}
+	}
+	command := map[string]any{"type": "send", "sessionKey": key, "text": text, "operationId": operationID}
+	if options.Model != "" {
+		command["model"] = options.Model
+	}
+	if options.Thinking != "" {
+		command["thinking"] = options.Thinking
+	}
+	raw, err := gatewayRPC(ctx, d, command, 45*time.Second)
 	if err != nil {
 		var unsent gatewayUnsentError
 		if errors.As(err, &unsent) {
+			if unsent.code == "CAPABILITY_UNAVAILABLE" {
+				return ErrDesktopCapability
+			}
 			return ErrDesktopRequestUnsent
 		}
 		// Once dispatch starts, a lost response must never be presented as proof

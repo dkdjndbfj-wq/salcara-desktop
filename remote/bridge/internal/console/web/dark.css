@@ -100,8 +100,8 @@
 :root[data-theme="dark"] .win-ctl button.x:hover { color: #d9d9d9 !important; }
 :root[data-theme="dark"] .us-seg button[aria-selected="true"] { background: #171717 !important; box-shadow: 0 1px 2px rgba(0, 0, 0, 0.128), 0 0 0 1px rgba(0, 0, 0, 0.064) !important; }
 :root[data-theme="dark"] .us-stat { background: #171717 !important; }
-:root[data-theme="dark"] .us-stat.main { background: linear-gradient(150deg, #16181f 0%, #171a22 55%, #1a1722 100%) !important; border-color: #1a1d26 !important; }
-:root[data-theme="dark"] .us-stat.main .us-v { color: #7b8de0 !important; }
+:root[data-theme="dark"] .us-stat.us-stat-balance { background: linear-gradient(150deg, #16181f 0%, #171a22 55%, #1a1722 100%) !important; border-color: #1a1d26 !important; }
+:root[data-theme="dark"] .us-stat.us-stat-balance .us-v { color: #7b8de0 !important; }
 :root[data-theme="dark"] .us-f { color: var(--faint, #afb5c2) !important; }
 :root[data-theme="dark"] .us-axis { fill: #acb3c1 !important; }
 :root[data-theme="dark"] .us-dot { fill: #d9d9d9 !important; }
@@ -136,8 +136,8 @@
 :root[data-theme="dark"] .cx-send.stop { background: #e8ebf2 !important; }
 :root[data-theme="dark"] .bar > i { background: var(--primary) !important; }
 :root[data-theme="dark"] .switch input:checked + span { background: var(--primary) !important; }
-:root[data-theme="dark"] .us-stat.main { background: linear-gradient(150deg, rgba(91,140,255,.16), rgba(166,139,247,.12)) !important; border-color: rgba(91,140,255,.25) !important; }
-:root[data-theme="dark"] .us-stat.main .us-v { color: #9db6ff !important; }
+:root[data-theme="dark"] .us-stat.us-stat-balance { background: linear-gradient(150deg, rgba(91,140,255,.16), rgba(166,139,247,.12)) !important; border-color: rgba(91,140,255,.25) !important; }
+:root[data-theme="dark"] .us-stat.us-stat-balance .us-v { color: #9db6ff !important; }
 :root[data-theme="dark"] .toast { background: #e8ebf2 !important; color: #11141a !important; }
 :root[data-theme="dark"] .view { --us-accent: #6f98ff; --us-ink: #e8ebf2; --us-muted: #8e96a8; --us-line: #2a2f3a; }
 :root[data-theme="dark"] .us-m-bar, :root[data-theme="dark"] .us-a-share { background: #262b35 !important; }
@@ -244,8 +244,8 @@
 :root:not([data-theme="light"]) .win-ctl button.x:hover { color: #d9d9d9 !important; }
 :root:not([data-theme="light"]) .us-seg button[aria-selected="true"] { background: #171717 !important; box-shadow: 0 1px 2px rgba(0, 0, 0, 0.128), 0 0 0 1px rgba(0, 0, 0, 0.064) !important; }
 :root:not([data-theme="light"]) .us-stat { background: #171717 !important; }
-:root:not([data-theme="light"]) .us-stat.main { background: linear-gradient(150deg, #16181f 0%, #171a22 55%, #1a1722 100%) !important; border-color: #1a1d26 !important; }
-:root:not([data-theme="light"]) .us-stat.main .us-v { color: #7b8de0 !important; }
+:root:not([data-theme="light"]) .us-stat.us-stat-balance { background: linear-gradient(150deg, #16181f 0%, #171a22 55%, #1a1722 100%) !important; border-color: #1a1d26 !important; }
+:root:not([data-theme="light"]) .us-stat.us-stat-balance .us-v { color: #7b8de0 !important; }
 :root:not([data-theme="light"]) .us-f { color: var(--faint, #afb5c2) !important; }
 :root:not([data-theme="light"]) .us-axis { fill: #acb3c1 !important; }
 :root:not([data-theme="light"]) .us-dot { fill: #d9d9d9 !important; }
@@ -280,8 +280,8 @@
 :root:not([data-theme="light"]) .cx-send.stop { background: #e8ebf2 !important; }
 :root:not([data-theme="light"]) .bar > i { background: var(--primary) !important; }
 :root:not([data-theme="light"]) .switch input:checked + span { background: var(--primary) !important; }
-:root:not([data-theme="light"]) .us-stat.main { background: linear-gradient(150deg, rgba(91,140,255,.16), rgba(166,139,247,.12)) !important; border-color: rgba(91,140,255,.25) !important; }
-:root:not([data-theme="light"]) .us-stat.main .us-v { color: #9db6ff !important; }
+:root:not([data-theme="light"]) .us-stat.us-stat-balance { background: linear-gradient(150deg, rgba(91,140,255,.16), rgba(166,139,247,.12)) !important; border-color: rgba(91,140,255,.25) !important; }
+:root:not([data-theme="light"]) .us-stat.us-stat-balance .us-v { color: #9db6ff !important; }
 :root:not([data-theme="light"]) .toast { background: #e8ebf2 !important; color: #11141a !important; }
 :root:not([data-theme="light"]) .view { --us-accent: #6f98ff; --us-ink: #e8ebf2; --us-muted: #8e96a8; --us-line: #2a2f3a; }
 :root:not([data-theme="light"]) .us-m-bar, :root:not([data-theme="light"]) .us-a-share { background: #262b35 !important; }

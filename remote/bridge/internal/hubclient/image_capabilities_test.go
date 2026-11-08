@@ -12,8 +12,7 @@ import (
 func prepareCapabilityImage(t *testing.T) string {
 	t.Helper()
 	previous := phoneAttachments
-	phoneAttachments = newAttachmentStore()
-	phoneAttachments.dir = t.TempDir()
+	phoneAttachments = testAttachmentStore(t)
 	t.Cleanup(func() { phoneAttachments = previous })
 	id := "att_" + strings.Repeat("ab", 16)
 	image := append([]byte{0xFF, 0xD8, 0xFF, 0xE0}, []byte(strings.Repeat("x", 100))...)

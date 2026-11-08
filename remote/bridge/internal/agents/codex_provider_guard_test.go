@@ -3,10 +3,25 @@ package agents
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"strings"
 	"testing"
 
 	"salcara/bridge/internal/protocol"
 )
+
+func TestCodexProviderMismatchIsActionableWithoutNativeErrorData(t *testing.T) {
+	native := &rpcError{Code: -32600, Message: "SYNTHETIC_PRIVATE_PROVIDER_DETAILS", Data: json.RawMessage(`{"type":"modelProviderMismatch","modelProvider":"original","currentModelProvider":"selected"}`)}
+	err := codexResumeFailure(native)
+	var mismatch codexThreadProviderMismatch
+	if !errors.As(err, &mismatch) || mismatch.ExecutionErrorCode() != "session_provider_mismatch" || strings.Contains(err.Error(), "SYNTHETIC_PRIVATE") {
+		t.Fatalf("provider refusal lost safe diagnostics: %v", err)
+	}
+	other := &rpcError{Code: -32600, Message: "fixture-other"}
+	if err := codexResumeFailure(other); !errors.Is(err, other) {
+		t.Fatal("unrelated native failure identity was lost")
+	}
+}
 
 func guardedProviderConfig(s Settings) (map[string]any, map[string]any) {
 	entry := map[string]any{
@@ -114,12 +129,22 @@ func TestCodexCustomProviderGuardCleanConfigurationContinuesOriginalThread(t *te
 			if err := a.SendWithOptions(context.Background(), "fixture-original-uuid", "continue", TurnOptions{Model: "gpt-new"}); err != nil {
 				t.Fatal(err)
 			}
+			// Continuing an original thread must not inherit the new-task
+			// auto_all default. Answer its real approval requests explicitly.
+			for _, kind := range []string{"command", "file_change"} {
+				approval := f.rec.wait(t, "original thread approval "+kind, func(e protocol.Event) bool {
+					return e.Type == "approval.request" && e.Kind == kind
+				})
+				if !a.Respond(approval.ApprovalID, "allow_once", "") {
+					t.Fatal("original thread approval was not accepted")
+				}
+			}
 			f.rec.wait(t, "clean continued turn", func(e protocol.Event) bool { return e.Type == "turn" && e.Status == "completed" })
 			calls := readLog(t, f.logDir, "codex-calls.jsonl")
-			if len(calls) != 3 || calls[0]["method"] != "config/read" || calls[1]["method"] != "thread/resume" || calls[2]["method"] != "turn/start" {
+			if len(calls) != 5 || calls[0]["method"] != "config/read" || calls[1]["method"] != "config/read" || calls[2]["method"] != "thread/resume" || calls[3]["method"] != "config/read" || calls[4]["method"] != "turn/start" {
 				t.Fatalf("clean config did not resume after guard: %+v", calls)
 			}
-			params, _ := calls[1]["params"].(map[string]any)
+			params, _ := calls[2]["params"].(map[string]any)
 			if params["threadId"] != "fixture-original-uuid" || params["modelProvider"] != f.s.codexProvider() {
 				t.Fatal("guard changed thread/provider identity")
 			}
@@ -127,8 +152,8 @@ func TestCodexCustomProviderGuardCleanConfigurationContinuesOriginalThread(t *te
 	}
 }
 
-func TestCodexProviderGuardSkipsOriginalLoginAndBuiltInWorkers(t *testing.T) {
-	for _, s := range []Settings{{}, {UseOriginalCodex: true, CodexRoot: "https://fixture.invalid", CodexProvider: "original"}, {CodexRoot: "http://127.0.0.1:12345/gateway/codex", CodexProvider: "openai"}} {
+func TestCodexProviderGuardSkipsOriginalLoginWorkers(t *testing.T) {
+	for _, s := range []Settings{{}, {UseOriginalCodex: true, CodexRoot: "https://fixture.invalid", CodexProvider: "original"}} {
 		if needsCodexProviderGuard(s) || validateCodexEffectiveProvider(context.Background(), nil, s) != nil {
 			t.Fatal("guard affected own-login/native-compatible/built-in path")
 		}

@@ -2,6 +2,8 @@ package agents
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -140,24 +142,46 @@ func TestRefreshedAppliedCodexCatalogRestartsWorkerAndResumesVerifiedModel(t *te
 
 func TestRefreshedAppliedClaudeCatalogRestartsWorkerAndResumesSameSession(t *testing.T) {
 	f := newFixture(t, "auto_all")
+	local := f.settings()
 	c := catalogGroupConfig("claude", "applied", "claude-old")
 	f.mu.Lock()
 	f.s = SettingsWithGateway(c, 12345)
+	f.s.BridgeExe, f.s.LocalPort, f.s.LocalToken = local.BridgeExe, local.LocalPort, local.LocalToken
 	f.mu.Unlock()
 	a := f.m.Get("claude").(*claudeAgent)
 	id, err := a.Start(context.Background(), f.workDir, "first task", "claude-old", "auto_all")
 	if err != nil {
 		t.Fatal(err)
 	}
+	firstApproval := f.rec.wait(t, "first native Claude approval", func(e protocol.Event) bool {
+		return e.Type == "approval.request" && e.SessionKey == "claude:"+id
+	})
+	if !a.Respond(firstApproval.ApprovalID, "allow", "") {
+		t.Fatal("first native Claude approval rejected")
+	}
 	f.rec.wait(t, "first complete", func(e protocol.Event) bool {
 		return e.Type == "turn" && e.Status == "completed" && e.SessionKey == "claude:"+id
 	})
+	leaseDir := filepath.Join(f.home, "projects", "fixture")
+	if err := os.MkdirAll(leaseDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(leaseDir, id+".jsonl"), []byte(`{"type":"user","message":{"role":"user","content":"first task"}}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	c.LocalAccounts[0].Models = []string{"gpt-new"}
 	f.mu.Lock()
 	f.s = SettingsWithGateway(c, 12345)
+	f.s.BridgeExe, f.s.LocalPort, f.s.LocalToken = local.BridgeExe, local.LocalPort, local.LocalToken
 	f.mu.Unlock()
 	if err := a.SendWithOptions(context.Background(), id, "continue original", TurnOptions{Model: "gpt-new"}); err != nil {
 		t.Fatal(err)
+	}
+	resumedApproval := f.rec.wait(t, "resumed native Claude approval", func(e protocol.Event) bool {
+		return e.Type == "approval.request" && e.SessionKey == "claude:"+id && e.ApprovalID != firstApproval.ApprovalID
+	})
+	if !a.Respond(resumedApproval.ApprovalID, "allow", "") {
+		t.Fatal("resumed native Claude approval rejected")
 	}
 	f.rec.wait(t, "resumed complete", func(e protocol.Event) bool { return countTurns(f.rec) >= 2 })
 	args := readLog(t, f.logDir, "claude-args.jsonl")
@@ -250,17 +274,10 @@ func TestRefreshedBuiltInCodexProviderKeepsIdentityAndUsesLoopbackAuth(t *testin
 	a.mu.Lock()
 	procEnv := append([]string(nil), a.conn.cmd.Env...)
 	a.mu.Unlock()
-	openaiCredential := false
 	for _, entry := range procEnv {
-		if strings.HasPrefix(entry, "OPENAI_API_KEY=") {
-			openaiCredential = entry == "OPENAI_API_KEY=fake-loopback"
+		if strings.HasPrefix(entry, "OPENAI_API_KEY=") || strings.HasPrefix(entry, "SUB2API_API_KEY=") {
+			t.Fatal("built-in worker kept a competing environment credential")
 		}
-		if strings.HasPrefix(entry, "SUB2API_API_KEY=") {
-			t.Fatal("built-in worker kept a competing custom-provider credential")
-		}
-	}
-	if !openaiCredential {
-		t.Fatal("built-in worker did not get the loopback credential")
 	}
 	args := readLog(t, f.logDir, "codex-args.jsonl")
 	if len(args) != 2 {
@@ -271,13 +288,17 @@ func TestRefreshedBuiltInCodexProviderKeepsIdentityAndUsesLoopbackAuth(t *testin
 		t.Fatal("built-in worker used the original direct API or reserved-table override")
 	}
 	resumed := false
+	processAuthenticated := false
 	for _, line := range readLog(t, f.logDir, "codex-calls.jsonl") {
+		if line["method"] == "account/login/start" && line["selectedKey"] == true {
+			processAuthenticated = true
+		}
 		params, _ := line["params"].(map[string]any)
 		if line["method"] == "thread/resume" {
 			resumed = params["threadId"] == id && params["modelProvider"] == "openai" && params["model"] == "claude-new"
 		}
 	}
-	if !resumed {
+	if !resumed || !processAuthenticated {
 		t.Fatal("built-in conversion changed thread/provider identity or resumed a retired model")
 	}
 }

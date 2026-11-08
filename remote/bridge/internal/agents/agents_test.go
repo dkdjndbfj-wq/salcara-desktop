@@ -218,7 +218,7 @@ func TestCodexFlow(t *testing.T) {
 			start = c["params"].(map[string]any)
 		}
 	}
-	if start["approvalPolicy"] != "untrusted" || start["sandbox"] != "workspace-write" || start["modelProvider"] != "salcara" {
+	if start["approvalPolicy"] != "on-request" || start["sandbox"] != "workspace-write" || start["modelProvider"] != "salcara" {
 		t.Fatalf("thread/start %+v", start)
 	}
 
@@ -231,8 +231,11 @@ func TestCodexFlow(t *testing.T) {
 	for _, e := range evs {
 		kinds = append(kinds, e.Type+":"+e.Kind+e.Role)
 	}
-	if strings.Join(kinds, ",") != "message:user,reasoning:,tool:read,message:assistant" {
+	if strings.Join(kinds, ",") != "message:user,reasoning:,tool:read,message:assistant,turn:" {
 		t.Fatalf("history %v", kinds)
+	}
+	if evs[4].Status != "completed" || evs[4].TurnID == "" {
+		t.Fatal("history did not retain its actual terminal boundary")
 	}
 	if evs[2].Title != "读取 main.go" {
 		t.Fatalf("read title %q", evs[2].Title)
@@ -247,6 +250,13 @@ func TestCodexAutoEditsAndInterrupt(t *testing.T) {
 	f := newFixture(t, "auto_edits")
 	ctx := context.Background()
 	cx := f.m.Get("codex")
+	// This case exercises a previously configured legacy thread. A global
+	// default is not permission to auto-approve an unknown original session.
+	configured := cx.(*codexAgent)
+	configured.mu.Lock()
+	thread := configured.threadLocked("thr_cli")
+	thread.policy, thread.legacyPolicyConfigured = "auto_edits", true
+	configured.mu.Unlock()
 	if err := cx.Send(ctx, "thr_cli", "go"); err != nil {
 		t.Fatal(err)
 	}
@@ -279,7 +289,16 @@ func TestCodexAutoEditsAndInterrupt(t *testing.T) {
 		return e.Type == "message" && e.Role == "user" && e.Text == "slow task"
 	})
 	time.Sleep(100 * time.Millisecond)
-	if err := cx.Interrupt(ctx, "thr_cli"); err != nil {
+	var turnID string
+	for _, session := range func() []protocol.SessionInfo { rows, _ := cx.Sessions(ctx); return rows }() {
+		if session.SessionKey == "codex:thr_cli" {
+			turnID = session.ActiveTurnID
+		}
+	}
+	if turnID == "" {
+		t.Fatal("running turn did not expose an exact turn ID")
+	}
+	if _, err := cx.(PreciseInterrupter).InterruptTurn(ctx, "thr_cli", turnID, "10000000-0000-4000-8000-000000000001"); err != nil {
 		t.Fatal(err)
 	}
 	f.rec.wait(t, "interrupted", func(e protocol.Event) bool { return e.Type == "turn" && e.Status == "interrupted" })
@@ -323,7 +342,15 @@ func TestClaudeFlow(t *testing.T) {
 	if !found {
 		t.Fatal("bridge session not listed")
 	}
-	cl.Respond(ap.ApprovalID, "allow_session", "")
+	if ap.ApprovalOptions == nil || strings.Join(ap.ApprovalOptions.Decisions, ",") != "allow,deny" {
+		t.Fatal("legacy native prompt must expose only this-request allow/deny")
+	}
+	if cl.Respond(ap.ApprovalID, "allow_session", "") {
+		t.Fatal("native prompt was converted into a tool-name-wide remembered grant")
+	}
+	if !cl.Respond(ap.ApprovalID, "allow", "") {
+		t.Fatal("invalid broader decision consumed the current request")
+	}
 	ea := f.rec.wait(t, "edit approval", func(e protocol.Event) bool { return e.Type == "approval.request" && e.Kind == "file_change" })
 	if !strings.Contains(ea.Diff, "@@ -2,1 +2,1 @@\n-old\n+new") || ea.Title != "修改 a.txt" {
 		t.Fatalf("edit approval %+v\n%s", ea, ea.Diff)
@@ -344,40 +371,72 @@ func TestClaudeFlow(t *testing.T) {
 	if len(dec) != 2 || dec[0]["behavior"] != "allow" || dec[1]["behavior"] != "deny" {
 		t.Fatalf("decisions %+v", dec)
 	}
+	// The fake Claude process does not write ~/.claude/projects.  Create the
+	// same kind of stable transcript that the real CLI writes so the
+	// process-local, Wait-confirmed completion lease can be exercised below.
+	leaseDir := filepath.Join(f.home, "projects", "fixture")
+	if err := os.MkdirAll(leaseDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(leaseDir, id+".jsonl"), []byte(`{"type":"user","message":{"role":"user","content":"hello edit"}}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	args := readLog(t, f.logDir, "claude-args.jsonl")
 	if args[0]["base"] != "https://relay.test" || args[0]["token"] != "sk-claude" || args[0]["apikey"] != "" {
 		t.Fatalf("env %+v", args[0])
 	}
 	a0 := strings.Join(toStrings(args[0]["args"]), " ")
 	for _, want := range []string{"-p --input-format stream-json --output-format stream-json --verbose --include-partial-messages",
-		"--permission-prompt-tool mcp__salcara__approve", "--session-id " + id} {
+		"--permission-prompt-tool mcp__salcara__approve", "--permission-mode default", "--session-id " + id} {
 		if !strings.Contains(a0, want) {
 			t.Fatalf("missing %q in %s", want, a0)
 		}
 	}
 
-	// second turn on the same process: Bash is allowed for the session now
+	// A second native prompt is an independent permission request, even for
+	// the same tool and input. The helper cannot discard the CLI's ask rules.
 	if err := cl.Send(ctx, id, "again"); err != nil {
 		t.Fatal(err)
+	}
+	secondApproval := f.rec.wait(t, "second native Bash approval", func(e protocol.Event) bool {
+		return e.Type == "approval.request" && e.Kind == "command" && e.ApprovalID != ap.ApprovalID
+	})
+	if secondApproval.ApprovalOptions == nil || strings.Join(secondApproval.ApprovalOptions.Decisions, ",") != "allow,deny" || cl.Respond(secondApproval.ApprovalID, "allow_session", "") {
+		t.Fatal("second native prompt advertised or accepted remembered permission")
+	}
+	if !cl.Respond(secondApproval.ApprovalID, "allow", "") {
+		t.Fatal("second native prompt not independently answerable")
 	}
 	f.rec.wait(t, "second turn", func(e protocol.Event) bool {
 		return e.Type == "message" && e.Role == "assistant" && e.ID == "msg_2:0" && e.Final
 	})
 	f.rec.wait(t, "2 turns", func(e protocol.Event) bool { return false || countTurns(f.rec) >= 2 })
-	if n := f.rec.count(func(e protocol.Event) bool { return e.Type == "approval.request" }); n != 2 {
-		t.Fatalf("allow_session should skip the 2nd Bash approval; approvals=%d", n)
+	if n := f.rec.count(func(e protocol.Event) bool { return e.Type == "approval.request" }); n != 3 {
+		t.Fatalf("each native prompt must be shown; approvals=%d", n)
 	}
 
 	// interrupt kills the process; the next send resumes it
 	if err := cl.Send(ctx, id, "sleep please"); err != nil {
 		t.Fatal(err)
 	}
-	if err := cl.Interrupt(ctx, id); err != nil {
+	var turnID string
+	for _, session := range func() []protocol.SessionInfo { rows, _ := cl.Sessions(ctx); return rows }() {
+		if session.SessionKey == sk {
+			turnID = session.ActiveTurnID
+		}
+	}
+	if _, err := cl.(PreciseInterrupter).InterruptTurn(ctx, id, turnID, "10000000-0000-4000-8000-000000000002"); err != nil {
 		t.Fatal(err)
 	}
 	f.rec.wait(t, "interrupted", func(e protocol.Event) bool { return e.Type == "turn" && e.Status == "interrupted" })
 	if err := cl.Send(ctx, id, "after"); err != nil {
 		t.Fatal(err)
+	}
+	resumedApproval := f.rec.wait(t, "resumed worker approval", func(e protocol.Event) bool {
+		return e.Type == "approval.request" && e.Kind == "command" && e.ApprovalID != ap.ApprovalID && e.ApprovalID != secondApproval.ApprovalID
+	})
+	if !cl.Respond(resumedApproval.ApprovalID, "allow", "") {
+		t.Fatal("resumed native prompt not answerable")
 	}
 	f.rec.wait(t, "resumed turn", func(e protocol.Event) bool {
 		return e.Type == "message" && e.Role == "assistant" && e.Final && e.ID == "msg_1:0" && e.TS > turn.TS && countTurns(f.rec) >= 3
@@ -402,13 +461,58 @@ func toStrings(v any) []string {
 
 func TestClaudePermissionAuth(t *testing.T) {
 	f := newFixture(t, "auto_all")
-	body := `{"session":"s1","tool_name":"Bash","input":{"command":"rm -rf /"}}`
+	body := `{"session":"s1","tool_name":"Bash","input":{"command":"echo synthetic"}}`
 	resp, err := httpPost(f.srv.URL+PermissionPath, "wrong", body)
 	if err != nil || resp.status != 403 {
 		t.Fatalf("want 403, got %+v %v", resp, err)
 	}
 	resp, err = httpPost(f.srv.URL+PermissionPath, "tok123", body)
-	if err != nil || resp.status != 200 || !strings.Contains(resp.body, `"behavior":"allow"`) || !strings.Contains(resp.body, `"updatedInput":{"command":"rm -rf /"}`) {
-		t.Fatalf("auto_all should allow: %+v %v", resp, err)
+	if err != nil || resp.status != 403 {
+		t.Fatal("shared console token must not approve an unowned Claude session", err)
+	}
+	a := f.m.Get("claude").(*claudeAgent)
+	p := claudeSyntheticPermissionWorker(t, a, "s1")
+	// Even under the legacy auto_all setting, a request which the runtime
+	// actually sends to the helper remains explicit. Authentication is not
+	// permission to auto-approve an upstream ask/requiresUserInteraction rule.
+	previous := ""
+	for _, decision := range []string{"allow", "deny"} {
+		result := make(chan struct {
+			resp httpResp
+			err  error
+		}, 1)
+		go func() {
+			response, postErr := httpPost(f.srv.URL+PermissionPath, p.permissionLease.token, body)
+			result <- struct {
+				resp httpResp
+				err  error
+			}{response, postErr}
+		}()
+		approval := f.rec.wait(t, "explicit native approval under auto_all", func(e protocol.Event) bool {
+			return e.Type == "approval.request" && e.SessionKey == "claude:s1" && e.ApprovalID != previous
+		})
+		if approval.ApprovalOptions == nil || strings.Join(approval.ApprovalOptions.Decisions, ",") != "allow,deny" || a.Respond(approval.ApprovalID, "allow_session", "") {
+			t.Fatal("helper granted broader permission than the native request")
+		}
+		select {
+		case <-result:
+			t.Fatal("native request resolved without a valid decision")
+		default:
+		}
+		if !a.Respond(approval.ApprovalID, decision, "synthetic decision") {
+			t.Fatal("this-request native decision rejected")
+		}
+		select {
+		case got := <-result:
+			if got.err != nil || got.resp.status != 200 || !strings.Contains(got.resp.body, `"behavior":"`+decision+`"`) {
+				t.Fatalf("native decision mismatch: %+v %v", got.resp, got.err)
+			}
+			if decision == "allow" && !strings.Contains(got.resp.body, `"updatedInput":{"command":"echo synthetic"}`) {
+				t.Fatal("approved tool input was changed")
+			}
+		case <-time.After(3 * time.Second):
+			t.Fatal("native decision did not reach waiting helper")
+		}
+		previous = approval.ApprovalID
 	}
 }

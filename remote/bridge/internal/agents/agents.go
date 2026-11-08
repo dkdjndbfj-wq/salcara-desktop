@@ -6,6 +6,12 @@ package agents
 import (
 	"context"
 	"net/http"
+	"path/filepath"
+	"regexp"
+	"strings"
+	"unicode"
+
+	"salcara/bridge/internal/config"
 
 	"salcara/bridge/internal/protocol"
 )
@@ -28,11 +34,22 @@ type Settings struct {
 	Approval         string // default policy for new sessions: ask | auto_edits | auto_all
 	CodexModel       string // optional default model
 	ClaudeModel      string
+	DeepSeekPath     string
+	HermesPath       string
+	// Extensions have explicit per-adapter sources; there is no relay/native-login fallback.
+	Extensions map[string]ExtensionSettings
 	// ApprovalHelper is how the Claude permission-prompt MCP server reaches the bridge:
 	// the bridge binary path (run as `<exe> mcp-approval --port N --token T`) and the local port/token.
 	BridgeExe  string
 	LocalPort  int
 	LocalToken string
+}
+
+type ExtensionSettings struct {
+	Root              string
+	Key               string
+	Model             string
+	SourceFingerprint string // stable upstream identity; excludes temporary gateway credentials
 }
 
 func (s Settings) codexRoot() string {
@@ -64,10 +81,12 @@ func (s Settings) codexProvider() string {
 	return "salcara"
 }
 
-// Agent is one tool (codex / claude).
+// Agent is one independently addressable tool (Codex, Claude Code, or an
+// extension such as Hermes). The manager aggregates these behind one transport
+// while the adapter owns native process/history semantics.
 type Agent interface {
-	ID() string   // "codex" | "claude"
-	Name() string // "Codex" | "Claude Code"
+	ID() string   // stable adapter id, for example "codex" or "hermes"
+	Name() string // public display name
 	// Detect finds the executable and version; cheap enough to call on every register.
 	Detect(ctx context.Context) protocol.Tool
 	// Sessions lists this tool's sessions on this computer (external ones included), newest first.
@@ -85,6 +104,134 @@ type Agent interface {
 	Models(ctx context.Context) []string
 	// Close stops every child process.
 	Close()
+}
+
+// DescriptorProvider is the adapter-side capability contract. It is optional
+// at the Go interface level so old test doubles and third-party adapters keep
+// compiling; adapters without it are exposed as read-only/unknown until they
+// provide an explicit descriptor.
+type DescriptorProvider interface {
+	Descriptor() protocol.AgentDescriptor
+}
+
+// Describe returns a conservative default for legacy adapters. The default
+// never grants remote send, approvals, attachments, or model switching merely
+// because an adapter happens to implement an Agent method.
+func Describe(a Agent) protocol.AgentDescriptor {
+	if a == nil {
+		return protocol.AgentDescriptor{}
+	}
+	if p, ok := a.(DescriptorProvider); ok {
+		d := p.Descriptor()
+		if d.ID == "" {
+			d.ID = a.ID()
+		}
+		if d.Name == "" {
+			d.Name = a.Name()
+		}
+		if d.Tool == "" {
+			d.Tool = a.ID()
+		}
+		if d.APIFamily == "" {
+			d.APIFamily = d.Tool
+		}
+		if d.ControlSurface == "" {
+			d.ControlSurface = "cli"
+		}
+		return d
+	}
+	return protocol.AgentDescriptor{ID: a.ID(), Name: a.Name(), Tool: a.ID(), APIFamily: a.ID(), ControlSurface: "cli"}
+}
+
+var adapterIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
+
+// CanonicalDescriptor binds the public/session namespace to the actual
+// registered adapter. Sharing credentials is explicit through APIFamily, never
+// by advertising another adapter's Tool or ID. A legacy descriptor has no
+// capabilities; callers must not infer them from Agent's mandatory methods.
+func CanonicalDescriptor(a Agent) (protocol.AgentDescriptor, bool) {
+	if a == nil || !adapterIDPattern.MatchString(a.ID()) {
+		return protocol.AgentDescriptor{}, false
+	}
+	d := Describe(a)
+	if d.ID != a.ID() || d.Tool != a.ID() || d.Name == "" || len([]rune(d.Name)) > 200 || !config.ValidAgentFamily(d.APIFamily) {
+		return protocol.AgentDescriptor{}, false
+	}
+	for _, r := range d.Name {
+		if unicode.IsControl(r) {
+			return protocol.AgentDescriptor{}, false
+		}
+	}
+	if d.ControlSurface != "cli" && d.ControlSurface != "desktop" && d.ControlSurface != "read-only" {
+		return protocol.AgentDescriptor{}, false
+	}
+	d.APIFamily = config.NormalizeAgentFamily(d.APIFamily)
+	return d, true
+}
+
+// SessionBelongsTo is used before publishing adapter-owned directory/history
+// records. Empty Tool is a compatible omission; an explicit foreign Tool is
+// not. No native origin field can change the session's adapter namespace.
+func SessionBelongsTo(a Agent, key string, info protocol.SessionInfo) bool {
+	if a == nil || key == "" || len(key) > 512 || info.SessionKey != key || (info.Tool != "" && info.Tool != a.ID()) {
+		return false
+	}
+	prefix, id, ok := strings.Cut(key, ":")
+	if !ok || prefix != a.ID() || id == "" || id == "__salcara_start_v1__" || strings.HasPrefix(id, "__salcara_start_v1__:") {
+		return false
+	}
+	for _, r := range key {
+		if unicode.IsSpace(r) || unicode.IsControl(r) || unicode.In(r, unicode.Cf) {
+			return false
+		}
+	}
+	return true
+}
+
+// ProjectSessionInfo removes claims that belong to a different executor or
+// capability while preserving the original history Client/related metadata.
+func ProjectSessionInfo(info protocol.SessionInfo, id string, caps protocol.AgentCapabilities) protocol.SessionInfo {
+	info.Tool, info.ControlSurface, info.ControlExpiresAt = id, "cli", 0
+	info.Controllable = info.Controllable && caps.Send
+	info.LatestTurnRevert = info.LatestTurnRevert && caps.LatestTurnRevert && caps.Send && caps.Read
+	return info
+}
+
+// ProjectEventMedia applies the same adapter media boundary to snapshot and
+// live events before hubclient converts image bytes/paths into opaque refs.
+func ProjectEventMedia(e *protocol.Event, caps protocol.AgentCapabilities) {
+	if e == nil || caps.ImageOutput || e.Role == "user" && caps.ImageInput && caps.Attachments {
+		return
+	}
+	e.ImageData, e.Attachments = nil, nil
+	if e.Type != "tool" {
+		return
+	}
+	if e.Kind == "image_view" || e.Kind == "image_generation" || e.Kind == "read" && strings.HasPrefix(e.Detail, "image-base64:") {
+		e.Detail = ""
+		return
+	}
+	if e.Kind == "read" && filepath.IsAbs(e.Detail) {
+		switch strings.ToLower(filepath.Ext(e.Detail)) {
+		case ".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".avif":
+			e.Detail = ""
+		}
+	}
+}
+
+// Watcher is an optional live-event hook for an extension adapter. The core
+// still uses the common Sink; adapters only own how their native source is
+// observed.
+type Watcher interface {
+	Watch(context.Context)
+}
+
+// EventSinkBinder lets the manager attach an adapter-owned, namespace-checked
+// live sink. The adapter must replace its sink safely; a nil sink detaches it.
+// Snapshot-only adapters need not implement this. Merely implementing Watcher
+// does not grant a raw path to the common transport.
+type EventSinkBinder interface {
+	BindEventSink(Sink)
 }
 
 // ApprovalResponse keeps question answers separate from approval feedback. API
@@ -107,6 +254,20 @@ func RespondWithAnswers(agent Agent, approvalID string, response ApprovalRespons
 		return false
 	}
 	return agent.Respond(approvalID, response.Decision, response.Message)
+}
+
+// Remote approvals require a scope-aware adapter; legacy ID-only responders
+// remain usable by the local console but cannot silently discard phone scope.
+func RespondForSession(ctx context.Context, agent Agent, sessionKey, approvalID string, response ApprovalResponse) bool {
+	if agent == nil || sessionKey == "" {
+		return false
+	}
+	if responder, ok := agent.(interface {
+		RespondForSession(context.Context, string, string, ApprovalResponse) bool
+	}); ok {
+		return responder.RespondForSession(ctx, sessionKey, approvalID, response)
+	}
+	return false
 }
 
 // Manager owns all agents; the core talks only to it.

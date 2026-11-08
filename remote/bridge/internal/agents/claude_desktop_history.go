@@ -558,7 +558,7 @@ func (h *ClaudeDesktopHistory) openHistoryPage(ctx context.Context, id, cursor s
 	mappedBytes := 0
 	lineIndex := 0
 	var scanError error
-	readError := readLines(io.LimitReader(f, st.Size()), func(line []byte) bool {
+	readError := readLinesAt(io.LimitReader(f, st.Size()), 0, func(line []byte, offset int64) bool {
 		lineIndex++
 		if err := ctx.Err(); err != nil {
 			scanError = err
@@ -574,7 +574,8 @@ func (h *ClaudeDesktopHistory) openHistoryPage(ctx context.Context, id, cursor s
 				return false
 			}
 		}
-		if value.UUID == "" {
+		setClaudePeerHistoryID(&value, h.scopeID+":"+info.SessionKey, path, offset, line)
+		if value.UUID == "" && value.historyRecordID == "" {
 			hash := sha256.Sum256(line)
 			value.UUID = fmt.Sprintf("desktop-line-%d-%x", lineIndex, hash[:])
 		}

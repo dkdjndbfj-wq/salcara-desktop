@@ -3,6 +3,7 @@ package launcher
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -90,6 +91,35 @@ func TestIsolatedCodexProfilesAndEnvironment(t *testing.T) {
 	bad.Model = ""
 	if _, err := s.Prepare(bad, tool, cwd); err == nil {
 		t.Fatal("no model launch")
+	}
+}
+
+func TestIsolatedCodexLaunchPublishesSelectedCatalogWhenOverrideEnabled(t *testing.T) {
+	s := New(t.TempDir())
+	a := account("codex", "catalog-fixture", "fixture-key")
+	a.Name = "Synthetic relay"
+	a.Models = []string{"gpt-fixture", "claude-fixture", "grok-fixture", "deepseek-fixture"}
+	a.CatalogOverride = true
+	p, err := s.Prepare(a, stubTool(t, "codex"), t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := os.ReadFile(filepath.Join(p.ProfileDir, "config.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	catalogPath := toolcfg.CodexCatalogPath(p.ProfileDir)
+	if !strings.Contains(string(cfg), fmt.Sprintf("model_catalog_json = %q", catalogPath)) {
+		t.Fatalf("isolated config did not point at the Salcara catalogue: %s", cfg)
+	}
+	catalog, err := os.ReadFile(catalogPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, model := range a.Models {
+		if !strings.Contains(string(catalog), fmt.Sprintf(`"slug": %q`, model)) {
+			t.Fatalf("catalogue omitted %q: %s", model, catalog)
+		}
 	}
 }
 

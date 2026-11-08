@@ -148,10 +148,13 @@ func (a *codexAgent) SessionsPage(ctx context.Context, cursor string, limit int,
 		}
 		nativeCursor = c.Next
 	}
-	connection, err := a.ensure(ctx)
+	connection, err := a.ensureRead(ctx)
 	if err != nil {
 		return nil, "", err
 	}
+	a.mu.Lock()
+	managementVersion := a.sessionActionsVersion
+	a.mu.Unlock()
 	var result struct {
 		Data       []cxThread `json:"data"`
 		NextCursor string     `json:"nextCursor"`
@@ -177,12 +180,19 @@ func (a *codexAgent) SessionsPage(ctx context.Context, cursor string, limit int,
 		return nil, "", errors.New("电脑返回的会话数量超过这一页的上限，请刷新")
 	}
 	a.mu.Lock()
+	if a.closed || a.conn != connection || a.sessionActionsVersion != managementVersion {
+		a.mu.Unlock()
+		return nil, "", errCodexSessionActionStale
+	}
 	out := []protocol.SessionInfo{}
 	for _, thread := range result.Data {
 		if thread.Ephemeral {
 			continue
 		}
 		item := a.applyThreadLocked(thread)
+		item.info.Archived = false // This native list has no archived filter.
+		a.syncCodexSessionActionsLocked(item)
+		item.sessionActions.archived, item.sessionActions.memberCursor = false, nativeCursor
 		out = append(out, item.info)
 	}
 	a.mu.Unlock()
@@ -203,6 +213,7 @@ func (a *codexAgent) OpenMessagesPage(ctx context.Context, id, cursor string, li
 	return a.openCodexMessagesPage(ctx, id, cursor, limit)
 }
 func (a *codexAgent) openHistoryPage(ctx context.Context, id, cursor string, limit int, paginate historyPaginator) (protocol.SessionInfo, []protocol.Event, string, error) {
+	a.reconcileTurnReverts(ctx, id)
 	thread, err := a.readThread(ctx, id)
 	if err != nil {
 		return protocol.SessionInfo{}, nil, "", err
@@ -211,13 +222,15 @@ func (a *codexAgent) openHistoryPage(ctx context.Context, id, cursor string, lim
 	item := a.applyThreadLocked(thread)
 	item.opened = true
 	item.tailHistory = false
+	item.historyReadVersion++
+	item.historyItemDigests, item.historyTurnDigests, _ = codexHistoryDigests(codexHistoryWindow(thread.Turns))
 	item.seen = map[string]bool{}
 	for _, key := range historyKeys(thread) {
 		item.seen[key] = true
 	}
 	info := item.info
 	a.mu.Unlock()
-	events, next, err := paginate(info.SessionKey, codexHistory(info.SessionKey, thread), cursor, limit)
+	events, next, err := paginate(info.SessionKey, a.historyEvents(info.SessionKey, thread), cursor, limit)
 	if err != nil {
 		return info, nil, "", err
 	}
@@ -227,6 +240,7 @@ func (a *codexAgent) openHistoryPage(ctx context.Context, id, cursor string, lim
 			info.Status = "waiting_approval"
 		}
 		events = append(events, pending...)
+		events = append(events, a.revertedHistoryEvents(id)...)
 	}
 	return info, events, next, nil
 }

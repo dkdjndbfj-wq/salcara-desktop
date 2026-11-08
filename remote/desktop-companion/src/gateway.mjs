@@ -6,6 +6,7 @@ import { createOperationLedger } from "./operation-ledger.mjs";
 import { APPROVAL_TRANSPORT, createPermissionBroker } from "./permission-broker.mjs";
 import { createHistoryCursors } from "./history-cursor.mjs";
 import { DesktopError } from "./native-control.mjs";
+import { MODEL_OVERRIDE_TRANSPORT } from "./native-catalog.mjs";
 import { isRecord } from "./probe.mjs";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
@@ -86,7 +87,10 @@ export function createDesktopConnect({ inspectHost, catalog, nativeCall, directo
       if (!host?.environmentMatches) throw new DesktopError("HOST_ENVIRONMENT_UNAVAILABLE");
       if (!host.metadataPresent) throw new DesktopError("HOST_CONTEXT_MISSING");
       if (!host.versionKnown) throw new DesktopError("HOST_VERSION_UNAVAILABLE");
-      const names = await catalog({ pipePath: host.pipePath }); checkActive();
+      const catalogResult = await catalog({ pipePath: host.pipePath, includeSendOptions: true }); checkActive();
+      const names = Array.isArray(catalogResult) ? catalogResult : catalogResult?.names;
+      let modelOptions = !Array.isArray(catalogResult) && catalogResult?.sendOptions?.model === true ? catalogResult.sendOptions : undefined;
+      if (!Array.isArray(names)) throw new DesktopError("CATALOG_UNAVAILABLE");
       if (!["list_threads", "read_thread", "send_message_to_thread"].every((name) => names.includes(name))) throw new DesktopError("CATALOG_UNAVAILABLE");
       const invoke = (tool, argumentsValue) => nativeCall({ pipePath: host.pipePath, context, tool, args: argumentsValue, signal: controller.signal });
       scopedList(await invoke("list_threads", { limit: MAX_SESSIONS }), allowed); checkActive();
@@ -107,10 +111,15 @@ export function createDesktopConnect({ inspectHost, catalog, nativeCall, directo
         response.end(JSON.stringify(body));
       };
       const status = () => ({ desktopControl: true, remoteSend: true, controllerThreadId: context.threadId,
-        sessionKeys: [...allowed], expiresAt: descriptor.expiresAt, capabilities: { ...DESKTOP_CAPABILITIES, approval: permissions.observed() },
+        sessionKeys: [...allowed], expiresAt: descriptor.expiresAt, capabilities: { ...DESKTOP_CAPABILITIES, approval: permissions.observed(), modelOverride: !!modelOptions },
+        ...(modelOptions ? { modelOptions, modelOverrideTransport: MODEL_OVERRIDE_TRANSPORT } : {}),
         ...(permissions.observed() ? { approvalTransport: APPROVAL_TRANSPORT } : {}) });
       const dispatch = async (command, requestSignal) => {
-        checkActive();
+        const checkAdmission = () => {
+          checkActive();
+          if (requestSignal.aborted) throw new DesktopError("CONTROL_REVOKED");
+        };
+        checkAdmission();
         if (!isRecord(command) || typeof command.type !== "string") throw new DesktopError("REQUEST_INVALID");
         if (command.type === "interrupt") throw new DesktopError("CAPABILITY_UNAVAILABLE");
         if (command.type === "hook.permission") return permissions.request(command, requestSignal);
@@ -124,7 +133,7 @@ export function createDesktopConnect({ inspectHost, catalog, nativeCall, directo
           if (command.type === "disconnect") return { disconnected: true };
           return scopedList(await invoke("list_threads", { limit: MAX_SESSIONS }), allowed);
         }
-        if (!["read", "send"].includes(command.type) || !keysOnly(command, command.type === "read" ? ["type", "sessionKey", "cursor", "limit"] : ["type", "sessionKey", "text", "operationId"])) throw new DesktopError("REQUEST_INVALID");
+        if (!["read", "send"].includes(command.type) || !keysOnly(command, command.type === "read" ? ["type", "sessionKey", "cursor", "limit"] : ["type", "sessionKey", "text", "operationId", "model", "thinking"])) throw new DesktopError("REQUEST_INVALID");
         if (!allowed.has(command.sessionKey)) throw new DesktopError("SESSION_NOT_ALLOWED");
         if (command.type === "read") {
           const cursor = cursors.decode(command.sessionKey, command.cursor);
@@ -142,7 +151,15 @@ export function createDesktopConnect({ inspectHost, catalog, nativeCall, directo
           return { success: true, contentItems: [{ type: "inputText", text: JSON.stringify(read) }] };
         }
         if (typeof command.text !== "string" || !command.text.trim() || command.text.length > 32000 || !UUID.test(command.operationId ?? "")) throw new DesktopError("REQUEST_INVALID");
-        const fingerprint = createHash("sha256").update(JSON.stringify([command.sessionKey, command.text])).digest("hex");
+        for (const field of ["model", "thinking"]) {
+          if (Object.hasOwn(command, field) && (typeof command[field] !== "string" || !command[field].trim() || command[field].length > 200 || /[\u0000-\u001f\u007f]/.test(command[field]))) throw new DesktopError("REQUEST_INVALID");
+        }
+        const options = { ...(command.model ? { model: command.model } : {}), ...(command.thinking ? { thinking: command.thinking } : {}) };
+        // Preserve old text-only receipt hashes. New receipts include the exact
+        // override payload so retries cannot silently execute another model.
+        const payload = [command.sessionKey, command.text];
+        if (Object.keys(options).length) payload.push(options);
+        const fingerprint = createHash("sha256").update(JSON.stringify(payload)).digest("hex");
         const previous = operations.get(command.operationId);
         if (previous) {
           if (previous.fingerprint !== fingerprint) throw new DesktopError("OPERATION_CONFLICT");
@@ -150,13 +167,29 @@ export function createDesktopConnect({ inspectHost, catalog, nativeCall, directo
         }
         const result = (async () => {
           const receipt = await ledger.get(command.operationId);
+          checkAdmission();
           if (receipt) {
             if (receipt.fingerprint !== fingerprint) throw new DesktopError("OPERATION_CONFLICT");
             if (receipt.state !== "complete") throw new DesktopError("OPERATION_UNCERTAIN");
             return { success: true, contentItems: [{ type: "inputText", text: JSON.stringify({ threadId: receipt.threadId }) }] };
           }
-          await ledger.begin(command.operationId, fingerprint); checkActive();
-          const value = await invoke("send_message_to_thread", { threadId: command.sessionKey.slice(6), prompt: command.text });
+          if (Object.keys(options).length) {
+            // Recheck before a new dispatch; a completed receipt is replayed
+            // above without invoking either tools/list or the task again.
+            let fresh;
+            try { fresh = await catalog({ pipePath: host.pipePath, includeSendOptions: true }); }
+            catch { modelOptions = undefined; throw new DesktopError("CAPABILITY_UNAVAILABLE"); }
+            checkAdmission();
+            modelOptions = !Array.isArray(fresh) && fresh?.sendOptions?.model === true ? fresh.sendOptions : undefined;
+            if (!modelOptions || options.thinking && !modelOptions.thinking?.includes(options.thinking)) throw new DesktopError("CAPABILITY_UNAVAILABLE");
+          }
+          await ledger.begin(command.operationId, fingerprint); checkAdmission();
+          // The bridge cancels this loopback request when its phone binding or
+          // station changes. Recheck after every pre-dispatch await, but
+          // keep accepted native work on the lease signal: losing transport
+          // must not interrupt the task or allow a duplicate retry. A durable
+          // reservation remains a tombstone if cancellation wins before invoke.
+          const value = await invoke("send_message_to_thread", { threadId: command.sessionKey.slice(6), prompt: command.text, ...options });
           const acknowledgement = textJson(value);
           if (!isRecord(acknowledgement) || acknowledgement.threadId !== command.sessionKey.slice(6)) throw new DesktopError("NATIVE_RESPONSE_INVALID");
           try { await ledger.complete(command.operationId, acknowledgement.threadId); }
@@ -186,6 +219,7 @@ export function createDesktopConnect({ inspectHost, catalog, nativeCall, directo
             const requestController = new AbortController();
             const cancelRequest = () => requestController.abort();
             response.once("close", cancelRequest);
+            if (response.destroyed) cancelRequest();
             let result;
             try { result = await dispatch(command, requestController.signal); checkActive(); }
             finally { response.removeListener("close", cancelRequest); }

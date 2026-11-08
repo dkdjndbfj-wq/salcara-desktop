@@ -1,6 +1,8 @@
 package console
 
 import (
+	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -17,6 +19,12 @@ func newTestServer(t *testing.T) (*Server, http.Handler) {
 		t.Fatal(err)
 	}
 	s := New(Deps{Store: st, Version: "test", Port: 47831})
+	// Launch tests use synthetic tools and credentials. Catalog-specific tests
+	// opt into a local HTTP fixture; other tests must not contact provider URLs.
+	s.launchModelProbe = func(context.Context, config.LocalAccount) ([]string, error) {
+		return nil, errors.New("synthetic catalog unavailable")
+	}
+	t.Cleanup(s.CloseUsageLedger)
 	return s, s.Handler()
 }
 
@@ -159,5 +167,53 @@ func TestStateHasPlatformFields(t *testing.T) {
 		if !strings.Contains(w.Body.String(), k) {
 			t.Errorf("state missing %s: %s", k, w.Body.String())
 		}
+	}
+}
+
+func TestGatewayBackedLocalRouteRequiresCurrentProcessLease(t *testing.T) {
+	s, h := newTestServer(t)
+	legacy := s.d.Store.Get().GatewayKey
+	s.d.Store.SetRuntimeGatewayKey("runtime-lease-one")
+	a := config.LocalAccount{ID: "proxy-account", Name: "proxy", Kind: "codex", SourceType: "reverse_proxy", BaseURL: "https://proxy.test", Key: "upstream-secret", Model: "gpt-fixture"}
+	if err := s.d.Store.Update(func(c *config.Config) error {
+		c.LocalAccounts = append(c.LocalAccounts, a)
+		c.RecordAppliedAPI("codex", a, "openai")
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	request := func(key string) int {
+		req := httptest.NewRequest(http.MethodGet, "/gateway/codex/v1/models", nil)
+		req.RemoteAddr = "127.0.0.1:49123"
+		req.Host = "127.0.0.1:47831"
+		req.Header.Set("Authorization", "Bearer "+key)
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+		return w.Code
+	}
+	if got := request(legacy); got != http.StatusUnauthorized {
+		t.Fatalf("persisted GatewayKey remained valid after arming lease: %d", got)
+	}
+	if got := request("runtime-lease-one"); got != http.StatusUnauthorized {
+		t.Fatalf("raw process lease accepted: %d", got)
+	}
+	if got := request(s.d.Store.Get().LocalGatewayCredential("codex")); got != http.StatusOK {
+		t.Fatalf("current process lease rejected: %d", got)
+	}
+	s.d.Store.SetRuntimeGatewayKey("runtime-lease-two")
+	if got := request("runtime-lease-one"); got != http.StatusUnauthorized {
+		t.Fatalf("previous process lease remained valid after rotation: %d", got)
+	}
+	if got := request("runtime-lease-two"); got != http.StatusUnauthorized {
+		t.Fatalf("raw rotated process lease accepted: %d", got)
+	}
+	if _, ok := s.d.Store.Get().AuthorizedAppliedToolAccount("codex"); ok {
+		t.Fatal("rotation adopted previous applied binding without reapplication")
+	}
+	if err := s.d.Store.Update(func(c *config.Config) error { c.RecordAppliedAPI("codex", a, "openai"); return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if got := request(s.d.Store.Get().LocalGatewayCredential("codex")); got != http.StatusOK {
+		t.Fatalf("rotated process lease rejected: %d", got)
 	}
 }

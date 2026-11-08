@@ -21,3 +21,9 @@ func killTree(cmd *exec.Cmd) {
 		_ = cmd.Process.Kill()
 	}
 }
+
+// Keep the existing non-Windows process-group shutdown behavior unchanged.
+func killTreeResult(cmd *exec.Cmd) error {
+	killTree(cmd)
+	return nil
+}

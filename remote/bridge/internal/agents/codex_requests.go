@@ -10,17 +10,82 @@ import (
 )
 
 type cxApprovalParams struct {
-	ThreadID         string          `json:"threadId"`
-	TurnID           string          `json:"turnId"`
-	ItemID           string          `json:"itemId"`
-	Reason           *string         `json:"reason"`
-	Command          *string         `json:"command"`
-	Cwd              *string         `json:"cwd"`
-	CommandActions   []cxAction      `json:"commandActions"`
-	Kind             string          `json:"kind"`
-	GrantRoot        *string         `json:"grantRoot"`
-	Permissions      json.RawMessage `json:"permissions"`
-	AutoResolutionMS *uint64         `json:"autoResolutionMs"`
+	ThreadID               string          `json:"threadId"`
+	TurnID                 string          `json:"turnId"`
+	ItemID                 string          `json:"itemId"`
+	Reason                 *string         `json:"reason"`
+	Command                *string         `json:"command"`
+	Cwd                    *string         `json:"cwd"`
+	CommandActions         []cxAction      `json:"commandActions"`
+	Kind                   string          `json:"kind"`
+	GrantRoot              *string         `json:"grantRoot"`
+	Permissions            json.RawMessage `json:"permissions"`
+	AutoResolutionMS       *uint64         `json:"autoResolutionMs"`
+	AvailableDecisions     json.RawMessage `json:"availableDecisions"`
+	NetworkApprovalContext *struct {
+		Host     string `json:"host"`
+		Protocol string `json:"protocol"`
+	} `json:"networkApprovalContext"`
+	AdditionalPermissions json.RawMessage `json:"additionalPermissions"`
+	EnvironmentID         string          `json:"environmentId"`
+}
+
+// Only simple decisions we can faithfully encode are advertised. Structured
+// policy amendments remain native-only; an unknown list never grants access.
+func cxRequestOptions(raw json.RawMessage) *protocol.ApprovalOptions {
+	if len(raw) == 0 || strings.TrimSpace(string(raw)) == "null" {
+		return &protocol.ApprovalOptions{Version: 1, Decisions: []string{"allow", "allow_session", "deny"}}
+	}
+	out := &protocol.ApprovalOptions{Version: 1, Decisions: []string{}}
+	var values []json.RawMessage
+	if json.Unmarshal(raw, &values) != nil {
+		return out
+	}
+	canDecline, canCancel := false, false
+	for _, value := range values {
+		var decision string
+		if json.Unmarshal(value, &decision) != nil {
+			continue
+		}
+		switch decision {
+		case "accept":
+			out.Decisions = append(out.Decisions, "allow")
+		case "acceptForSession":
+			out.Decisions = append(out.Decisions, "allow_session")
+		case "decline", "cancel":
+			out.Decisions = append(out.Decisions, "deny")
+			canDecline = canDecline || decision == "decline"
+			canCancel = canCancel || decision == "cancel"
+		}
+	}
+	if canCancel && !canDecline {
+		out.DenyEffect = "cancel_turn"
+	}
+	return cloneApprovalOptions(out)
+}
+
+func cxDecisionReply(c *rpcConn, id, available json.RawMessage, decision string) {
+	mapped := map[string]string{"allow": "accept", "allow_session": "acceptForSession", "deny": "decline"}[decision]
+	if len(available) != 0 && strings.TrimSpace(string(available)) != "null" {
+		var values []json.RawMessage
+		_ = json.Unmarshal(available, &values)
+		allowed, canCancel := false, false
+		for _, value := range values {
+			var candidate string
+			_ = json.Unmarshal(value, &candidate)
+			allowed = allowed || candidate == mapped
+			canCancel = canCancel || candidate == "cancel"
+		}
+		if !allowed {
+			if decision == "deny" && canCancel {
+				mapped = "cancel"
+			} else {
+				_ = c.ReplyError(id, -32602, "approval decision not supported")
+				return
+			}
+		}
+	}
+	_ = c.Reply(id, map[string]any{"decision": mapped})
 }
 
 func deref(p *string) string {
@@ -34,13 +99,20 @@ func deref(p *string) string {
 func (a *codexAgent) onRequest(c *rpcConn, id json.RawMessage, method string, params json.RawMessage) {
 	var p cxApprovalParams
 	parseErr := json.Unmarshal(params, &p)
-	if (method == "item/tool/requestUserInput" || method == "mcpServer/elicitation/request") && (parseErr != nil || strings.TrimSpace(p.ThreadID) == "") {
-		_ = c.ReplyError(id, -32602, "invalid question request")
+	if parseErr != nil || strings.TrimSpace(p.ThreadID) == "" {
+		_ = c.ReplyError(id, -32602, "invalid approval request")
 		return
 	}
 	sk := "codex:" + p.ThreadID
 
 	a.mu.Lock()
+	// During initialization a.conn has not been published yet; the callback
+	// still owns this live connection's immutable done channel. Once a current
+	// connection exists, a delayed callback from another one is retired.
+	if a.closed || c == nil || !c.alive() || a.conn != nil && a.conn != c {
+		a.mu.Unlock()
+		return
+	}
 	t := a.threadLocked(p.ThreadID)
 	policy := t.policy
 	if policy == "" {
@@ -52,10 +124,23 @@ func (a *codexAgent) onRequest(c *rpcConn, id json.RawMessage, method string, pa
 		changes = l.changes
 	}
 	a.mu.Unlock()
+	options := cxRequestOptions(p.AvailableDecisions)
+	decorate := func(ev protocol.Event) protocol.Event {
+		ev.TurnID, ev.ParentID = p.TurnID, p.ItemID
+		ev.ApprovalOptions = options
+		if ev.Kind == "question" {
+			ev.ApprovalOptions = &protocol.ApprovalOptions{Version: 1, Decisions: []string{"allow", "deny"}}
+		}
+		return ev
+	}
 
 	switch method {
 	case "item/commandExecution/requestApproval":
-		if policy == "auto_all" {
+		if len(options.Decisions) == 0 {
+			_ = c.ReplyError(id, -32602, "approval decisions not supported")
+			return
+		}
+		if policy == "auto_all" && approvalDecisionAllowed(options, "allow") {
 			_ = c.Reply(id, map[string]any{"decision": "accept"})
 			return
 		}
@@ -68,21 +153,29 @@ func (a *codexAgent) onRequest(c *rpcConn, id json.RawMessage, method string, pa
 			title = "运行命令"
 		}
 		ev := protocol.Event{Kind: "command", Title: titleText(title), Detail: truncHead(strings.TrimSpace(cmd+"\n\n"+deref(p.Reason)), maxDetailChars), Cwd: deref(p.Cwd)}
-		ans, ok := a.askPhone(sk, string(id), ev)
+		if network := p.NetworkApprovalContext; network != nil {
+			// This is a managed network destination, not necessarily a shell command.
+			ev.Kind, ev.Title = "permission", titleText("访问网络 · "+network.Host)
+			ev.Detail = truncHead(strings.TrimSpace(network.Protocol+" · "+network.Host+"\n"+cmd+"\n"+deref(p.Reason)), maxDetailChars)
+		}
+		if len(p.AdditionalPermissions) > 0 && strings.TrimSpace(string(p.AdditionalPermissions)) != "null" {
+			ev.Detail = truncHead("请求权限："+jsonCompact(p.AdditionalPermissions)+"\n"+ev.Detail, maxDetailChars)
+		}
+		if p.EnvironmentID != "" {
+			ev.Detail = truncHead("环境："+truncHead(p.EnvironmentID, 512)+"\n"+ev.Detail, maxDetailChars)
+		}
+		ans, ok := a.askPhone(sk, string(id), decorate(ev), c.done)
 		if !ok {
 			return
 		}
-		decision := "decline"
-		switch ans.decision {
-		case "allow":
-			decision = "accept"
-		case "allow_session":
-			decision = "acceptForSession"
-		}
-		_ = c.Reply(id, map[string]any{"decision": decision})
+		cxDecisionReply(c, id, p.AvailableDecisions, ans.decision)
 
 	case "item/fileChange/requestApproval":
-		if policy == "auto_all" || policy == "auto_edits" {
+		if len(options.Decisions) == 0 {
+			_ = c.ReplyError(id, -32602, "approval decisions not supported")
+			return
+		}
+		if (policy == "auto_all" || policy == "auto_edits") && approvalDecisionAllowed(options, "allow") {
 			_ = c.Reply(id, map[string]any{"decision": "accept"})
 			return
 		}
@@ -92,18 +185,11 @@ func (a *codexAgent) onRequest(c *rpcConn, id json.RawMessage, method string, pa
 			detail = strings.TrimSpace(detail + "\n申请写入：" + *p.GrantRoot)
 		}
 		ev.Detail = truncHead(detail, maxDetailChars)
-		ans, ok := a.askPhone(sk, string(id), ev)
+		ans, ok := a.askPhone(sk, string(id), decorate(ev), c.done)
 		if !ok {
 			return
 		}
-		decision := "decline"
-		switch ans.decision {
-		case "allow":
-			decision = "accept"
-		case "allow_session":
-			decision = "acceptForSession"
-		}
-		_ = c.Reply(id, map[string]any{"decision": decision})
+		cxDecisionReply(c, id, p.AvailableDecisions, ans.decision)
 
 	case "item/permissions/requestApproval":
 		granted := grantedPermissions(p.Permissions)
@@ -113,7 +199,7 @@ func (a *codexAgent) onRequest(c *rpcConn, id json.RawMessage, method string, pa
 		}
 		ev := protocol.Event{Kind: "permission", Title: "申请额外权限", Cwd: deref(p.Cwd),
 			Detail: truncHead(strings.TrimSpace(deref(p.Reason)+"\n"+jsonCompact(p.Permissions)), maxDetailChars)}
-		ans, ok := a.askPhone(sk, string(id), ev)
+		ans, ok := a.askPhone(sk, string(id), decorate(ev), c.done)
 		if !ok {
 			return
 		}
@@ -139,7 +225,7 @@ func (a *codexAgent) onRequest(c *rpcConn, id json.RawMessage, method string, pa
 		if p.AutoResolutionMS != nil && *p.AutoResolutionMS < uint64(approvalTimeout.Milliseconds()) {
 			ev.ExpiresAt = time.Now().Add(time.Duration(*p.AutoResolutionMS) * time.Millisecond).UnixMilli()
 		}
-		ans, ok := a.askPhoneRequest(sk, string(id), ev, func(answers map[string][]string) error { return validateQuestionAnswers(qs, answers) }, c.done)
+		ans, ok := a.askPhoneRequest(sk, string(id), decorate(ev), func(answers map[string][]string) error { return validateQuestionAnswers(qs, answers) }, c.done)
 		if !ok {
 			return
 		}
@@ -167,7 +253,7 @@ func (a *codexAgent) onRequest(c *rpcConn, id json.RawMessage, method string, pa
 			return
 		}
 		ev := questionEvent("mcp-form", form.questions, "MCP · "+request.ServerName, request.Message, cwd)
-		ans, ok := a.askPhoneRequest(sk, string(id), ev, form.validate, c.done)
+		ans, ok := a.askPhoneRequest(sk, string(id), decorate(ev), form.validate, c.done)
 		if !ok {
 			return
 		}
@@ -203,12 +289,15 @@ func grantedPermissions(raw json.RawMessage) map[string]any {
 }
 
 // askPhone raises approval.request and waits. ok=false means the tool withdrew the request (no reply).
-func (a *codexAgent) askPhone(sk, ref string, ev protocol.Event) (approvalAnswer, bool) {
-	return a.askPhoneRequest(sk, ref, ev, nil, nil)
+func (a *codexAgent) askPhone(sk, ref string, ev protocol.Event, sourceClosed <-chan struct{}) (approvalAnswer, bool) {
+	return a.askPhoneRequest(sk, ref, ev, nil, sourceClosed)
 }
 
 func (a *codexAgent) askPhoneRequest(sk, ref string, ev protocol.Event, validate func(map[string][]string) error, sourceClosed <-chan struct{}) (approvalAnswer, bool) {
-	p, ev := a.aps.addValidatedRequest(sk, "codex", ref, ev, validate)
+	p, ev := a.aps.addValidatedRequestForSource(sk, "codex", ref, ev, validate, sourceClosed)
+	if p == nil {
+		return approvalAnswer{decision: "deny", noReply: true}, false
+	}
 	a.emit(ev)
 	a.setStatus(sk, "waiting_approval")
 	stop := a.closeCh
@@ -331,7 +420,7 @@ func (a *codexAgent) pollOnce(ctx context.Context, prev map[string]protocol.Sess
 		if !loaded {
 			// Live events for loaded threads come straight from the app-server.
 			a.emit(protocol.Event{SessionKey: info.SessionKey, Type: "session.updated", Session: ptrInfo(info)})
-			if opened && known && old.UpdatedAt != info.UpdatedAt {
+			if opened && known && (old.UpdatedAt != info.UpdatedAt || old.Status != info.Status) {
 				a.streamNewItems(cctx, id)
 			}
 		}
@@ -342,6 +431,11 @@ func (a *codexAgent) streamNewItems(ctx context.Context, id string) {
 	a.mu.Lock()
 	item := a.threadLocked(id)
 	tail, baseline := item.tailHistory, item.tailBaselineTurn
+	version := item.historyReadVersion
+	if !tail {
+		item.historyReadVersion++
+		version = item.historyReadVersion
+	}
 	a.mu.Unlock()
 	if tail {
 		a.streamTailItems(ctx, id, baseline)
@@ -352,30 +446,24 @@ func (a *codexAgent) streamNewItems(ctx context.Context, id string) {
 		return
 	}
 	sk := "codex:" + id
-	var out []protocol.Event
+	th.Turns = codexHistoryWindow(th.Turns)
+	itemDigests, turnDigests, bounded := codexHistoryDigests(th.Turns)
 	a.mu.Lock()
 	t := a.threadLocked(id)
-	if t.seen == nil {
-		t.seen = map[string]bool{}
+	if t.tailHistory || t.historyReadVersion != version {
+		a.mu.Unlock()
+		return
 	}
-	for _, turn := range th.Turns {
-		for i, raw := range turn.Items {
-			key := turn.ID + ":" + itoa(i)
-			if t.seen[key] {
-				continue
-			}
-			t.seen[key] = true
-			var it cxItem
-			if json.Unmarshal(raw, &it) != nil {
-				continue
-			}
-			if e, ok := codexItemEvent(sk, it, true, th.Cwd); ok {
-				out = append(out, e)
-			}
-		}
+	if !bounded {
+		t.historyItemDigests, t.historyTurnDigests = itemDigests, turnDigests
+		a.mu.Unlock()
+		a.emit(protocol.Event{SessionKey: sk, Type: "notice", ID: "history-gap:" + sk, TS: nowMs(), Level: "warn", Text: "[salcara:history-gap:v1] 正在重新读取电脑上的原会话。"})
+		return
 	}
+	changed := codexChangedHistory(th, t.historyItemDigests, t.historyTurnDigests, turnDigests)
+	t.historyItemDigests, t.historyTurnDigests = itemDigests, turnDigests
 	a.mu.Unlock()
-	for _, e := range out {
+	for _, e := range a.historyEvents(sk, changed) {
 		a.emit(e)
 	}
 }

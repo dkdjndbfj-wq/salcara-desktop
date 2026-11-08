@@ -12,7 +12,7 @@ async function validateArchive(archive, signal) {
   const gzip = zlib.createGunzip();
   input.on('error', (error) => gzip.destroy(error));
   input.pipe(gzip);
-  let buffered = Buffer.alloc(0), remaining = 0, count = 0, expanded = 0, ended = false;
+  let buffered = Buffer.alloc(0), remaining = 0, count = 0, expanded = 0, unpackedSize = 0, ended = false;
   const seen = new Map();
   function text(block, start, size) {
     const field = block.subarray(start, start + size);
@@ -43,6 +43,7 @@ async function validateArchive(archive, signal) {
         const type = block[156] === 0 ? '0' : String.fromCharCode(block[156]);
         if (type !== '0' && type !== '5') throw new Error('Archive links and extended entries are not allowed');
         if (type === '5' && size !== 0) throw new Error('Invalid directory entry');
+        unpackedSize += size;
         let name = [text(block, 345, 155), text(block, 0, 100)].filter(Boolean).join('/');
         if (name.startsWith('./')) name = name.slice(2);
         if (name === '.' || name === '') { if (type !== '5') throw new Error('Invalid root entry'); continue; }
@@ -59,6 +60,7 @@ async function validateArchive(archive, signal) {
       }
     }
     if (buffered.length || remaining || !ended || !count) throw new Error('Incomplete update archive');
+    return { unpackedSize, entries: count };
   } finally { input.destroy(); gzip.destroy(); }
 }
 

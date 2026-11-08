@@ -11,24 +11,6 @@ import (
 	"salcara/bridge/internal/config"
 )
 
-// addPhoneRevokes must run inside Store.Update, in the same atomic write that
-// closes local authorization. The queue contains old binding metadata only;
-// station device secrets continue to live in the existing private vault.
-func addPhoneRevokes(next *config.Config, old config.Config) {
-	if !validPhoneHash(old.PhoneBindingID) || !validPhoneHash(old.PhoneHash) {
-		return // legacy/unclaimed QR cleanup cannot be safely replayed
-	}
-	stations := append([]config.RemoteConnection{{HubURL: old.EffectiveHubURL(), DeviceID: old.DeviceID}}, old.RemoteConnections...)
-	for _, station := range stations {
-		item := config.PendingPhoneRevoke{HubURL: config.NormalizeHubURL(station.HubURL), DeviceID: station.DeviceID,
-			BindingID: old.PhoneBindingID, PhoneHash: old.PhoneHash}
-		if item.HubURL == "" || item.DeviceID == "" {
-			continue
-		}
-		addPhoneRevoke(next, item)
-	}
-}
-
 func addPhoneRevoke(next *config.Config, item config.PendingPhoneRevoke) {
 	for _, existing := range next.PendingPhoneRevokes {
 		if existing == item {
@@ -77,6 +59,11 @@ func (c *Client) retryPhoneRevokes(ctx context.Context) {
 		return
 	}
 	defer c.revokeCleanupMu.Unlock()
+	// A disk failure must not undo the in-memory revoke. Keep retrying even
+	// for a legacy pair with no conditional Hub cleanup entries.
+	if err := c.o.Store.RetryPhoneRevocationPersistence(); err != nil {
+		c.log.Printf("hub: phone revocation persistence is still pending")
+	}
 	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
 	items := c.o.Store.Get().PendingPhoneRevokes
@@ -115,7 +102,7 @@ func (c *Client) phoneRevokeLoop(ctx context.Context) {
 		c.retryPhoneRevokes(ctx)
 		var timer *time.Timer
 		var tick <-chan time.Time
-		if len(c.o.Store.Get().PendingPhoneRevokes) > 0 {
+		if len(c.o.Store.Get().PendingPhoneRevokes) > 0 || c.o.Store.PhoneRevocationPending() {
 			timer = time.NewTimer(delay)
 			tick = timer.C
 			delay *= 2

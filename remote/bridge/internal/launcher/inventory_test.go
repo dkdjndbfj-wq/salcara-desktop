@@ -99,7 +99,7 @@ func TestInventorySnapshotDoesNotWaitForDiscoveryAndRemembersColdStart(t *testin
 		return []Tool{{ID: "codex-desktop", Path: exe, Available: true}}
 	}
 	got, pending := s.InventorySnapshot(nil)
-	if !pending || len(got) != 4 || !got[0].Available || got[0].Path != exe {
+	if !pending || len(got) != 6 || !got[0].Available || got[0].Path != exe {
 		t.Fatal("cold local snapshot missing")
 	}
 	<-started

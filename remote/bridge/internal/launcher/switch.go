@@ -78,16 +78,18 @@ func (s *Service) PrepareSwitch(ctx context.Context, a config.LocalAccount, targ
 				p.Args = append(p.Args, "--model", a.Model)
 			}
 		}
+	} else if config.IsAdditionalTool(a.Kind) {
+		p.ProfileDir = toolcfg.AdditionalHome(a.Kind)
+		if a.Model == "" {
+			return Plan{}, errors.New("请先选择或填写默认模型")
+		}
+		additionalPlan(&p, a, env)
 	} else {
 		p.ProfileDir = filepath.Dir(toolcfg.ClaudeSettingsPath())
-		env["CLAUDE_CONFIG_DIR"], env["ANTHROPIC_BASE_URL"] = p.ProfileDir, a.BaseURL
+		env = toolcfg.ClaudeAPIEnvironment(a.BaseURL, a.Key, a.AuthMode)
+		env["CLAUDE_CONFIG_DIR"] = p.ProfileDir
 		if a.Model != "" {
 			env["ANTHROPIC_MODEL"] = a.Model
-		}
-		if a.AuthMode == "api-key" {
-			env["ANTHROPIC_API_KEY"] = a.Key
-		} else {
-			env["ANTHROPIC_AUTH_TOKEN"] = a.Key
 		}
 		if isDesktop(t.ID) {
 			p.AppData = originalAppData(t)
@@ -118,18 +120,23 @@ func (s *Service) PreviewSwitch(ctx context.Context, a config.LocalAccount, targ
 			info.Provider = "openai"
 		}
 	}
-	if !isDesktop(target) {
+	if target == "codex" || target == "claude" {
 		info.Message += " 终端中的旧进程请先手动退出；新终端会打开原有会话的恢复列表。"
+	} else if config.IsAdditionalTool(target) {
+		info.Message += " 请先退出此 Agent；打开后可在原工具选择已有会话。"
 	}
 	return info, nil
 }
 
 func switchPaths(p Plan) ([]string, string) {
+	if config.IsAdditionalTool(p.Tool.Kind) {
+		return toolcfg.AdditionalPaths(p.Tool.Kind, p.ProfileDir), p.Tool.Kind
+	}
 	if p.Tool.ID == "claude-desktop" {
 		return []string{filepath.Join(p.AppData, "config.json"), filepath.Join(p.AppData, "configLibrary", "_meta.json"), filepath.Join(p.AppData, "configLibrary", toolcfg.SwitchClaudeProviderID+".json")}, "claude-desktop"
 	}
 	if p.Tool.Kind == "codex" {
-		return []string{filepath.Join(p.ProfileDir, "config.toml"), filepath.Join(p.ProfileDir, "auth.json")}, "codex"
+		return []string{filepath.Join(p.ProfileDir, "config.toml"), filepath.Join(p.ProfileDir, "auth.json"), toolcfg.CodexCatalogPath(p.ProfileDir)}, "codex"
 	}
 	return []string{filepath.Join(p.ProfileDir, "settings.json")}, "claude"
 }
@@ -163,12 +170,49 @@ func restoreFiles(files []savedFile) error {
 // tasks, copies a profile, or edits sessions. Failure rolls back to the immediately
 // preceding credentials, not to some older account's credentials.
 func (s *Service) Switch(ctx context.Context, a config.LocalAccount, target, workspace string, paths map[string]string) (Result, error) {
-	s.mu.Lock()
+	return s.SwitchAuthorized(ctx, a, target, workspace, paths, nil)
+}
+
+// SwitchAuthorized commits the caller's connection authorization after the
+// profile and backup are saved, before a tool can issue its first request.
+// The caller must revoke that authorization if this method returns an error.
+func (s *Service) SwitchAuthorized(ctx context.Context, a config.LocalAccount, target, workspace string, paths map[string]string, authorize func() error) (result Result, launchErr error) {
+	return s.configureAuthorized(ctx, a, target, workspace, paths, authorize, true)
+}
+
+// ApplyAuthorized writes the same leased connection and transactional backup as
+// SwitchAuthorized, without stopping or starting the user's native application.
+func (s *Service) ApplyAuthorized(ctx context.Context, a config.LocalAccount, target, workspace string, paths map[string]string, authorize func() error) (Result, error) {
+	return s.configureAuthorized(ctx, a, target, workspace, paths, authorize, false)
+}
+
+func (s *Service) configureAuthorized(ctx context.Context, a config.LocalAccount, target, workspace string, paths map[string]string, authorize func() error, start bool) (result Result, launchErr error) {
+	defer func() { launchErr = RedactLaunchError(launchErr, a.Key) }()
+	if err := lockLaunch(ctx, &s.mu); err != nil {
+		return Result{}, err
+	}
 	defer s.mu.Unlock()
+	// Keep persisted settings and the per-launch pin identical to the
+	// normalized connection used by PrepareSwitch's process environment.
+	if err := config.ValidateLocalAccount(&a); err != nil {
+		return Result{}, err
+	}
+	LaunchPhase(ctx, "tool", "检查程序与项目目录")
 	p, err := s.PrepareSwitch(ctx, a, target, workspace, paths)
 	if err != nil {
 		return Result{}, err
 	}
+	if p.Tool.Kind == "codex" {
+		release, err := toolcfg.LockCodexProfile(ctx, p.ProfileDir)
+		if err != nil {
+			return Result{}, err
+		}
+		defer release()
+		if err := toolcfg.RequireCodexProfileUnowned(p.ProfileDir); err != nil {
+			return Result{}, err
+		}
+	}
+	LaunchPhase(ctx, "backup", "备份原工具配置", "读取并核对已有备份")
 	files, kind := switchPaths(p)
 	previous, err := captureFiles(files)
 	if err != nil {
@@ -178,8 +222,15 @@ func (s *Service) Switch(ctx context.Context, a config.LocalAccount, target, wor
 	var originals []savedFile
 	oldManifest, e := os.ReadFile(manifest)
 	if e == nil {
-		if json.Unmarshal(oldManifest, &originals) != nil || len(originals) != len(previous) {
+		if json.Unmarshal(oldManifest, &originals) != nil {
 			return Result{}, errors.New("配置备份无法读取，请检查 default-backups")
+		}
+		if len(originals) != len(previous) {
+			var migrateErr error
+			originals, migrateErr = migrateLegacyCodexSnapshot(originals, previous)
+			if migrateErr != nil {
+				return Result{}, errors.New("配置备份无法读取，请检查 default-backups")
+			}
 		}
 		for i, f := range previous {
 			if originals[i].Path != f.Path {
@@ -201,7 +252,8 @@ func (s *Service) Switch(ctx context.Context, a config.LocalAccount, target, wor
 	if err := saveSnapshot(manifest, originals); err != nil {
 		return Result{}, err
 	}
-	if isDesktop(target) {
+	if start && isDesktop(target) {
+		LaunchPhase(ctx, "stop", "等待原工具退出")
 		if s.Stop == nil {
 			return Result{}, errors.New("没有可用的安全退出方式，请先手动关闭原工具")
 		}
@@ -210,6 +262,7 @@ func (s *Service) Switch(ctx context.Context, a config.LocalAccount, target, wor
 		}
 	}
 	// Capture after graceful quit as the original app may flush settings on exit.
+	LaunchPhase(ctx, "profile", "写入 API 与模型配置", "核对退出后的配置")
 	latest, err := captureFiles(files)
 	if err != nil {
 		return Result{}, err
@@ -222,7 +275,7 @@ func (s *Service) Switch(ctx context.Context, a config.LocalAccount, target, wor
 	previous = latest
 	rollback := func(cause error) (Result, error) {
 		if e := restoreFiles(previous); e != nil {
-			return Result{}, fmt.Errorf("切号失败，自动回滚未完成，请检查 default-backups；没有删除会话：%w", e)
+			return Result{}, fmt.Errorf("%w；还原原配置失败：%w", cause, e)
 		}
 		for i, f := range previous {
 			if f.Existed {
@@ -232,26 +285,40 @@ func (s *Service) Switch(ctx context.Context, a config.LocalAccount, target, wor
 			}
 		}
 		if e := saveSnapshot(manifest, originals); e != nil {
-			return Result{}, errors.New("凭据已回滚，但备份状态保存失败，请检查 default-backups")
+			return Result{}, fmt.Errorf("%w；原配置已还原，但备份状态保存失败：%w", cause, e)
 		}
-		return Result{}, fmt.Errorf("切号未完成，原凭据已回滚，原会话和文件未改动；可手动重开原工具：%w", cause)
+		return Result{}, fmt.Errorf("%w（原配置已回滚）", cause)
 	}
+	if err := ctx.Err(); err != nil {
+		return Result{}, err
+	}
+	LaunchPhase(ctx, "profile", "写入 API 与模型配置", "写入连接配置")
 	_, v1, _ := config.APIBase(a.BaseURL)
 	if target == "claude-desktop" {
 		err = toolcfg.ApplySwitchClaudeDesktop(p.AppData, a.Name, a.BaseURL, a.Key, a.AuthMode, a.Model)
 	} else if a.Kind == "codex" {
 		err = toolcfg.ApplySwitchCodex(p.ProfileDir, v1, a.Key, a.Model)
 		if err == nil {
+			LaunchPhase(ctx, "profile", "写入 API 与模型配置", "同步模型目录")
 			err = toolcfg.ApplyCodexCatalog(p.ProfileDir, a.CatalogOverride, catalogModels(a), a.Name)
 		}
+	} else if config.IsAdditionalTool(a.Kind) {
+		err = applyAdditional(p, a)
 	} else {
 		err = toolcfg.ApplyLocalClaude(files[0], a.BaseURL, a.Key, a.Model, a.AuthMode)
 	}
 	if err != nil {
 		return rollback(err)
 	}
+	LaunchPhase(ctx, "profile", "写入 API 与模型配置", "保存配置备份状态")
 	for i := range originals {
 		b, e := os.ReadFile(originals[i].Path)
+		if os.IsNotExist(e) && !originals[i].Existed {
+			// The opt-out path deliberately has no Bridge catalogue.  Keep an
+			// empty applied hash so restore verifies that the file is still absent.
+			originals[i].AppliedHash = ""
+			continue
+		}
 		if e != nil {
 			return rollback(e)
 		}
@@ -260,12 +327,31 @@ func (s *Service) Switch(ctx context.Context, a config.LocalAccount, target, wor
 	if err := saveSnapshot(manifest, originals); err != nil {
 		return rollback(err)
 	}
-	pid, err := s.Start(ctx, p)
+	LaunchPhase(ctx, "authorize", "核对并保存连接授权")
+	if err := ctx.Err(); err != nil {
+		return rollback(err)
+	}
+	if authorize != nil {
+		if err := authorize(); err != nil {
+			return rollback(err)
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return rollback(err)
+	}
+	if !start {
+		return Result{Target: target, ProfileDir: p.ProfileDir, Workspace: p.Workspace, Message: "API 配置已应用；未启动或重启工具。已打开的工具可能需要重新打开才能读取新配置。使用期间请保持 Bridge 运行；尚未验证上游推理。"}, nil
+	}
+	LaunchPhase(ctx, "start", "创建工具进程")
+	pid, err := s.startWithClaudeAPIPin(ctx, p, a)
 	if err != nil {
 		return rollback(err)
 	}
+	if target == "claude" && pid == 0 {
+		return Result{Target: target, ProfileDir: p.ProfileDir, Workspace: p.Workspace, Message: "API 配置已保留，启动请求已提交；进程状态尚未确认，请检查终端后再重试。"}, nil
+	}
 	msg := "已切换并打开原工具，沿用原数据目录；聊天记录、项目文件未删除或迁移。"
-	if !isDesktop(target) {
+	if target == "codex" || target == "claude" {
 		msg += " 请从恢复列表选择原会话继续。"
 	}
 	msg += " 启动成功不代表服务商模型已经通过实际请求验证。"
@@ -290,8 +376,19 @@ func defaultAppData(t Tool) string {
 // catalog with the chosen default first.
 func catalogModels(a config.LocalAccount) []string {
 	out := []string{}
-	if a.Model != "" {
+	if a.Model != "" && config.ModelAllowed(a, a.Model) {
 		out = append(out, a.Model)
 	}
-	return append(out, a.Models...)
+	seen := map[string]bool{}
+	for _, model := range out {
+		seen[model] = true
+	}
+	for _, model := range a.Models {
+		if !config.ModelAllowed(a, model) || seen[model] {
+			continue
+		}
+		seen[model] = true
+		out = append(out, model)
+	}
+	return out
 }

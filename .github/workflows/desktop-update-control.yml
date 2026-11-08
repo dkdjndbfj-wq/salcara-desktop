@@ -1,0 +1,55 @@
+name: Publish signed desktop rollout control
+on:
+  workflow_dispatch:
+    inputs:
+      revision:
+        description: '递增的整数修订号（必须大于线上值）'
+        required: true
+        type: string
+      paused:
+        description: '暂停所有自动安装'
+        type: boolean
+        default: false
+      blocked_versions:
+        description: '撤回版本，英文逗号分隔；例如 1.6.5,1.6.6'
+        type: string
+        default: ''
+      rollout_version:
+        description: '分批发布的版本；留空为全部开放'
+        type: string
+        default: ''
+      rollout_percent:
+        description: '分批比例，0 至 100'
+        type: string
+        default: '100'
+      reason:
+        description: '暂停或撤回时显示的说明'
+        type: string
+        default: ''
+permissions:
+  contents: write
+concurrency:
+  group: desktop-update-control
+  cancel-in-progress: false
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Validate, sign and publish control
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CONTROL_REVISION: ${{ inputs.revision }}
+          CONTROL_PAUSED: ${{ inputs.paused }}
+          CONTROL_BLOCKED: ${{ inputs.blocked_versions }}
+          CONTROL_VERSION: ${{ inputs.rollout_version }}
+          CONTROL_PERCENT: ${{ inputs.rollout_percent }}
+          CONTROL_REASON: ${{ inputs.reason }}
+          DESKTOP_UPDATE_KEY: ${{ secrets.SALCARA_DESKTOP_UPDATE_PRIVATE_KEY }}
+        run: node remote/bridge/desktop/scripts/publish-release-control.cjs

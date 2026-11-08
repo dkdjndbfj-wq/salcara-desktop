@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -28,10 +29,14 @@ func TestUpdatePrepareAuthIdentityPendingAndGracefulQuit(t *testing.T) {
 	}
 	if w := do(h, "POST", "/api/update/prepare", host, hdr, `{"pid":1,"version":"test"}`); w.Code != http.StatusConflict {
 		t.Fatalf("wrong owner: %d", w.Code)
+	} else if strings.Contains(w.Body.String(), "update_busy") {
+		t.Fatal("identity failures must not schedule automatic installation retries")
 	}
 	s.Broadcast(protocol.Event{Type: "approval.request", ApprovalID: "fixture"})
 	if w := do(h, "POST", "/api/update/prepare", host, hdr, body); w.Code != http.StatusConflict {
 		t.Fatalf("pending: %d", w.Code)
+	} else if !strings.Contains(w.Body.String(), "update_busy") {
+		t.Fatal("pending work must tell the automatic updater to wait")
 	}
 	s.Broadcast(protocol.Event{Type: "approval.resolved", ApprovalID: "fixture"})
 	if w := do(h, "POST", "/api/update/prepare", host, hdr, body); w.Code != http.StatusOK {

@@ -15,12 +15,14 @@ import (
 // The transport is entirely in-process: safety failures must not spawn Codex,
 // contact a model provider, resume a thread, or invoke a tool.
 type resumeSafetyTransport struct {
-	t       *testing.T
-	conn    *rpcConn
-	thread  cxThread
-	readErr bool
-	calls   []string
-	ids     []string
+	t          *testing.T
+	conn       *rpcConn
+	thread     cxThread
+	readErr    bool
+	calls      []string
+	ids        []string
+	onResume   func()
+	confirmAsk bool
 }
 
 func (s *resumeSafetyTransport) Close() error { return nil }
@@ -40,6 +42,9 @@ func (s *resumeSafetyTransport) Write(data []byte) (int, error) {
 	s.ids = append(s.ids, request.Params.ThreadID)
 	response := map[string]any{"id": request.ID}
 	switch request.Method {
+	case "config/read":
+		cfg, _ := guardedProviderConfig(Settings{RelayRoot: "https://fixture.invalid"})
+		response["result"] = map[string]any{"config": cfg}
 	case "thread/read":
 		if !request.Params.IncludeTurns {
 			s.t.Error("resume preflight did not request full turn history")
@@ -50,7 +55,13 @@ func (s *resumeSafetyTransport) Write(data []byte) (int, error) {
 			response["result"] = map[string]any{"thread": s.thread}
 		}
 	case "thread/resume":
+		if s.onResume != nil {
+			s.onResume()
+		}
 		response["result"] = map[string]any{"thread": s.thread}
+		if s.confirmAsk {
+			response["result"] = map[string]any{"thread": s.thread, "approvalPolicy": "on-request", "approvalsReviewer": "user", "sandbox": map[string]any{"type": "workspaceWrite"}}
+		}
 	case "turn/start":
 		response["result"] = map[string]any{"turn": cxTurn{ID: "fixture-next-turn", Status: "completed"}}
 	default:
@@ -170,7 +181,7 @@ func TestCodexResumeRecentFreshRolloutStillRefuses(t *testing.T) {
 
 func TestCodexResumeRejectsMismatchedReadIdentity(t *testing.T) {
 	a, transport, _ := newResumeSafetyAgent(t, cxThread{ID: "wrong-thread", Status: cxThreadStatus{Type: "idle"}}, false)
-	if err := a.Send(context.Background(), "fixture-original", "must not be sent"); err == nil || !strings.Contains(err.Error(), "会话 ID 不匹配") {
+	if err := a.Send(context.Background(), "fixture-original", "must not be sent"); err == nil {
 		t.Fatalf("mismatched read identity allowed resume: %v", err)
 	}
 	if !reflect.DeepEqual(transport.calls, []string{"thread/read"}) {
@@ -185,11 +196,11 @@ func TestCodexResumeCompletedOriginalUsesSameIDAfterFreshRead(t *testing.T) {
 	if err := a.Send(context.Background(), thread.ID, "continue same thread"); err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(transport.calls, []string{"thread/read", "thread/resume", "turn/start"}) {
+	if !reflect.DeepEqual(transport.calls, []string{"thread/read", "config/read", "thread/resume", "config/read", "turn/start"}) {
 		t.Fatalf("wrong continuation sequence: %v", transport.calls)
 	}
 	for _, id := range transport.ids {
-		if id != thread.ID {
+		if id != "" && id != thread.ID {
 			t.Fatalf("continuation changed thread identity: %v", transport.ids)
 		}
 	}

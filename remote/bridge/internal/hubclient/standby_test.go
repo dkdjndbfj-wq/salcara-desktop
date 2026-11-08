@@ -86,7 +86,7 @@ func TestStandbyPollUsesOnlySavedCredentialAndRejectsCrossBinding(t *testing.T) 
 		_ = json.NewEncoder(w).Encode(map[string]any{"pairing": map[string]any{"deviceId": r.Header.Get("X-Salcara-Device-Id"), "paired": true, "bindingId": strings.Repeat("a", 64), "phoneHash": strings.Repeat("d", 64)}, "commands": []any{}})
 		return true
 	}, nil)
-	if err := c.pollStandby(context.Background(), source, target); err == nil || calls.Load() != 1 {
+	if err := c.pollStandby(context.Background(), source, target); err == nil || !strings.Contains(err.Error(), "绑定不匹配") || calls.Load() != 1 {
 		t.Fatal("cross-binding standby accepted")
 	}
 	if !reflect.DeepEqual(source, c.o.Store.Get()) {

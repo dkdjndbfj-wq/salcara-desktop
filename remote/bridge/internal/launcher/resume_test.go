@@ -25,7 +25,10 @@ func TestResumeExactOriginalSessionDoesNotRewriteData(t *testing.T) {
 				calls++
 				want := []string{"resume", id, "--model", "coding-model"}
 				if kind == "claude" {
-					want = []string{"--resume", id, "--model", "coding-model"}
+					want = []string{"--resume", id, "--model", "coding-model", "--settings", p.ClaudeSettingsPin}
+					if p.ClaudeSettingsPin == "" {
+						t.Fatal("resume did not pin the selected API")
+					}
 				}
 				if !reflect.DeepEqual(p.Args, want) || !p.Shared || p.ProfileDir != root || p.Workspace != cwd || strings.Contains(strings.Join(p.Args, " "), "private-resume-key") {
 					t.Fatal("not an exact original session resume")

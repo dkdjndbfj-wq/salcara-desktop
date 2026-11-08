@@ -5,92 +5,80 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'" />
     <title>软件更新</title>
-    <!-- The update window: the home screen's orb in the middle, with the download progress drawn as a
-         brand-coloured ring around it. Talks to the shell only through window.salcaraUpdate. -->
+    <!-- main.cjs injects the home screen's shared home-orb.css. -->
     <style>
-      @property --p { syntax: "<number>"; inherits: true; initial-value: 0; }
-      @property --rot { syntax: "<angle>"; inherits: false; initial-value: 0deg; }
       :root {
-        --bg: #f3f5f9; --card: #ffffff; --text: #141a26; --text-2: #3a4356; --muted: #6e7789; --faint: #a3abbb; --line: #e4e8ef;
-        --soft: #f5f7fb; --track: #e7eaf1; --hover: rgba(20, 30, 60, .06); --danger: #e0444b; --ok: #12a06a;
+        --bg: #F5F6FA; --card: #ffffff; --text: #141A26; --text-2: #3a4356; --muted: #6A7390; --faint: #9EA8BE; --line: #E6E9F0;
+        --soft: #F4F5F9; --track: #E7EAF1; --danger: #E4474C; --ok: #0FA25C;
         --expo: cubic-bezier(.16, 1, .3, 1);
         --font: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI", "Noto Sans CJK SC", sans-serif;
         color-scheme: light;
       }
-      @media (prefers-color-scheme: dark) {
-        :root { --bg: #121419; --card: #1a1d24; --text: #e8ebf2; --text-2: #b9c0cf; --muted: #8e96a8; --faint: #5d6576; --line: #2a2f3a;
-          --soft: #20242c; --track: #2a2f3a; --hover: rgba(255, 255, 255, .08); color-scheme: dark; }
-      }
       * { box-sizing: border-box; }
       html, body { height: 100%; }
-      body { margin: 0; background: var(--bg); color: var(--text); font: 13.5px/1.55 var(--font); -webkit-font-smoothing: antialiased; overflow: hidden;
-        display: flex; flex-direction: column; -webkit-app-region: drag; user-select: none; }
+      body { margin: 0; color: var(--text); font: 13px/1.55 var(--font); -webkit-font-smoothing: antialiased; overflow: hidden;
+        display: flex; flex-direction: column; -webkit-app-region: drag; user-select: none;
+        background: radial-gradient(360px circle at 50% 70px, rgba(124, 198, 255, .22), rgba(166, 139, 247, .08) 55%, transparent 75%), var(--bg); }
       button, a, .notes { -webkit-app-region: no-drag; }
-      .x { position: fixed; top: 12px; right: 12px; width: 30px; height: 30px; border: 0; border-radius: 9px; background: transparent; color: var(--text-2);
-        display: grid; place-items: center; cursor: pointer; transition: background .18s, color .18s; }
-      .x:hover { background: #E5484D; color: #fff; }
+      .x { position: fixed; top: 12px; right: 12px; width: 30px; height: 30px; border: 0; border-radius: 15px; background: transparent; color: var(--muted);
+        display: grid; place-items: center; cursor: pointer; transition: background .18s, color .18s; z-index: 2; }
+      .x:hover { background: #fff; color: var(--text); box-shadow: 0 0 0 1px var(--line); }
       .x svg { width: 14px; height: 14px; }
 
-      .top { padding: 40px 32px 0; text-align: center; }
-      /* the orb, with the progress ring around it */
-      .orbwrap { position: relative; width: 132px; height: 132px; margin: 0 auto 20px; display: grid; place-items: center; }
-      .ring { position: absolute; inset: 0; border-radius: 50%; opacity: 0; transition: opacity .5s var(--expo);
-        background: conic-gradient(from -90deg, #7CC6FF, #3D7BFA calc(var(--p) * 33%), #A68BF7 calc(var(--p) * 70%), #F4A6CE calc(var(--p) * 100%), var(--track) calc(var(--p) * 100%));
-        -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 4px), #000 calc(100% - 3.5px));
-        transition: --p .35s linear, opacity .5s var(--expo); }
-      .busy .ring, .done .ring { opacity: 1; }
-      .indeterminate .ring { --p: .28; animation: spin 1.1s linear infinite; }
-      @keyframes spin { to { rotate: 360deg; } }
-      .glow { position: absolute; inset: 14px; border-radius: 50%; filter: blur(18px); opacity: 0; transition: opacity .6s;
-        background: conic-gradient(from var(--rot), #7CC6FF, #3D7BFA, #A68BF7, #F4A6CE, #7CC6FF); animation: rot 4s linear infinite; }
-      @keyframes rot { to { --rot: 360deg; } }
-      .busy .glow { opacity: .45; }
-      .orb { position: relative; width: 96px; height: 96px; border-radius: 50%;
-        background: radial-gradient(circle at 34% 28%, #fff 0%, #fff 16%, rgba(255, 255, 255, 0) 46%), radial-gradient(circle at 50% 42%, #fbfcfe 0%, #eef1f6 52%, #d3d9e4 82%, #b9c1d0 100%);
-        box-shadow: inset -6px -9px 15px rgba(110, 122, 148, .30), inset 4px 5px 11px rgba(255, 255, 255, .9), 0 10px 22px -6px rgba(30, 40, 70, .25);
-        display: flex; align-items: center; justify-content: center; gap: 15px; animation: float 5s ease-in-out infinite; }
-      @keyframes float { 50% { translate: 0 -4px; } }
-      .orb i { width: 6px; height: 24px; border-radius: 6px; background: #10131a; transition: height .35s var(--expo), translate .35s var(--expo); }
-      .orb.blink i { animation: blink .2s ease-in-out; }
-      @keyframes blink { 50% { scale: 1 .08; } }
-      .busy .orb i { translate: 0 -2px; }                    /* concentrating */
-      .done .orb i { height: 14px; border-radius: 7px 7px 3px 3px; }  /* pleased */
-      .failed .orb i { height: 12px; translate: 0 4px; }      /* deflated */
+      .top { padding: 18px 28px 0; text-align: center; flex-shrink: 0; }
+      .orbwrap { position: relative; width: 180px; height: 168px; margin: 0 auto 12px; display: grid; place-items: center; }
       .check { position: absolute; right: 6px; bottom: 6px; width: 30px; height: 30px; border-radius: 50%; background: var(--ok); color: #fff;
         display: grid; place-items: center; box-shadow: 0 0 0 4px var(--bg); scale: 0; transition: scale .45s cubic-bezier(.34, 1.56, .64, 1); }
       .check svg { width: 15px; height: 15px; }
       .done .check { scale: 1; }
 
-      h1 { margin: 0; font-size: 19px; font-weight: 700; letter-spacing: .2px; }
-      .sub { margin: 6px 0 0; color: var(--muted); font-size: 12.5px; font-variant-numeric: tabular-nums; min-height: 20px; }
-      .sub b { color: var(--text-2); font-weight: 600; }
-      .sub .arrow { margin: 0 6px; color: var(--faint); }
+      h1 { margin: 0; font-size: 18px; font-weight: 700; letter-spacing: -.1px; }
+      .sub { margin: 8px 0 0; color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; min-height: 22px; display: flex; align-items: center; justify-content: center; gap: 6px; flex-wrap: wrap; }
+      .sub b { display: inline-flex; align-items: center; height: 22px; padding: 0 9px; border-radius: 11px; background: #fff; box-shadow: 0 0 0 1px var(--line); color: var(--text); font-weight: 600; }
+      .sub b:last-of-type { background: linear-gradient(140deg, #3D7BFA, #A68BF7); color: #fff; box-shadow: none; }
+      .sub .arrow { margin: 0; color: var(--faint); }
+      .progress-area { margin: 16px 0 0; text-align: left; }
+      .progress-area[hidden] { display: none; }
+      .progress-label { display:flex; justify-content:space-between; gap:12px; margin-bottom:7px; font-size:12px; color:var(--text-2); font-variant-numeric:tabular-nums; }
+      .progress-track { height:8px; overflow:hidden; border-radius:8px; background:#E0E5F1; }
+      .progress-fill { display:block; height:100%; width:0; border-radius:inherit; background:linear-gradient(90deg,#6F9CFF,#8C78DE); transition:width .2s linear; }
+      .progress-caption { margin:7px 0 0; font-size:11px; color:var(--muted); }
 
-      .mid { flex: 1; min-height: 0; padding: 18px 28px 0; display: flex; flex-direction: column; }
-      .notes { flex: 1; min-height: 0; overflow: auto; padding: 14px 16px; border-radius: 14px; background: var(--card); border: 1px solid var(--line);
-        color: var(--text-2); font-size: 13px; user-select: text; }
-      .notes h4 { margin: 0 0 8px; font-size: 12px; font-weight: 600; color: var(--muted); letter-spacing: .4px; }
+      .mid { flex: 1; min-height: 0; padding: 18px 24px 1px; display: flex; flex-direction: column; overflow: auto; -webkit-app-region: no-drag; }
+      .notes { flex: 1; min-height: 78px; overflow: auto; padding: 14px 16px; border-radius: 16px; background: var(--card); box-shadow: 0 0 0 1px rgba(20, 26, 38, .05), 0 10px 24px -18px rgba(20, 26, 60, .35);
+        color: var(--text-2); font-size: 12.5px; user-select: text; }
+      .notes h4 { margin: 0 0 8px; font-size: 11.5px; font-weight: 600; color: var(--muted); }
       .notes p { margin: 0 0 6px; }
       .notes ul { margin: 0 0 6px; padding-left: 18px; }
-      .notes li { margin: 2px 0; }
+      .notes li { margin: 3px 0; }
+      .notes li::marker { color: #A68BF7; }
       .notes .empty { color: var(--faint); }
+      .notes .sk { display: block; height: 11px; margin: 9px 0; border-radius: 6px; background: linear-gradient(90deg, #ECEEF3 0%, #F6F7FA 40%, #ECEEF3 80%) 0 0 / 200% 100%; animation: sk 1.3s linear infinite; }
+      @keyframes sk { from { background-position: 100% 0; } to { background-position: -100% 0; } }
       .notes::-webkit-scrollbar { width: 8px; } .notes::-webkit-scrollbar-thumb { background: var(--line); border-radius: 8px; }
-      .msg { margin-top: 10px; padding: 9px 12px; border-radius: 10px; font-size: 12.5px; background: var(--soft); color: var(--text-2); }
-      .msg.bad { background: rgba(224, 68, 75, .1); color: var(--danger); }
+      .msg { margin-top: 10px; padding: 9px 12px; border-radius: 12px; font-size: 12px; background: #fff; box-shadow: 0 0 0 1px var(--line); color: var(--text-2); flex-shrink: 0; max-height: 100px; overflow: auto; overflow-wrap: anywhere; }
+      .msg.bad { background: #FDECEC; box-shadow: none; color: var(--danger); }
       .msg[hidden] { display: none; }
+      .required-note { margin-bottom: 12px; padding: 12px 14px; border: 1px solid #F4CF9A; border-radius: 12px; background: #FFF6E7; color: #78521C; font-size: 12px; max-height: 180px; overflow: auto; flex-shrink: 0; -webkit-app-region: no-drag; }
+      .required-note strong { display: block; margin-bottom: 5px; font-size: 13px; }
+      .required-note p { margin: 4px 0 0; overflow-wrap: anywhere; }
+      .required-note[hidden] { display: none; }
+      .notes { overflow-wrap: anywhere; }
 
-      .bar { display: flex; align-items: center; gap: 8px; padding: 18px 28px 24px; }
+      .bar { display: flex; align-items: center; gap: 8px; padding: 16px 24px 22px; flex-shrink: 0; }
       .bar .grow { flex: 1; }
-      .btn { height: 36px; padding: 0 16px; border-radius: 11px; border: 1px solid var(--line); background: var(--card); color: var(--text); font: 600 13px var(--font);
-        cursor: pointer; transition: background .18s, border-color .18s, transform .12s; white-space: nowrap; }
+      .btn { height: 36px; padding: 0 18px; border-radius: 18px; border: 0; background: #fff; box-shadow: 0 0 0 1px var(--line); color: var(--text); font: 600 12.5px var(--font);
+        cursor: pointer; transition: background .18s, transform .12s; white-space: nowrap; }
       .btn:hover { background: var(--soft); }
       .btn:active { transform: scale(.97); }
-      .btn.primary { border-color: transparent; background: var(--text); color: var(--bg); }
-      .btn.primary:hover { opacity: .9; }
-      .btn.link { border: 0; background: transparent; color: var(--muted); padding: 0 6px; font-weight: 500; }
+      .btn:disabled { opacity: .5; cursor: default; }
+      .btn.primary { box-shadow: none; background: #141A26; color: #fff; }
+      .btn.primary:hover { background: #283042; }
+      .btn.link { box-shadow: none; background: transparent; color: var(--muted); padding: 0 6px; font-weight: 500; }
       .btn.link:hover { color: var(--text); background: transparent; }
       .btn[hidden] { display: none; }
-      .btn:focus-visible { outline: 2px solid rgba(47, 107, 255, .4); outline-offset: 2px; }
+      .btn:focus-visible { outline: 2px solid rgba(61, 123, 250, .45); outline-offset: 2px; }
+      @media (max-height: 600px) { .top { padding-top: 8px; } .orbwrap { height: 116px; margin-bottom: 4px; } .orbwrap > .orb { scale: .72; } .required-note { max-height: 110px; } .progress-area { margin-top: 10px; } }
       @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } }
     </style>
   </head>
@@ -98,17 +86,19 @@
     <button class="x" id="close" type="button" aria-label="关闭" title="关闭"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="m4 4 8 8M12 4l-8 8"/></svg></button>
     <div class="top">
       <div class="orbwrap" id="stage">
-        <div class="glow"></div>
-        <div class="ring" id="ring"></div>
-        <div class="orb" id="orb"><i></i><i></i></div>
+        <div class="orb-shadow" aria-hidden="true"></div>
+        <div class="orb" id="orb" aria-hidden="true"><span class="orb-face"><i class="eye"></i><i class="eye"></i></span></div>
         <div class="check" aria-hidden="true"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m3.5 8.5 3 3 6-7"/></svg></div>
       </div>
       <h1 id="title">正在检查更新…</h1>
       <p class="sub" id="sub" role="status"></p>
+      <div class="progress-area" id="progressArea" hidden><div class="progress-label"><span id="progressLabel">下载更新</span><strong id="progressPercent">0%</strong></div><div class="progress-track" id="progress" role="progressbar" aria-label="更新下载进度" aria-valuemin="0" aria-valuemax="100"><span class="progress-fill" id="progressFill"></span></div><p class="progress-caption" id="progressCaption">下载后自动校验，任务结束后自动安装并重启</p></div>
     </div>
     <div class="mid">
-      <div class="notes" id="notes"><h4>更新内容</h4><div id="notesBody"><p class="empty">—</p></div></div>
+      <div class="required-note" id="requiredNote" role="alert" hidden><strong>当前版本需要更新后才能发起新任务</strong><p id="requiredReason"></p><p id="requiredFloor"></p><p>已有任务可以继续完成、审批或停止，结束后自动安装并重启。</p></div>
+      <div class="notes" id="notes"><h4>更新内容</h4><div id="notesBody"><span class="sk" style="width:62%"></span><span class="sk" style="width:88%"></span><span class="sk" style="width:74%"></span></div></div>
       <div class="msg" id="msg" hidden></div>
+      <button class="btn link" id="diagnostics" type="button" hidden>复制更新诊断</button>
     </div>
     <div class="bar">
       <button class="btn link" id="skip" type="button" hidden>跳过这个版本</button>
@@ -149,60 +139,83 @@
           const busy = s.phase === 'downloading' || s.phase === 'verifying' || s.phase === 'checking' || s.phase === 'installing';
           if (busy) stage.classList.add('busy');
           if (s.phase === 'verifying' || s.phase === 'checking' || s.phase === 'installing') stage.classList.add('indeterminate');
-          if (s.phase === 'ready') stage.classList.add('done');
+          if (s.phase === 'ready' || s.phase === 'waiting') stage.classList.add('done');
           if (s.phase === 'error') stage.classList.add('failed');
-          const p = s.phase === 'downloading' && s.size ? Math.min(1, (s.received || 0) / s.size) : s.phase === 'ready' ? 1 : 0;
-          if (!stage.classList.contains('indeterminate')) $('ring').style.setProperty('--p', p);
-          else $('ring').style.removeProperty('--p');
+          const p = s.phase === 'downloading' && s.size ? Math.min(1, (s.received || 0) / s.size) : ['ready', 'verifying', 'waiting', 'installing'].includes(s.phase) ? 1 : 0;
+          const progressVisible = ['downloading', 'verifying', 'ready', 'waiting', 'installing'].includes(s.phase);
+          show('progressArea', progressVisible);
+          $('progressFill').style.width = `${Math.floor(p * 100)}%`;
+          $('progress').setAttribute('aria-valuenow', String(Math.floor(p * 100)));
+          $('progressPercent').textContent = `${Math.floor(p * 100)}%`;
+          $('progressLabel').textContent = s.phase === 'downloading' ? '正在下载' : s.phase === 'verifying' ? '下载完成 · 正在校验' : s.phase === 'installing' ? '下载完成 · 正在安装' : '下载完成';
+          $('progressCaption').textContent = s.distributionReason || (s.phase === 'waiting' ? (s.waitReason || '等待已有任务结束，将自动继续安装') : s.phase === 'downloading' && s.retryAttempt ? `连接中断后自动重试 · 第 ${s.retryAttempt} 次` : '下载后自动校验，任务结束后自动安装并重启');
 
           const v = s.version ? `<b>${esc(s.current)}</b><span class="arrow">→</span><b>${esc(s.version)}</b>` : '';
           const titles = { checking: '正在检查更新…', latest: '已经是最新版本', unconfigured: '没有配置更新源', available: '发现新版本', downloading: '正在下载更新',
-            verifying: '正在校验与解压', ready: '更新已准备好', installing: '正在重启…', error: '更新没有完成', idle: '软件更新' };
+            verifying: '正在校验与解压', ready: '即将自动安装', waiting: '等待当前任务结束', installing: '正在安装并重启…', error: '更新没有完成', idle: '软件更新' };
           $('title').textContent = titles[s.phase] || '软件更新';
+          if (s.required && s.phase === 'available') $('title').textContent = '需要更新才能继续';
+          if (s.autoBlocked) $('title').textContent = '已保护性停止自动更新';
+          else if (s.distributionReason) $('title').textContent = '等待更新开放';
+          show('requiredNote', s.required === true);
+          $('requiredReason').textContent = s.updateReason || '当前版本已不再受支持，请更新以继续使用。';
+          $('requiredFloor').textContent = s.minimumSupportedVersion ? `最低支持版本 ${s.minimumSupportedVersion} · 当前 ${s.current}` : '';
           let sub = '';
           if (s.phase === 'latest') sub = `当前版本 <b>${esc(s.current)}</b>`;
           else if (s.phase === 'available') sub = `${v}${s.size ? ` · ${mb(s.size)}` : ''}`;
           else if (s.phase === 'downloading') sub = `${mb(s.received || 0)} / ${mb(s.size || 0)}${s.speed ? ` · ${mb(s.speed)}/s` : ''} · ${Math.floor(p * 100)}%`;
           else if (s.phase === 'verifying') sub = '核对签名和文件完整性';
-          else if (s.phase === 'ready') sub = `重启后就是 <b>${esc(s.version)}</b>，大约需要几秒钟`;
+          else if (s.phase === 'ready') sub = `将自动更新至 <b>${esc(s.version)}</b>`;
+          else if (s.phase === 'waiting') sub = '无需操作，任务结束后会自动继续';
           else if (s.phase === 'installing') sub = 'Salcara Bridge 会自动重新打开';
           else if (s.phase === 'unconfigured') sub = '这个版本没有配置更新源，请到官网下载新版';
           else if (v) sub = v;
           $('sub').innerHTML = sub;
 
           const hasRelease = Boolean(s.version);
-          $('notes').style.visibility = hasRelease ? 'visible' : 'hidden';
-          if (hasRelease && notesFor !== s.version) { notesFor = s.version; $('notesBody').innerHTML = renderNotes(s.notes); }
+          const checking = s.phase === 'checking' && !hasRelease;
+          $('notes').style.visibility = hasRelease || checking ? 'visible' : 'hidden';
+          if (checking) { notesFor = null; $('notesBody').innerHTML = '<span class="sk" style="width:62%"></span><span class="sk" style="width:88%"></span><span class="sk" style="width:74%"></span><span class="sk" style="width:46%"></span>'; }
+          else if (hasRelease && notesFor !== s.version + ':' + s.notes) { notesFor = s.version + ':' + s.notes; $('notesBody').innerHTML = renderNotes(s.notes); }
 
-          const msg = s.phase === 'error' ? s.error : s.phase === 'available' && !s.canInstall ? s.reason : '';
+          const msg = [s.phase === 'error' ? s.error : s.phase === 'available' && !s.canInstall ? s.reason : '', s.distributionReason, s.failureReason, s.required ? s.policyError : ''].filter(Boolean).join('；');
           $('msg').textContent = msg || '';
           $('msg').className = 'msg' + (s.phase === 'error' ? ' bad' : '');
           show('msg', Boolean(msg));
+          show('diagnostics', s.phase === 'error' || Boolean(s.autoBlocked));
 
           const go = $('go');
-          show('skip', s.phase === 'available');
-          show('page', Boolean(s.page) && (s.phase === 'error' || (s.phase === 'available' && !s.canInstall)));
+          show('skip', s.phase === 'available' && !s.required);
+          show('page', Boolean(s.page) && (s.phase === 'error' || s.phase === 'unconfigured' || (s.phase === 'available' && !s.canInstall)));
+          $('page').textContent = '手动下载安装';
           go.hidden = true;
-          if (s.phase === 'available' && s.canInstall) { go.hidden = false; go.textContent = '立即更新'; go.onclick = () => api.download(); }
-          else if (s.phase === 'ready') { go.hidden = false; go.textContent = '重启并更新'; go.onclick = () => api.install(); }
-          else if (s.phase === 'error' && s.canRetry) { go.hidden = false; go.textContent = '重试'; go.onclick = () => (s.retry === 'download' ? api.download() : api.check()); }
+          if (s.phase === 'available' && s.canInstall && !s.distributionReason) { go.hidden = false; go.textContent = s.autoBlocked ? '手动重试此版本' : '立即更新'; go.onclick = () => api.download(); }
+          else if (s.phase === 'ready' && !s.automatic) { go.hidden = false; go.textContent = '继续更新'; go.onclick = () => api.install(); }
+          else if (s.phase === 'error' && s.canRetry) { go.hidden = false; go.textContent = s.retry === 'install' ? '重试安装' : '重试'; go.onclick = () => (s.retry === 'install' ? api.install() : s.retry === 'download' ? api.download() : api.check()); }
+          if (s.distributionReason) { go.hidden = false; go.textContent = '重新检查'; go.onclick = () => api.check(); }
           const later = $('later');
           later.hidden = s.phase === 'installing';
-          later.textContent = s.phase === 'downloading' ? '取消下载' : s.phase === 'latest' || s.phase === 'unconfigured' ? '好的' : '稍后';
+          later.textContent = s.phase === 'downloading' ? '取消下载' : s.phase === 'waiting' || s.phase === 'ready' || s.phase === 'verifying' ? '后台更新' : s.required ? '返回查看任务' : s.phase === 'latest' || s.phase === 'unconfigured' ? '好的' : '稍后';
           later.onclick = () => (s.phase === 'downloading' ? api.cancel() : api.later());
-          later.disabled = s.phase === 'verifying';
+          later.disabled = false;
         }
 
         $('close').onclick = () => (api ? api.later() : window.close());
         $('skip').onclick = () => api.skip();
         $('page').onclick = () => api.openPage();
+        $('diagnostics').onclick = async () => { try { if (await api.copyDiagnostics()) $('diagnostics').textContent = '已复制诊断信息'; } catch { $('diagnostics').textContent = '复制失败，请重试'; } };
         addEventListener('keydown', (e) => {
           if (e.key === 'Escape') $('close').click();
           else if (e.key === 'Enter' && !(e.target instanceof HTMLButtonElement) && !$('go').hidden) $('go').click();
         });
         if (!api) return;
-        api.onState(render);
-        api.state().then(render);
+        let revision = 0;
+        api.onState(s => { revision++; render(s); });
+        const initial = revision;
+        api.state().then(s => { if (initial !== revision) return; render(s); if (s?.phase === 'idle') api.check(); }).catch(() => {
+          $('title').textContent = '暂时无法读取更新状态';
+          $('go').hidden = false; $('go').textContent = '重新检查'; $('go').onclick = () => api.check();
+        });
 
         // An occasional blink, never on a fixed beat.
         const orb = $('orb');

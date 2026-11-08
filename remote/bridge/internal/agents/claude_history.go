@@ -2,7 +2,9 @@ package agents
 
 import (
 	"bufio"
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -23,11 +25,13 @@ type claudeHistory struct {
 	dir   string
 	mu    sync.Mutex
 	cache map[string]*histEntry
+	// Process-local provenance only. An old transcript or its age cannot
+	// establish remote execution ownership after a Bridge restart.
+	ownedLeases map[string]*claudeOwnedLease
 }
 
 type histEntry struct {
-	mod  time.Time
-	size int64
+	file os.FileInfo
 	info protocol.SessionInfo
 	ok   bool
 }
@@ -120,7 +124,7 @@ func (h *claudeHistory) summary(path string, st os.FileInfo) (protocol.SessionIn
 	h.mu.Lock()
 	e := h.cache[path]
 	h.mu.Unlock()
-	if e != nil && e.size == st.Size() && e.mod.Equal(st.ModTime()) {
+	if e != nil && sameClaudeTranscript(e.file, st) {
 		return e.info, e.ok
 	}
 	info, ok := scanTranscript(path, st)
@@ -128,7 +132,7 @@ func (h *claudeHistory) summary(path string, st os.FileInfo) (protocol.SessionIn
 	if len(h.cache) >= 512 {
 		h.cache = map[string]*histEntry{}
 	}
-	h.cache[path] = &histEntry{mod: st.ModTime(), size: st.Size(), info: info, ok: ok}
+	h.cache[path] = &histEntry{file: st, info: info, ok: ok}
 	h.mu.Unlock()
 	return info, ok
 }
@@ -180,11 +184,19 @@ func claudeClient(entrypoint string) string {
 
 // readLines calls f for each complete line of r (lines can be very long).
 func readLines(r io.Reader, f func([]byte) bool) error {
+	return readLinesAt(r, 0, func(line []byte, _ int64) bool { return f(line) })
+}
+
+// Offsets include empty and malformed rows, and remain absolute for tail reads.
+func readLinesAt(r io.Reader, start int64, f func([]byte, int64) bool) error {
 	br := bufio.NewReaderSize(r, 1<<20)
+	offset := start
 	for {
 		line, err := ReadBoundedLine(br, 16<<20)
+		lineStart := offset
+		offset += int64(len(line))
 		if len(line) > 1 {
-			if !f(line) {
+			if !f(line, lineStart) {
 				return nil
 			}
 		}
@@ -197,9 +209,24 @@ func readLines(r io.Reader, f func([]byte) bool) error {
 	}
 }
 
+// Source + absolute record position supplies identity, not the peer's text or
+// sender. The raw-record digest distinguishes an in-place rewrite. Call only
+// after the reader has admitted this local transcript within its own namespace.
+func setClaudePeerHistoryID(l *claudeLine, scope, path string, offset int64, raw []byte) {
+	if validChildID(l.UUID) || !claudeUserOrigin(l).peer {
+		return
+	}
+	// Full readers include the newline; tail readers have already removed it.
+	raw = bytes.TrimSuffix(raw, []byte{'\n'})
+	raw = bytes.TrimSuffix(raw, []byte{'\r'})
+	record := sha256.Sum256(raw)
+	identity := sha256.Sum256([]byte(fmt.Sprintf("%s\x00%s\x00%d\x00%x", scope, filepath.Clean(path), offset, record)))
+	l.historyRecordID = fmt.Sprintf("peer-history:%x", identity)
+}
+
 // firstUserText extracts the typed text of a user transcript line ("" if it isn't a real prompt).
 func firstUserText(l *claudeLine) string {
-	if l.Type != "user" || l.IsMeta || l.IsCompactSummary || l.IsSidechain {
+	if l.Type != "user" || l.IsMeta || l.IsCompactSummary || l.IsSidechain || !claudeUserOrigin(l).human {
 		return ""
 	}
 	var msg claudeMessage
@@ -231,7 +258,7 @@ func scanTranscript(path string, st os.FileInfo) (protocol.SessionInfo, bool) {
 		return info, false
 	}
 	defer f.Close()
-	title, entry, aiTitle, summary := "", "", "", ""
+	title, entry, aiTitle, summary, customTitle := "", "", "", "", ""
 	read := int64(0)
 	readLines(io.LimitReader(f, 4<<20), func(line []byte) bool {
 		read += int64(len(line))
@@ -248,6 +275,9 @@ func scanTranscript(path string, st os.FileInfo) (protocol.SessionInfo, bool) {
 		if l.Type == "ai-title" && l.AITitle != "" {
 			aiTitle = l.AITitle
 		}
+		if value := claudeNativeCustomTitle(line, id); value != "" {
+			customTitle = value
+		}
 		if l.Type == "summary" && l.Summary != "" && summary == "" {
 			summary = l.Summary
 		}
@@ -257,6 +287,7 @@ func scanTranscript(path string, st os.FileInfo) (protocol.SessionInfo, bool) {
 		return title == "" || info.Cwd == "" || entry == ""
 	})
 	// tail
+	tailCustomTitle := false
 	const tail = 256 << 10
 	off := st.Size() - tail
 	if off < 0 {
@@ -279,6 +310,10 @@ func scanTranscript(path string, st os.FileInfo) (protocol.SessionInfo, bool) {
 			if l.Type == "ai-title" && l.AITitle != "" {
 				aiTitle = l.AITitle
 			}
+			if value := claudeNativeCustomTitle(line, id); value != "" {
+				customTitle = value
+				tailCustomTitle = true
+			}
 			if l.Type == "assistant" && !l.IsSidechain {
 				var msg claudeMessage
 				if json.Unmarshal(l.Message, &msg) == nil && msg.Model != "" && msg.Model != "<synthetic>" {
@@ -291,7 +326,26 @@ func scanTranscript(path string, st os.FileInfo) (protocol.SessionInfo, bool) {
 			return true
 		})
 	}
+	if !tailCustomTitle {
+		// Native rename metadata may have scrolled out of both spans. Read
+		// backwards only until the newest title, within a fixed IO/line bound;
+		// summary() caches the result by exact file identity/size/mtime.
+		value, err := readClaudeNativeTitle(f, st, id)
+		if errors.Is(err, errClaudeTitleUnconfirmed) {
+			if title == "" && aiTitle == "" && summary == "" && customTitle == "" {
+				return info, false
+			}
+			info.Title, info.Client = "会话标题待确认", claudeClient(entry)
+			return info, true
+		}
+		if err != nil {
+			return info, false
+		}
+		customTitle = value
+	}
 	switch {
+	case customTitle != "":
+		info.Title = titleText(customTitle)
 	case title != "":
 		info.Title = titleText(title)
 	case aiTitle != "":
@@ -337,14 +391,16 @@ func (h *claudeHistory) scanHistory(ctx context.Context, id string, retain int) 
 	childRefs := map[string]string{}
 	mappedBytes := 0
 	var scanError error
-	readError := readLines(io.LimitReader(f, st.Size()), func(line []byte) bool {
+	readError := readLinesAt(io.LimitReader(f, st.Size()), 0, func(line []byte, offset int64) bool {
 		if ctx.Err() != nil {
 			scanError = ctx.Err()
 			return false
 		}
 		var l claudeLine
 		if json.Unmarshal(line, &l) == nil {
+			setClaudePeerHistoryID(&l, info.SessionKey, p, offset, line)
 			mapped := m.entry(&l)
+			mapped = h.projectSkillReceipt(id, &l, mapped)
 			for _, e := range mapped {
 				if e.Kind == "subagent" && e.ID != "" {
 					if agentID := claudeResultAgentID(e.Output); agentID != "" && len(childRefs) < 64 {
@@ -416,7 +472,8 @@ func (a *claudeAgent) watchOnce(state map[string]*watchedFile, baseline bool) {
 		id := strings.TrimSuffix(filepath.Base(p), ".jsonl")
 		w := state[p]
 		if baseline {
-			state[p] = &watchedFile{offset: st.Size(), mod: st.ModTime(), status: activityStatus(st.ModTime())}
+			status, _ := a.hist.remoteHistoryState(id, st.ModTime().UnixMilli())
+			state[p] = &watchedFile{offset: st.Size(), mod: st.ModTime(), status: status}
 			continue
 		}
 		a.mu.Lock()
@@ -440,21 +497,23 @@ func (a *claudeAgent) watchOnce(state map[string]*watchedFile, baseline bool) {
 			continue
 		}
 		info, ok := a.hist.summary(p, st)
-		status := activityStatus(st.ModTime())
+		status, controllable := a.hist.remoteHistoryState(id, st.ModTime().UnixMilli())
 		if changed && st.Size() > w.offset {
 			var evs []protocol.Event
 			if w.mapper == nil {
 				w.mapper = newClaudeMapper("claude:"+id, info.Cwd)
 			}
-			w.offset = readFrom(p, w.offset, st.Size(), func(line []byte) {
+			w.offset = readFrom(p, w.offset, st.Size(), func(line []byte, offset int64) {
 				var l claudeLine
 				if json.Unmarshal(line, &l) == nil {
-					evs = append(evs, w.mapper.entry(&l)...)
+					setClaudePeerHistoryID(&l, "claude:"+id, p, offset, line)
+					mapped := a.hist.projectSkillReceipt(id, &l, w.mapper.entry(&l))
+					evs = append(evs, mapped...)
 				}
 			})
 			w.mapper.trim()
 			if ok && (status != w.status || len(evs) > 0) {
-				info.Status, info.Controllable = status, status != "running"
+				info.Status, info.Controllable = status, controllable
 				a.emit(protocol.Event{SessionKey: info.SessionKey, Type: "session.updated", Session: ptrInfo(info)})
 				w.status = status
 			}
@@ -467,7 +526,7 @@ func (a *claudeAgent) watchOnce(state map[string]*watchedFile, baseline bool) {
 			continue
 		}
 		if ok && status != w.status {
-			info.Status, info.Controllable = status, status != "running"
+			info.Status, info.Controllable = status, controllable
 			a.emit(protocol.Event{SessionKey: info.SessionKey, Type: "session.updated", Session: ptrInfo(info)})
 			w.status = status
 		}
@@ -482,7 +541,7 @@ func activityStatus(mod time.Time) string {
 }
 
 // readFrom reads complete lines in [from, to) and returns the offset after the last complete line.
-func readFrom(path string, from, to int64, f func([]byte)) int64 {
+func readFrom(path string, from, to int64, f func([]byte, int64)) int64 {
 	file, err := os.Open(path)
 	if err != nil {
 		return from
@@ -498,7 +557,7 @@ func readFrom(path string, from, to int64, f func([]byte)) int64 {
 		if err != nil { // incomplete last line: keep it for next time
 			return off
 		}
+		f(line, off)
 		off += int64(len(line))
-		f(line)
 	}
 }

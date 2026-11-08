@@ -4,7 +4,6 @@
 package hubclient
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"crypto/sha256"
@@ -15,6 +14,8 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
@@ -24,6 +25,7 @@ import (
 	"salcara/bridge/internal/agents"
 	"salcara/bridge/internal/config"
 	"salcara/bridge/internal/desktopcompanion"
+	"salcara/bridge/internal/hubingress"
 	"salcara/bridge/internal/launcher"
 	"salcara/bridge/internal/protocol"
 )
@@ -38,14 +40,23 @@ const (
 
 // Status is a snapshot of the hub connection.
 type Status struct {
-	State     string      `json:"state"`
-	Error     string      `json:"error,omitempty"`
-	Since     int64       `json:"since"` // ms
-	HubURL    string      `json:"hubUrl"`
-	DeviceID  string      `json:"deviceId"`
-	Queued    int         `json:"queued"`
-	LastEvent int64       `json:"lastEventSent,omitempty"`
-	Pairing   *PairStatus `json:"pairing,omitempty"`
+	State     string         `json:"state"`
+	Error     string         `json:"error,omitempty"`
+	Since     int64          `json:"since"` // ms
+	HubURL    string         `json:"hubUrl"`
+	DeviceID  string         `json:"deviceId"`
+	Queued    int            `json:"queued"`
+	LastEvent int64          `json:"lastEventSent,omitempty"`
+	Pairing   *PairStatus    `json:"pairing,omitempty"`
+	Recovery  RecoveryStatus `json:"recovery"`
+}
+
+// RecoveryStatus describes local message storage, not remote task completion.
+// It contains no private paths, message bodies, credentials or raw disk errors.
+type RecoveryStatus struct {
+	State           string `json:"state"` // ready, degraded, blocked, unavailable
+	QueuedBytes     int    `json:"queuedBytes"`
+	HistoryRequired bool   `json:"historyRequired"`
 }
 
 type PairStatus struct {
@@ -99,25 +110,46 @@ type Client struct {
 	o   Options
 	log *log.Logger
 
-	mgrMu             sync.RWMutex
-	mgr               agents.Manager
-	taskConfigMu      sync.Mutex // serialize phone task admission with API changes
-	updatePrepared    bool       // protected by taskConfigMu; updater closes task admission before quitting
-	updateUntil       time.Time  // prepare lease; abandoned installers cannot block new tasks forever
-	updateCommitted   bool
-	modelCatalogMu    sync.Mutex
-	modelCatalog      map[string]verifiedModelCatalog
-	modelCatalogEpoch uint64
+	mgrMu                    sync.RWMutex
+	mgr                      agents.Manager
+	mgrReady                 atomic.Bool // avoids making read-only status wait for manager startup
+	workspaceMu              sync.Mutex
+	workspaceSessions        map[string]workspaceLease // sessionKey -> last verified workspace state
+	workspaceStartObserver   *workspaceStartObservation
+	workspaceScanned         bool       // a successful metadata scan for the current manager
+	taskConfigMu             sync.Mutex // serialize phone task admission with API changes
+	sourceGrantMu            sync.Mutex // one acquisition at a time; never holds taskConfigMu across network
+	workspaceFilesMu         sync.Mutex // bounded, on-demand project file operations
+	terminalMu               sync.Mutex
+	terminals                map[string]*workspaceTerminal
+	previewMu                sync.Mutex
+	previews                 map[string]*workspacePreview
+	projectPreviewMu         sync.Mutex
+	projectPreviews          map[string]*workspaceProjectPreview
+	projectPreviewAgentEpoch atomic.Uint64
+	updatePrepared           bool      // protected by taskConfigMu; updater closes task admission before quitting
+	updateUntil              time.Time // prepare lease; abandoned installers cannot block new tasks forever
+	updateCommitted          bool
+	updatePolicy             atomic.Pointer[UpdatePolicy] // publisher policy survives installer cancellation
+	modelCatalogMu           sync.Mutex
+	modelCatalog             map[string]verifiedModelCatalog
+	modelCatalogEpoch        uint64
+	featureCatalog           featureCatalogCache
+	sideQuestions            sideQuestionCache
+	cooperationTickets       map[string]*cooperationTicket
+	cooperationEpoch         atomic.Uint64
 
 	mu                   sync.Mutex
 	phoneMu              sync.Mutex
 	revokeCleanupMu      sync.Mutex // serialize durable conditional station cleanup
 	revokeWake           chan struct{}
 	uploadAuthorization  string
+	nativeAdmissions     map[*nativeAdmission]struct{} // pending HTTP admissions, not running desktop tasks; protected by mu
 	lastPairRevision     int64
 	pairRevisionIdentity string
 	status               Status
 	cancelConn           context.CancelFunc
+	connectionEpoch      uint64 // protected by mu; invalidates delayed stream handshakes
 	lastFP               string
 	lastReg              time.Time
 	tools                []protocol.Tool
@@ -126,7 +158,15 @@ type Client struct {
 	wake  chan struct{}
 	regCh chan struct{}
 
-	qmu sync.Mutex
+	qmu              sync.Mutex
+	durable          *durableStore
+	durableErr       error
+	outboxWriteErr   error // qmu; cleared only by a complete persisted snapshot
+	outboxSequence   uint64
+	eventScope       atomic.Pointer[eventUploadScope]
+	queueEventScope  string // qmu; immutable scope of persisted queue and batch
+	attachmentMu     sync.Mutex
+	attachmentStores map[string]*attachmentStore
 	// stationSwitching is set while a remote.station.switch transaction is
 	// validating and committing.  It is guarded by qmu when changed/read by
 	// the queue path so flushLoop cannot take a batch after the switch has
@@ -203,6 +243,12 @@ func New(o Options) *Client {
 	if tr == nil {
 		tr = &http.Transport{Proxy: http.ProxyFromEnvironment, ResponseHeaderTimeout: 30 * time.Second}
 	}
+	cacheDir := ""
+	if o.Store != nil {
+		cacheDir = filepath.Join(filepath.Dir(o.Store.Path()), "ingress-cache")
+	}
+	tr = hubingress.New(tr, cacheDir)
+	o.HTTP.Transport = tr
 	c := &Client{
 		o:          o,
 		log:        o.Logger,
@@ -213,15 +259,46 @@ func New(o Options) *Client {
 		streamHTTP: &http.Client{Transport: tr, CheckRedirect: o.HTTP.CheckRedirect},
 	}
 	c.status = Status{State: StateNotLoggedIn, Since: nowMS()}
+	c.restoreUpdatePolicy()
 	c.lastPairRevision = -1
+	c.workspaceSessions = make(map[string]workspaceLease)
+	if o.Store != nil {
+		c.durable, c.durableErr = openDurableStore(filepath.Join(filepath.Dir(o.Store.Path()), "remote-store"))
+		if c.durableErr == nil {
+			c.durableErr = c.restoreOutbox()
+			c.syncOutboxAttachmentPinsLocked()
+		}
+		if c.durableErr != nil {
+			c.log.Printf("hub: durable storage unavailable: %v", c.durableErr)
+		}
+		if o.Store.Get().PhoneHash != "" && (len(c.queue) > 0 || len(c.recovery) > 0) {
+			c.handoverAwaitingAuth.Store(true)
+		}
+	}
+	c.watchCooperationSource()
+	if o.Store != nil {
+		o.Store.OnChange(func(old, current config.Config) {
+			if old.EffectiveRemoteMode() != current.EffectiveRemoteMode() {
+				c.Kick()
+			}
+		})
+	}
 	return c
 }
 
 // SetManager attaches the agents manager (commands fail with an error until it is set).
 func (c *Client) SetManager(m agents.Manager) {
+	c.projectPreviewAgentEpoch.Add(1)
+	c.cooperationEpoch.Add(1)
+	c.featureCatalog.clear()
+	c.workspaceMu.Lock()
+	c.workspaceSessions = make(map[string]workspaceLease)
+	c.workspaceScanned = false
+	c.workspaceMu.Unlock()
 	c.mgrMu.Lock()
 	c.mgr = m
 	c.mgrMu.Unlock()
+	c.mgrReady.Store(m != nil)
 }
 
 func (c *Client) manager() agents.Manager {
@@ -237,6 +314,14 @@ func (c *Client) Status() Status {
 	// deadlock exactly when a status refresh races an event upload.
 	c.qmu.Lock()
 	queued := len(c.queue)
+	recovery := RecoveryStatus{State: "ready", QueuedBytes: c.queueBytes, HistoryRequired: c.recoveryAll || len(c.recovery) != 0}
+	if c.durableErr != nil {
+		recovery.State = "blocked"
+	} else if c.durable == nil {
+		recovery.State = "unavailable"
+	} else if c.outboxWriteErr != nil {
+		recovery.State = "degraded"
+	}
 	c.qmu.Unlock()
 	c.mu.Lock()
 	s := c.status
@@ -246,7 +331,14 @@ func (c *Client) Status() Status {
 	s.DeviceID = cfg.DeviceID
 	s.Queued = queued
 	s.LastEvent = c.lastSent.Load()
+	s.Recovery = recovery
 	return s
+}
+
+func (c *Client) durableReady() bool {
+	c.qmu.Lock()
+	defer c.qmu.Unlock()
+	return c.durable != nil && c.durableErr == nil
 }
 
 // Tools returns the tools found by the last detection.
@@ -257,12 +349,19 @@ func (c *Client) Tools() []protocol.Tool {
 }
 
 func (c *Client) setState(state, errText string) {
+	var cfg config.Config
+	if c.o.Store != nil {
+		cfg = c.o.Store.Get()
+	}
 	c.mu.Lock()
 	changed := c.status.State != state || c.status.Error != errText
 	if c.status.State != state {
 		c.status.Since = nowMS()
 	}
 	c.status.State, c.status.Error = state, errText
+	if state != StateConnected && cfg.EffectiveRemoteMode() == "bot" && botEventScopeRequired(cfg) {
+		c.eventScope.Store(&eventUploadScope{identity: eventIdentity(cfg), required: true})
+	}
 	c.mu.Unlock()
 	if changed {
 		if errText != "" {
@@ -278,6 +377,8 @@ func (c *Client) setState(state, errText string) {
 
 // Kick drops the current connection and reconnects immediately (after login/config changes).
 func (c *Client) Kick() {
+	c.cooperationEpoch.Add(1)
+	c.featureCatalog.clear()
 	// A normal reconnect also has an authorization gap before pair.status.
 	// Retain progress for the same durable phone generation during that gap;
 	// an explicit revoke clears PhoneHash and therefore cannot enter this gate.
@@ -285,13 +386,37 @@ func (c *Client) Kick() {
 	if cfg.PhoneBindingID != "" && cfg.PhoneHash != "" {
 		c.handoverAwaitingAuth.Store(true)
 	}
+	nextState := StateConnecting
+	if !cfg.LoggedIn() || !cfg.HubRemoteEnabled() {
+		nextState = StateNotLoggedIn
+	}
 	c.mu.Lock()
+	c.connectionEpoch++
+	// Status reads the current saved Hub URL. Clear the old stream's connected
+	// state in the same critical section as its authorization, so a just-saved
+	// station cannot appear ready before its own stream has connected.
+	stateChanged := c.status.State != nextState || c.status.Error != ""
+	if c.status.State != nextState {
+		c.status.Since = nowMS()
+	}
+	c.status.State, c.status.Error = nextState, ""
 	c.status.Pairing = nil // unknown until the new station's authenticated snapshot
 	c.uploadAuthorization = ""
+	if cfg.EffectiveRemoteMode() == "bot" && botEventScopeRequired(cfg) {
+		c.eventScope.Store(&eventUploadScope{identity: eventIdentity(cfg), required: true})
+	}
+	for pending := range c.nativeAdmissions {
+		if !cfg.HubRemoteEnabled() || pending.identity != eventIdentity(cfg) {
+			pending.cancel()
+		}
+	}
 	if c.cancelConn != nil {
 		c.cancelConn()
 	}
 	c.mu.Unlock()
+	if stateChanged && c.o.OnStatus != nil {
+		c.o.OnStatus(c.Status())
+	}
 	select {
 	case c.wake <- struct{}{}:
 	default:
@@ -308,6 +433,13 @@ func (c *Client) Reregister() {
 
 // Run blocks until ctx is done.
 func (c *Client) Run(ctx context.Context) {
+	if c.o.Store.Get().PhoneHash != "" {
+		c.handoverAwaitingAuth.Store(true)
+	}
+	defer c.closeWorkspaceTerminals()
+	defer c.closeWorkspaceProjectPreviews()
+	defer c.closeWorkspacePreviews()
+	go c.cleanupAttachmentStores(ctx)
 	go c.flushLoop(ctx)
 	go c.registerLoop(ctx)
 	go c.phoneRevokeLoop(ctx)
@@ -315,7 +447,7 @@ func (c *Client) Run(ctx context.Context) {
 	backoff := c.o.BackoffMin
 	for ctx.Err() == nil {
 		cfg := c.o.Store.Get()
-		if !cfg.LoggedIn() {
+		if !cfg.LoggedIn() || !cfg.HubRemoteEnabled() {
 			c.setState(StateNotLoggedIn, "")
 			c.waitWake(ctx, 0)
 			continue
@@ -400,19 +532,42 @@ func (c *Client) newRequest(ctx context.Context, method, path string, body any) 
 }
 
 func (c *Client) requestFor(ctx context.Context, cfg config.Config, method, path string, rd io.Reader, hasBody bool) (*http.Request, error) {
+	current := c.o.Store.Get()
+	if !cfg.HubRemoteEnabled() || !current.HubRemoteEnabled() || cfg.EffectiveRemoteMode() != current.EffectiveRemoteMode() {
+		return nil, errors.New("此远程方式未启用")
+	}
 	req, err := http.NewRequestWithContext(ctx, method, cfg.EffectiveHubURL()+"/v1"+path, rd)
 	if err != nil {
 		return nil, err
 	}
+	req = hubingress.Bind(req, cfg.EffectiveHubURL()+"/v1")
 	if !cfg.RemoteDeviceOnly {
 		req.Header.Set("Authorization", "Bearer "+cfg.AccountKey)
 	}
 	req.Header.Set("X-Salcara-Device-Secret", cfg.DeviceSecret)
 	if cfg.RemoteDeviceOnly {
 		req.Header.Set("X-Salcara-Device-Id", cfg.DeviceID)
+		if method == http.MethodPost && path == "/device/register" {
+			if groupID, invite, signature := cfg.BotEnrollment(); groupID != "" && invite != "" && signature != "" {
+				req.Header.Set("X-Salcara-Bot-Group", groupID)
+				req.Header.Set("X-Salcara-Bot-Invite", invite)
+				req.Header.Set("X-Salcara-Bot-Signature", signature)
+			} else if claim := cfg.DeviceEnrollmentClaim(); claim != "" {
+				req.Header.Set("X-Salcara-Enrollment-Claim", claim)
+			}
+		}
 	}
 	req.Header.Set("User-Agent", "SalcaraBridge/"+c.o.Version)
-	if path == "/bridge/events" && cfg.PhoneBindingID != "" {
+	if path == "/bridge/events" || strings.HasPrefix(path, "/bridge/blobs") {
+		scope := c.eventScopeFromContext(ctx, cfg)
+		if scope != "" {
+			req.Header.Set("X-Salcara-Event-Scope", scope)
+		}
+		if c.eventScopeRequired(cfg) && scope == "" {
+			return nil, errors.New("Bot 事件代次尚未确认，未上传内容")
+		}
+	}
+	if (path == "/bridge/events" || strings.HasPrefix(path, "/bridge/blobs")) && cfg.PhoneBindingID != "" {
 		req.Header.Set("X-Salcara-Binding-Id", cfg.PhoneBindingID)
 		req.Header.Set("X-Salcara-Phone-Hash", cfg.PhoneHash)
 	}
@@ -472,7 +627,14 @@ func (c *Client) StartPair(ctx context.Context) (result PairInfo, retErr error) 
 			})
 		}
 	}()
-	body, _ := json.Marshal(map[string]string{"deviceId": cfg.DeviceID, "bindingId": cfg.PhoneBindingID, "phoneHash": cfg.PhoneHash, "computerId": cfg.ComputerID, "attemptId": cfg.PhonePairAttempt})
+	pairRequest := map[string]string{"deviceId": cfg.DeviceID, "bindingId": cfg.PhoneBindingID, "phoneHash": cfg.PhoneHash, "computerId": cfg.ComputerID, "attemptId": cfg.PhonePairAttempt}
+	if cfg.RemoteDeviceOnly && cfg.PhoneBindingID != "" {
+		// New Hubs use this single-generation seed for the initial QR token,
+		// so later relay syncs reproduce it without retiring saved credentials.
+		// Older Hubs ignore the optional field and retain random QR tokens.
+		pairRequest["pairSeed"] = connectionPhoneSeed(cfg, config.RemoteConnection{HubURL: cfg.EffectiveHubURL(), DeviceID: cfg.DeviceID, DeviceSecret: cfg.DeviceSecret})
+	}
+	body, _ := json.Marshal(pairRequest)
 	req, err := c.requestFor(ctx, cfg, http.MethodPost, "/bridge/pair/start", bytes.NewReader(body), true)
 	if err != nil {
 		return PairInfo{}, err
@@ -564,6 +726,22 @@ func (c *Client) Device(ctx context.Context) protocol.Device {
 		Version:  c.o.Version,
 		Tools:    []protocol.Tool{},
 		Projects: cfg.Projects,
+		// This is a process-level guarantee: execution commands are checked
+		// against the Hub's non-secret source envelope before dispatch.  The Hub
+		// uses it to reject restricted requests from older/unhardened Bridges.
+		Capabilities: []string{"source.guard.v1", "source.grant.acquire.v1", "station.source-only.v1", "station.guard.v1", "station.guard.v2", "pair.connections.v1"},
+	}
+	if c.durableReady() {
+		d.Capabilities = append(d.Capabilities, "durable.execution.v1", "durable.events.v1", "attachment.blobs.v1")
+	}
+	if runtime.GOOS == "windows" || runtime.GOOS == "linux" {
+		d.Capabilities = append(d.Capabilities, "workspace.files.v1", "workspace.project.files.v1", "workspace.files.write.v1", "workspace.files.manage.v1", "workspace.terminal.v1", "workspace.artifacts.v1", "workspace.artifacts.write.v1", "workspace.project.preview.v1")
+		if _, err := exec.LookPath("git"); err == nil {
+			d.Capabilities = append(d.Capabilities, "workspace.git.v1", "workspace.git.review.v1", "workspace.git.repositories.v1")
+		}
+		if previewBrowserExecutable() != "" {
+			d.Capabilities = append(d.Capabilities, "workspace.preview.v1")
+		}
 	}
 	if m := c.manager(); m != nil {
 		c.mu.Lock()
@@ -609,6 +787,7 @@ func (c *Client) register(ctx context.Context, force bool) error {
 	if config.RemoteIdentity(cfg) != config.RemoteIdentity(c.o.Store.Get()) {
 		return errors.New("中转站已切换，不上传旧站点设备信息")
 	}
+	c.refreshStationCapabilities(ctx, cfg)
 	fp := fingerprint(d)
 	c.mu.Lock()
 	same := fp == c.lastFP && time.Since(c.lastReg) < c.o.ReregisterEvery
@@ -620,8 +799,27 @@ func (c *Client) register(ctx context.Context, force bool) error {
 	if cfg.RemoteDeviceOnly {
 		path = "/device/register"
 	}
-	if err := c.postFor(ctx, cfg, path, d); err != nil {
+	claim := cfg.DeviceEnrollmentClaim()
+	botGroup, botInvite, botSignature := cfg.BotEnrollment()
+	if err := c.registerWithEventScope(ctx, cfg, path, d); err != nil {
 		return err
+	}
+	if cfg.RemoteDeviceOnly && claim != "" {
+		if err := c.o.Store.Update(func(current *config.Config) error {
+			current.ClearDeviceEnrollmentClaim(cfg.EffectiveHubURL(), cfg.DeviceID, claim)
+			return nil
+		}); err != nil {
+			return errors.New("设备已登记，但本机未能清除一次性登记码；请检查 Bridge 配置文件权限")
+		}
+		c.refreshStationCapabilities(ctx, c.o.Store.Get())
+	}
+	if cfg.RemoteDeviceOnly && botInvite != "" && botGroup != "" && botSignature != "" {
+		if err := c.o.Store.Update(func(current *config.Config) error {
+			current.ClearBotEnrollment(cfg.EffectiveHubURL(), cfg.DeviceID, botInvite)
+			return nil
+		}); err != nil {
+			return errors.New("设备已登记，但本机未能清除 Bot 绑定包；请检查 Bridge 配置文件权限")
+		}
 	}
 	c.mu.Lock()
 	c.lastFP, c.lastReg = fp, time.Now()
@@ -654,12 +852,43 @@ func (c *Client) registerLoop(ctx context.Context) {
 
 var errHeartbeat = errors.New("连接超时，正在重连")
 
+func (c *Client) acceptStreamConnection(ctx context.Context, cfg config.Config, epoch uint64) error {
+	current := c.o.Store.Get()
+	c.mu.Lock()
+	// Kick clears connection state and increments the epoch under this same
+	// lock. A delayed 200 response must never restore the retired stream.
+	if err := ctx.Err(); err != nil {
+		c.mu.Unlock()
+		return err
+	}
+	if c.connectionEpoch != epoch || config.RemoteIdentity(cfg) != config.RemoteIdentity(current) {
+		c.mu.Unlock()
+		return errors.New("中转站连接已更换，不接受旧连接")
+	}
+	changed := c.status.State != StateConnected || c.status.Error != ""
+	if c.status.State != StateConnected {
+		c.status.Since = nowMS()
+	}
+	c.status.State, c.status.Error = StateConnected, ""
+	c.mu.Unlock()
+	if changed {
+		c.log.Printf("hub: %s", StateConnected)
+		if c.o.OnStatus != nil {
+			c.o.OnStatus(c.Status())
+		}
+	}
+	return nil
+}
+
 func (c *Client) stream(ctx context.Context) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	cfg := c.o.Store.Get()
-	if config.RemoteIdentity(cfg) != config.RemoteIdentity(c.o.Store.Get()) {
-		return errors.New("中转站已切换，不连接旧站点")
+	c.mu.Lock()
+	epoch := c.connectionEpoch
+	c.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	c.phoneMu.Lock()
 	c.pairRevisionIdentity = config.RemoteIdentity(cfg)
@@ -678,7 +907,9 @@ func (c *Client) stream(ctx context.Context) error {
 	if resp.StatusCode/100 != 2 {
 		return checkResp(resp)
 	}
-	c.setState(StateConnected, "")
+	if err := c.acceptStreamConnection(ctx, cfg, epoch); err != nil {
+		return err
+	}
 	// Changes made while we were (re)connecting — e.g. a project added right after login, whose
 	// Reregister() was skipped because we weren't connected yet — are sent now if the device differs
 	// from what was registered.
@@ -708,52 +939,52 @@ func (c *Client) stream(ctx context.Context) error {
 		}
 	}()
 
-	rd := bufio.NewReaderSize(resp.Body, 64*1024)
-	var evName string
-	var data strings.Builder
-	for {
-		line, err := rd.ReadString('\n')
-		if err != nil {
-			if timedOut.Load() {
-				return errHeartbeat
-			}
-			if err == io.EOF {
-				return errors.New("服务器断开了连接")
-			}
-			return err
-		}
-		last.Store(time.Now().UnixNano())
-		line = strings.TrimRight(line, "\r\n")
-		switch {
-		case line == "":
-			if data.Len() > 0 {
-				c.handleSSEFor(ctx, evName, data.String(), cfg)
-			}
-			evName = ""
-			data.Reset()
-		case strings.HasPrefix(line, ":"):
-			// keep-alive comment
-		case strings.HasPrefix(line, "event:"):
-			evName = strings.TrimSpace(line[6:])
-		case strings.HasPrefix(line, "data:"):
-			if data.Len() > 0 {
-				data.WriteByte('\n')
-			}
-			data.WriteString(strings.TrimPrefix(line[5:], " "))
-		}
+	err = readBridgeSSE(resp.Body, func() { last.Store(time.Now().UnixNano()) }, func(name, data string) {
+		c.handleSSEFor(ctx, name, data, cfg)
+	})
+	if timedOut.Load() {
+		return errHeartbeat
 	}
+	if err == io.EOF {
+		return errors.New("服务器断开了连接")
+	}
+	return err
 }
 
 func (c *Client) handleSSE(_ context.Context, name, data string) {
 	c.handleSSEFor(context.Background(), name, data, c.o.Store.Get())
 }
 
-func (c *Client) handleSSEFor(_ context.Context, name, data string, cfg config.Config) {
-	if config.RemoteIdentity(cfg) != config.RemoteIdentity(c.o.Store.Get()) {
+func (c *Client) handleSSEFor(ctx context.Context, name, data string, cfg config.Config) {
+	if ctx.Err() != nil || config.RemoteIdentity(cfg) != config.RemoteIdentity(c.o.Store.Get()) {
 		return
 	}
 	if name == "pair.status" {
 		c.acceptPairState(cfg, data)
+		return
+	}
+	if name == "hello" || name == "heartbeat" {
+		current := c.o.Store.Get()
+		// Creating the first local QR adds a binding ID while this authenticated
+		// station stream is still open. Its pre-claim scope cannot authorize the
+		// new identity, but reconnecting here makes the displayed QR temporarily
+		// unusable. Keep the stream until the matching claim is accepted; that
+		// transition reconnects before publishing an authorized paired state.
+		if cfg.PhoneBindingID == "" && cfg.PhoneHash == "" && current.PhoneHash == "" &&
+			validPhoneHash(current.PhoneBindingID) && current.PhonePairPending == config.RemoteIdentity(cfg) &&
+			current.PhonePairAttempt != "" && current.PhonePairExpires > nowMS() {
+			return
+		}
+		var greeting struct {
+			EventScope         string `json:"eventScope"`
+			EventScopeRequired bool   `json:"eventScopeRequired"`
+		}
+		if json.Unmarshal([]byte(data), &greeting) == nil {
+			if err := c.acceptEventScope(cfg, greeting.EventScope, greeting.EventScopeRequired); err != nil {
+				c.log.Printf("hub: event scope unavailable: %v", err)
+				c.Kick()
+			}
+		}
 		return
 	}
 	if name != "command" && name != "" {
@@ -772,23 +1003,39 @@ func (c *Client) execute(env protocol.CommandEnvelope) {
 }
 
 func (c *Client) executeFor(env protocol.CommandEnvelope, cfg config.Config) {
-	if config.RemoteIdentity(cfg) != config.RemoteIdentity(c.o.Store.Get()) {
+	current := c.o.Store.Get()
+	if !current.HubRemoteEnabled() || cfg.EffectiveRemoteMode() != current.EffectiveRemoteMode() || config.RemoteIdentity(cfg) != config.RemoteIdentity(current) {
 		return
 	}
-	// Leave time for /bridge/reply within the Hub's default 45 s deadline.
-	ctx, cancel := context.WithTimeout(context.Background(), 38*time.Second)
-	defer cancel()
 	typ, _ := env.Command["type"].(string)
+	// Preserve Git's execution budget through the SSE entry point. The Hub
+	// leaves a reply margin (95 s for Git, 45 s for ordinary commands).
+	budget := 38 * time.Second
+	if typ == "workspace.git.read" || typ == "workspace.git.mutate" {
+		budget = 90 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), budget)
+	defer cancel()
 	stationSwitch := typ == "remote.station.switch"
+	dispatched := false
 	var res any
 	var err error
-	if env.DeviceID != cfg.DeviceID && (env.DeviceID != "" || cfg.RemoteDeviceOnly) || typ != "device.ping" && (!phoneMatches(c.o.Store.Get(), env.BindingID, env.PhoneHash) || !c.canUpload(c.o.Store.Get())) {
+	if env.DeviceID != cfg.DeviceID && (env.DeviceID != "" || cfg.RemoteDeviceOnly) || typ != "device.ping" && (!c.commandPhoneMatches(c.o.Store.Get(), env.BindingID, env.PhoneHash, env.EventScope) || !c.canUpload(c.o.Store.Get()) || !c.commandEventScopeValid(cfg, env.EventScope)) {
 		err = errors.New("手机绑定已失效，请重新扫码")
+	} else if err = c.refreshExecutionStation(ctx, cfg, env); err != nil {
+		// A changed policy is fetched from this exact saved Hub, never a phone URL.
+	} else if err = c.validateExecutionSource(env); err != nil {
+		// The source contract is checked before Dispatch can select a worker,
+		// native companion, or relay account. This is the final local boundary
+		// that prevents an external process/config from being adopted remotely.
 	} else {
 		// Dispatch can wait for another task/API mutation. Freeze the identity
 		// observed at admission and re-check it after that wait, otherwise an old
 		// A command could run against the newly selected B station.
-		guarded := withCommandGuard(ctx, commandGuard{identity: config.RemoteIdentity(cfg), deviceID: cfg.DeviceID, bindingID: env.BindingID, phoneHash: env.PhoneHash})
+		guarded := withCommandGuard(ctx, commandGuard{identity: config.RemoteIdentity(cfg), deviceID: cfg.DeviceID, bindingID: env.BindingID, phoneHash: env.PhoneHash, eventScope: env.EventScope})
+		guarded = context.WithValue(guarded, eventScopeContextKey{}, env.EventScope)
+		guarded = withExecutionSource(guarded, env)
+		dispatched = true
 		res, err = c.Dispatch(guarded, env.Command)
 	}
 	// Recheck after long reads, before any private history leaves the computer.
@@ -799,15 +1046,26 @@ func (c *Client) executeFor(env protocol.CommandEnvelope, cfg config.Config) {
 	// active station.  Remember the commit separately so the old SSE is still
 	// kicked and the Bridge cannot remain attached to A forever.
 	stationCommitted := stationSwitch && identityChanged
-	if (!stationSwitch && identityChanged) || typ != "device.ping" && !stationSwitch && (!phoneMatches(c.o.Store.Get(), env.BindingID, env.PhoneHash) || !c.canUpload(c.o.Store.Get())) {
+	if (!stationSwitch && identityChanged) || typ != "device.ping" && !stationSwitch && (!c.commandPhoneMatches(c.o.Store.Get(), env.BindingID, env.PhoneHash, env.EventScope) || !c.canUpload(c.o.Store.Get()) || !c.commandEventScopeValid(cfg, env.EventScope)) {
 		res, err = nil, errors.New("手机绑定已失效，请重新扫码")
+		if dispatched {
+			// Kick clears live upload authorization before a same-binding stream
+			// reconnects. Neither that gap nor a real revoke can turn an already
+			// admitted write into proof of non-execution. Keep its receipt while
+			// withholding all result content from the old authorization scope.
+			err = commandDeliveryUncertainError{}
+		}
 	}
-	if stationSwitch && err == nil && !phoneMatches(c.o.Store.Get(), env.BindingID, env.PhoneHash) {
+	if stationSwitch && !c.commandPhoneMatches(c.o.Store.Get(), env.BindingID, env.PhoneHash, env.EventScope) {
 		res, err = nil, errors.New("手机绑定已失效，请重新扫码")
+		if dispatched {
+			err = commandDeliveryUncertainError{}
+		}
 	}
 	rep := protocol.Reply{DeviceID: cfg.DeviceID, CommandID: env.CommandID, OK: err == nil, Result: res}
 	if err != nil {
 		rep.Error = err.Error()
+		rep.Code = protocol.ExecutionErrorCode(err)
 		rep.Result = nil
 		c.log.Printf("command %s failed: %v", typ, err)
 	} else {
@@ -843,6 +1101,18 @@ func (c *Client) executeFor(env protocol.CommandEnvelope, cfg config.Config) {
 // Push queues an event for upload. Overflow drops oldest unsent events, keeps
 // the immutable in-flight prefix, and schedules bounded history-gap notices.
 func (c *Client) Push(ev protocol.Event) {
+	originalConfig := c.o.Store.Get()
+	originalScope := c.eventScopeFor(originalConfig)
+	c.observeWorkspaceEvent(ev)
+	if ev.Type == "features.changed" {
+		var valid bool
+		ev, valid = c.invalidateAgentFeatures(ev)
+		if !valid {
+			return
+		}
+	}
+	mediaContext := context.WithValue(context.Background(), eventScopeContextKey{}, originalScope)
+	decorateEventMediaWith(c.attachmentsForConfig(mediaContext, originalConfig), &ev)
 	if ev.TS == 0 {
 		ev.TS = nowMS()
 	}
@@ -857,27 +1127,96 @@ func (c *Client) Push(ev protocol.Event) {
 		c.inFlightRecovery = nil
 		c.clearRecoveryLocked()
 		c.queueConfig = cfg
+		c.queueEventScope = c.eventScopeFor(cfg)
+	}
+	if eventIdentity(cfg) != eventIdentity(originalConfig) || c.eventScopeFor(cfg) != originalScope || c.eventScopeRequired(cfg) && originalScope == "" {
+		c.recoveryGeneration++
+		c.recoveryAll = true
+		c.recoveryOverflow = c.recoveryGeneration
+		_ = c.persistOutboxLocked()
+		c.qmu.Unlock()
+		return
 	}
 	if !c.canUpload(cfg) && !(c.handoverAwaitingAuth.Load() && cfg.PhoneHash != "") {
 		c.qmu.Unlock()
 		return
 	}
 	weight := eventWeight(ev)
-	if weight > maxEventWeight || weight > c.o.QueueBytes {
+	if weight > eventWeightLimit(ev) || weight > c.o.QueueBytes {
 		c.noteDroppedLocked([]protocol.Event{ev})
-	} else if !c.coalesceSnapshotLocked(ev) {
+	} else if !c.coalesceFeatureChangeLocked(ev) && !c.coalesceSnapshotLocked(ev) {
 		c.queue = append(c.queue, ev)
 		c.queueBytes += weight
 	}
 	c.trimQueueLocked()
-	n := len(c.queue)
+	c.syncOutboxAttachmentPinsLocked()
+	if err := c.journalEventLocked(ev); err != nil {
+		c.noteDroppedLocked([]protocol.Event{ev})
+		c.log.Printf("hub: event journal failed: %v", err)
+	}
+	n := len(c.queue) - c.inFlight
 	c.qmu.Unlock()
-	if n >= c.o.FlushBatch {
+	if n >= c.o.FlushBatch || ev.Type == "features.changed" {
 		select {
 		case c.flushNow <- struct{}{}:
 		default:
 		}
 	}
+}
+
+// decorateEventMedia converts local provider paths into bounded refs before a
+// live or historical event can cross the hub boundary. Only explicit image
+// tool kinds (including the legacy read kind) are eligible; arbitrary tool
+// text is never interpreted as a path, preventing accidental file exfiltration.
+func decorateEventMedia(ev *protocol.Event) { decorateEventMediaWith(phoneAttachments, ev) }
+
+func decorateEventMediaWith(attachments *attachmentStore, ev *protocol.Event) {
+	if ev == nil || len(ev.Attachments) > 0 && len(ev.ImageData) == 0 {
+		return
+	}
+	if len(ev.ImageData) > 0 {
+		refs := make([]protocol.AttachmentRef, 0, len(ev.ImageData))
+		for _, data := range ev.ImageData {
+			if ref, ok := attachments.importBase64(ev.SessionKey, data); ok {
+				refs = append(refs, ref)
+				if len(refs) == 64 {
+					break
+				}
+			}
+		}
+		ev.ImageData = nil
+		if len(refs) > 0 {
+			ev.Attachments = append(ev.Attachments, refs...)
+		}
+		return
+	}
+	if ev.Type != "tool" || (ev.Kind != "read" && ev.Kind != "image_view" && ev.Kind != "image_generation") || ev.Detail == "" {
+		return
+	}
+	if strings.HasPrefix(ev.Detail, "image-base64:") {
+		ref, ok := attachments.importBase64(ev.SessionKey, strings.TrimPrefix(ev.Detail, "image-base64:"))
+		ev.Detail = ""
+		if ok {
+			ev.Attachments = []protocol.AttachmentRef{ref}
+		}
+		return
+	}
+	// Only image-view/generation paths are eligible. If the source has already
+	// disappeared, still remove the absolute path before serializing the event;
+	// a failed import must never turn a local filename into a phone-visible
+	// detail string.
+	if !filepath.IsAbs(ev.Detail) {
+		return
+	}
+	if _, image := imageMimeForPath(ev.Detail); !image {
+		return
+	}
+	ref, ok := attachments.importFile(ev.SessionKey, ev.Detail)
+	ev.Detail = ""
+	if !ok {
+		return
+	}
+	ev.Attachments = []protocol.AttachmentRef{ref}
 }
 
 // Only supersede a cumulative unsent snapshot in the trailing snapshot segment.
@@ -925,7 +1264,22 @@ func (c *Client) flushLoop(ctx context.Context) {
 		}
 		for {
 			c.qmu.Lock()
+			current := c.o.Store.Get()
+			if !current.HubRemoteEnabled() {
+				c.qmu.Unlock()
+				break
+			}
+			// A restart while another transport is active restores the same
+			// durable Hub outbox with that inactive mode. Resuming its exact
+			// identity updates admission flags without changing batch contents.
+			if eventIdentity(c.queueConfig) == eventIdentity(current) {
+				c.queueConfig = current
+			}
 			if c.stationSwitching.Load() {
+				c.qmu.Unlock()
+				break
+			}
+			if c.eventScopeRequired(c.queueConfig) && (c.eventScopeFor(c.queueConfig) == "" || c.queueEventScope != c.eventScopeFor(c.queueConfig)) {
 				c.qmu.Unlock()
 				break
 			}
@@ -938,7 +1292,11 @@ func (c *Client) flushLoop(ctx context.Context) {
 				n = uploadCount(c.queue)
 				upload, recoveryMarks := c.recoveryBatchLocked(c.queue[:n])
 				batchID := config.NewUUID()
-				payload, err := json.Marshal(map[string]any{"deviceId": c.queueConfig.DeviceID, "batchId": batchID, "events": upload})
+				envelope := map[string]any{"deviceId": c.queueConfig.DeviceID, "batchId": batchID, "events": upload}
+				if c.queueEventScope != "" {
+					envelope["eventScope"] = c.queueEventScope
+				}
+				payload, err := json.Marshal(envelope)
 				if err != nil {
 					c.qmu.Unlock()
 					c.log.Printf("hub: cannot encode event batch: %v", err)
@@ -947,11 +1305,17 @@ func (c *Client) flushLoop(ctx context.Context) {
 				c.inFlight, c.inFlightBatchID = n, batchID
 				c.inFlightPayload, c.inFlightRecovery = payload, recoveryMarks
 			}
+			if err := c.persistOutboxLocked(); err != nil {
+				c.qmu.Unlock()
+				c.log.Printf("hub: cannot persist event batch: %v", err)
+				break
+			}
 			n = c.inFlight
 			batch := append([]protocol.Event(nil), c.queue[:n]...)
 			batchID := c.inFlightBatchID
 			payload, recoveryMarks := c.inFlightPayload, c.inFlightRecovery
 			cfg := c.queueConfig
+			frozenScope := c.queueEventScope
 			c.qmu.Unlock()
 			if eventIdentity(cfg) != eventIdentity(c.o.Store.Get()) || !c.canUpload(cfg) {
 				// The active identity is already B, but its authenticated pair.status
@@ -975,7 +1339,11 @@ func (c *Client) flushLoop(ctx context.Context) {
 			}
 
 			pctx, cancel := context.WithTimeout(ctx, 20*time.Second)
-			err := c.postFor(pctx, cfg, "/bridge/events", payload)
+			pctx = context.WithValue(pctx, eventScopeContextKey{}, frozenScope)
+			err := c.uploadBatchAttachments(pctx, cfg, batch)
+			if err == nil {
+				err = c.postFor(pctx, cfg, "/bridge/events", payload)
+			}
 			cancel()
 			if err != nil {
 				// Keep the prefix, exact serialized payload and recovery marks
@@ -1011,7 +1379,15 @@ func (c *Client) flushLoop(ctx context.Context) {
 			c.inFlightBatchID = ""
 			c.inFlightPayload = nil
 			c.inFlightRecovery = nil
+			c.syncOutboxAttachmentPinsLocked()
+			if err := c.persistOutboxLocked(); err != nil {
+				c.log.Printf("hub: event acknowledgement persistence failed: %v", err)
+			}
+			waitForBatch := len(c.queue) < c.o.FlushBatch && len(c.recovery) == 0
 			c.qmu.Unlock()
+			if waitForBatch {
+				break
+			}
 		}
 	}
 }

@@ -37,7 +37,7 @@ func ClaudeDesktopModelRoute(model string) string {
 func ClaudeDesktopCatalog(a LocalAccount) ([]string, map[string]string) {
 	routes, labels, seen := []string{}, map[string]string{}, map[string]bool{}
 	for _, model := range a.Models {
-		if !ValidCatalogModel(model) || seen[model] {
+		if !ValidCatalogModel(model) || !ModelAllowed(a, model) || seen[model] {
 			continue
 		}
 		seen[model] = true
@@ -53,7 +53,7 @@ func ResolveClaudeDesktopModel(a LocalAccount, route string) (string, bool) {
 	model, ok := labels[route]
 	if !ok {
 		for _, original := range a.Models {
-			if route == original && ValidCatalogModel(original) {
+			if route == original && ValidCatalogModel(original) && ModelAllowed(a, original) {
 				return original, true
 			}
 		}

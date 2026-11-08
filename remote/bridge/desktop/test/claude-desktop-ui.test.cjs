@@ -1,167 +1,109 @@
+'use strict';
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const fs = require('node:fs');
-const path = require('node:path');
 const vm = require('node:vm');
-const code = fs.readFileSync(path.resolve(__dirname, '../../internal/console/web/claude-desktop.js'), 'utf8');
+const { setup, deferred } = require('./helpers/workbench.cjs');
+const fixture = options => setup({ claude: true, ...options });
+const ready = f => { f.document.getElementById('cdReady').checked = true; };
 
-function fixture() {
-  const elements = new Map();
-  let modalContent = '';
-  elements.set('#modalRoot', { get innerHTML() { return modalContent; }, set innerHTML(value) {
-    modalContent = value;
-    if (value.includes('id="cdTitle"')) elements.set('#cdTitle', {}); else elements.delete('#cdTitle');
-    if (value.includes('id="cdModel"')) elements.set('#cdModel', { value: 'claude-sonnet-fixture' }); else elements.delete('#cdModel');
-    if (value.includes('id="cdOverride"')) elements.set('#cdOverride', { checked: /id="cdOverride"[^>]*checked/.test(value) }); else elements.delete('#cdOverride');
-  } });
-  const calls = [], notices = [];
-  const account = { id: 'shared', name: '<Shared API>', baseUrl: 'https://relay.invalid/v1', models: ['gpt-fixture', 'claude-sonnet-fixture', 'grok-fixture', 'deepseek-chat'], wire: 'auto' };
-  const state = { local: { accounts: [account], bindings: { 'claude-desktop': { accountId: 'shared', model: 'gpt-fixture' } } } };
-  let listener;
-  let status = { supported: true, managed: false, mode: 'standard', requiresModeChange: true, message: '首次使用不同本地聊天库' };
-  const $ = (selector) => elements.get(selector);
-  const context = vm.createContext({
-    S: state, $, ACTIONS: { wbOpen: async () => calls.push(['legacy-open']), localRestore: async () => calls.push(['legacy-restore']) },
-    modelsOf: (a) => a?.models || [], bindingFor: () => state.local.bindings['claude-desktop'],
-    accountFor: (id) => state.local.accounts.find((a) => a.id === id),
-    esc: (s) => String(s ?? '').replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('"', '&quot;'),
-    icon: () => '', wbHost: (url) => new URL(url).host, remoteLampHTML: (lamp) => `<span>${lamp.label}</span>`, desktopRemoteLamp: () => ({ state: 'off', label: '手机远程未连接' }),
-    api: async (endpoint, input) => {
-      calls.push([endpoint, input]);
-      if (endpoint.endsWith('/status')) return status;
-      if (endpoint === '/api/local/accounts') return state.local;
-      if (endpoint.endsWith('/models')) return { models: account.models };
-      if (endpoint.endsWith('/switch')) return { ok: true };
-      if (endpoint.endsWith('/restore')) return { ok: true };
-      throw new Error('Unexpected preview endpoint');
-    },
-    busy: async (_button, action) => action(), toast: (...args) => notices.push(args),
-    renderAgentCards: () => {}, confirm: () => { throw new Error('Unexpected extra confirmation'); },
-    wbBind: async (_target, patch) => { calls.push(['bind', patch]); if ('id' in patch) state.local.bindings['claude-desktop'].accountId = patch.id; if ('override' in patch) state.local.bindings['claude-desktop'].override = patch.override; },
-    wbNewAccount: () => calls.push(['new-account']),
-    document: { addEventListener: (_name, fn) => { listener = fn; } },
-  });
-  vm.runInContext(`${code}\nthis.testCD = { cdOpen, cdModels, wbClaudeDesktopCard, CD };`, context);
-  return { context, calls, notices, account, elements, state, setStatus: (value) => { status = value; },
-    html: () => modalContent, listener: async (value) => listener({ target: { value, hasAttribute: (name) => name === 'data-cd-key' } }),
-    toggle: async (checked) => listener({ target: { checked, hasAttribute: (name) => name === 'data-cd-override' } }) };
-}
-
-test('Claude Desktop shares named API vault, distinguishes actual desktop remote capability and does not claim native chat control', () => {
+test('Claude Desktop card keeps original styling and dedicated restore route', async () => {
   const f = fixture();
-  const html = f.context.testCD.wbClaudeDesktopCard({ available: true });
-  assert.match(html, /data-cd-key/); assert.match(html, /&lt;Shared API>/);
-  assert.match(html, /手机远程未连接/); assert.match(html, /同一个第三方聊天库/);
-  assert.doesNotMatch(html, /手机可继续|手动设置|data-act="wbOpenGo"/);
+  const html = f.wbCard(f.S.local.tools.find(t => t.id === 'claude-desktop'));
+  assert.match(html, /data-cd-key/); assert.match(html, /同一个第三方聊天库/);
+  assert.doesNotMatch(html, /data-act="wbOpenGo"/);
+  f.context.route = async () => {};
+  await f.ACTIONS.localRestore({ dataset: { kind: 'claude-desktop' } });
+  assert.equal(f.calls.some(c => c.url === '/api/local/claude-desktop/restore'), true);
 });
 
-test('both the Agent card and advanced backup button use the dedicated Claude Desktop restore', async () => {
-  const f = fixture(); f.context.confirm = () => true;
-  await f.context.ACTIONS.localRestore({ dataset: { kind: 'claude-desktop' } });
-  assert.equal(f.calls.some(([endpoint]) => endpoint === '/api/local/claude-desktop/restore'), true);
-  assert.equal(f.calls.some(([endpoint]) => endpoint === 'legacy-restore'), false);
-  await f.context.ACTIONS.localRestore({ dataset: { kind: 'codex' } });
-  assert.equal(f.calls.at(-1)[0], 'legacy-restore');
+test('Claude selection checks capability without saving or launching; cancellation leaves binding intact', async () => {
+  const f = fixture();
+  await f.change('claude-desktop', 'api-shared');
+  assert.match(f.modal.innerHTML, /打开 Claude Desktop/);
+  assert.match(f.modal.innerHTML, /配置并打开/);
+  assert.equal(f.document.getElementById('cdReady').checked, false);
+  assert.equal(f.button('cdGo').disabled, true);
+  assert.equal(f.calls.filter(c => c.body).length, 0);
+  assert.equal(f.backend.bindings['claude-desktop'].accountId, '');
+  f.ACTIONS.closeModal(f.button('closeModal'), { target: { closest: () => null } });
+  assert.equal(f.modal.innerHTML, '');
 });
 
-test('selecting an API opens configuration only; no launch, extra confirmation or model picker', async () => {
-  const f = fixture(); await f.listener('shared');
-  assert.match(f.html(), /打开 Claude Desktop/); assert.match(f.html(), /配置并打开/);
-  assert.match(f.html(), /刷新模型|覆盖 Claude 的模型菜单/);
-  for (const model of f.account.models) assert.ok(f.html().includes(model));
-  assert.doesNotMatch(f.html(), /id="cdModel"|默认模型|allowModeChange.*checkbox/);
-  assert.equal(f.calls.filter(([endpoint]) => endpoint.endsWith('/switch')).length, 0);
-  assert.equal(f.calls[0][0], 'bind');
+test('unbound and non-callable Claude choices show the selected placeholder', () => {
+  const f = fixture(), tool = f.S.local.tools.find(t => t.id === 'claude-desktop');
+  assert.match(f.wbCard(tool), /<option value="" disabled selected>选择 API 密钥/);
+  f.S.local.accounts.push({ id: 'web-only', libraryOnly: true, name: 'Website login' });
+  f.S.local.bindings['claude-desktop'].accountId = 'web-only';
+  const html = f.wbCard(tool);
+  assert.match(html, /<option value="" disabled selected>选择 API 密钥/);
+  assert.match(html, /data-act="cdOpen" disabled/);
+  assert.doesNotMatch(html, /value="web-only"/);
 });
 
-test('explicit configure-and-open posts to dedicated 3P transaction and not CLI or legacy switch', async () => {
-  const f = fixture(); await f.context.testCD.cdOpen();
-  await f.context.ACTIONS.cdGo({ dataset: { id: 'shared' } });
-  const mutations = f.calls.filter(([endpoint]) => endpoint.endsWith('/switch'));
-  assert.equal(mutations.length, 1); assert.equal(mutations[0][0], '/api/local/claude-desktop/switch');
-  assert.equal('model' in mutations[0][1], false);
-  assert.equal(mutations[0][1].confirmed, true); assert.equal(mutations[0][1].allowModeChange, true);
-  assert.equal(mutations[0][1].catalogOverride, true);
-  assert.equal(f.html(), ''); assert.equal(f.calls.some(([name]) => name === 'legacy-open'), false);
+test('explicit Claude confirmation uses the dedicated source-bound transaction once', async () => {
+  const gate = deferred(), f = fixture({ onSwitch: () => gate.promise });
+  await f.change('claude-desktop', 'api-shared'); ready(f);
+  const button = f.button('cdGo');
+  const first = f.ACTIONS.cdGo(button);
+  await Promise.resolve(); await Promise.resolve();
+  const second = f.ACTIONS.cdGo(button);
+  gate.resolve(); await Promise.all([first, second]);
+  const writes = f.calls.filter(c => c.url.endsWith('/switch'));
+  assert.equal(writes.length, 1);
+  assert.equal(writes[0].url, '/api/local/claude-desktop/switch');
+  assert.deepEqual(writes[0].body, { id: 'api-shared', confirmed: true, allowModeChange: true, catalogOverride: true, expectedSourceRevision: 'src-v1-' + 'a'.repeat(64) });
+  assert.equal(f.calls.some(c => c.url === '/api/local/bind'), false);
+  assert.equal(f.modal.innerHTML, '');
 });
 
-test('unknown version or managed configuration remains disabled and cannot send switch', async () => {
+test('unsupported or managed Claude configuration cannot launch', async () => {
   for (const status of [{ supported: false }, { supported: true, managed: true }]) {
-    const f = fixture(); f.setStatus(status); await f.context.testCD.cdOpen();
-    assert.match(f.html(), /data-act="cdGo"[^>]*disabled/);
-    await f.context.ACTIONS.cdGo({ dataset: { id: 'shared' } });
-    assert.equal(f.calls.some(([endpoint]) => endpoint.endsWith('/switch')), false);
+    const f = fixture({ onStatus: () => status });
+    await f.change('claude-desktop', 'api-shared'); ready(f);
+    await f.ACTIONS.cdGo(f.button('cdGo'));
+    assert.equal(f.calls.some(c => c.url.endsWith('/switch')), false);
   }
 });
 
-test('cancelled configuration cannot be resurrected by a late capability response', async () => {
+test('late Claude status and catalog reads cannot reopen a closed dialog', async () => {
+  for (const kind of ['status', 'models']) {
+    const gate = deferred(), f = fixture(kind === 'status' ? { onStatus: () => gate.promise } : { onModels: () => gate.promise });
+    let request = f.change('claude-desktop', 'api-shared');
+    if (kind === 'models') { await request; request = f.ACTIONS.cdLoad(f.button('cdLoad')); }
+    else { await Promise.resolve(); await Promise.resolve(); }
+    f.ACTIONS.closeModal(f.button('closeModal'), { target: { closest: () => null } });
+    gate.resolve({ supported: true }); await request;
+    assert.equal(f.modal.innerHTML, '');
+    assert.equal(f.calls.some(c => c.url.endsWith('/switch')), false);
+  }
+});
+
+test('Claude menu preference is a draft until explicit confirmation and preserves model metadata', async () => {
   const f = fixture();
-  let finish;
-  f.context.api = (endpoint) => { assert.match(endpoint, /status$/); return new Promise((resolve) => { finish = resolve; }); };
-  const pending = f.context.testCD.cdOpen();
-  f.elements.get('#modalRoot').innerHTML = '';
-  finish({ supported: true }); await pending;
-  assert.equal(f.html(), '');
+  f.backend.accounts[0].model = 'grok-test';
+  await f.change('claude-desktop', 'api-shared');
+  const draft = f.WB.accountOpen;
+  for (const listener of f.document.listeners.get('change')) await listener({ target: { id: 'cdOverride', dataset: {}, checked: false, hasAttribute: name => name === 'data-cd-override' } });
+  assert.equal(draft.override, false);
+  assert.equal(f.calls.filter(c => c.body).length, 0);
+  await f.ACTIONS.cdLoad(f.button('cdLoad'));
+  assert.equal(f.WB.accountOpen.override, false);
+  assert.match(f.modal.innerHTML, /grok-test/);
+  ready(f); await f.ACTIONS.cdGo(f.button('cdGo'));
+  const mutation = f.calls.find(c => c.url === '/api/local/claude-desktop/switch');
+  assert.equal(mutation.body.catalogOverride, false);
+  assert.equal('model' in mutation.body, false);
+  assert.equal(f.backend.accounts[0].model, 'grok-test');
 });
 
-test('empty selection only saves selection, and new API path does not launch', async () => {
-  const f = fixture(); await f.listener('');
-  assert.equal(f.html(), ''); assert.equal(f.calls.length, 1);
-  await f.listener('__new'); assert.equal(f.calls.at(-1)[0], 'new-account');
-  assert.equal(f.calls.some(([endpoint]) => endpoint.endsWith('/switch')), false);
-});
-
-test('a non-Anthropic upstream can configure through the dedicated local translator', async () => {
-  const f = fixture(); f.account.wire = 'responses'; await f.context.testCD.cdOpen();
-  assert.doesNotMatch(f.html(), /data-act="cdGo"[^>]*disabled/);
-  await f.context.ACTIONS.cdGo({ dataset: { id: 'shared' } });
-  assert.equal(f.calls.some(([endpoint]) => endpoint.endsWith('/switch')), true);
-});
-
-test('saved model metadata is not exposed or overwritten by configuration-and-open', async () => {
-  const f = fixture(); f.state.local.bindings['claude-desktop'].model = 'claude-private-fixture';
-  await f.context.testCD.cdOpen();
-  assert.doesNotMatch(f.html(), /claude-private-fixture|cdModel|默认模型/);
-  await f.context.ACTIONS.cdGo({ dataset: { id: 'shared' } });
-  assert.equal(f.state.local.bindings['claude-desktop'].model, 'claude-private-fixture');
-});
-
-test('refresh includes DeepSeek and every returned model, without launching or picking a default', async () => {
-  const f = fixture(); await f.context.testCD.cdOpen();
-  const api = f.context.api;
-  f.context.api = async (endpoint, input) => {
-    if (endpoint === '/api/local/models') f.account.models = ['deepseek-chat', 'grok-fresh', 'claude-sonnet-fixture'];
-    return api(endpoint, input);
-  };
-  await f.context.ACTIONS.cdLoad({ dataset: { id: 'shared' } });
-  assert.match(f.html(), /可用模型 · 3/);
-  for (const model of f.account.models) assert.ok(f.html().includes(model));
-  assert.doesNotMatch(f.html(), /gpt-fixture|默认模型|id="cdModel"/);
-  assert.equal(f.calls.filter(([endpoint]) => endpoint === '/api/local/models').length, 1);
-  assert.equal(f.calls.some(([endpoint]) => endpoint.endsWith('/switch')), false);
-});
-
-test('turning menu override off saves preference, and opening sends false without erasing models', async () => {
-  const f = fixture(); await f.context.testCD.cdOpen();
-  f.elements.get('#cdOverride').checked = false;
-  await f.toggle(false);
-  assert.equal(f.state.local.bindings['claude-desktop'].override, false);
-  assert.equal(f.calls.some(([endpoint]) => endpoint.endsWith('/switch')), false);
-  await f.context.testCD.cdOpen();
-  assert.equal(f.elements.get('#cdOverride').checked, false);
-  await f.context.ACTIONS.cdGo({ dataset: { id: 'shared' } });
-  assert.equal(f.calls.find(([endpoint]) => endpoint.endsWith('/switch'))[1].catalogOverride, false);
-  assert.ok(f.account.models.includes('deepseek-chat'));
-});
-
-test('cancelled model refresh cannot reopen the configuration dialog', async () => {
-  const f = fixture(); await f.context.testCD.cdOpen();
-  const api = f.context.api;
-  let finish;
-  f.context.api = (endpoint, input) => endpoint === '/api/local/models'
-    ? new Promise((resolve) => { finish = resolve; }) : api(endpoint, input);
-  const pending = f.context.ACTIONS.cdLoad({ dataset: { id: 'shared' } });
-  f.elements.get('#modalRoot').innerHTML = '';
-  finish({ models: f.account.models }); await pending;
-  assert.equal(f.html(), '');
+test('Claude capability read failure has a recoverable recheck action', async () => {
+  let fail = true;
+  const f = fixture({ onStatus: () => { if (fail) throw new Error('status unavailable'); return { supported: true }; } });
+  await f.change('claude-desktop', 'api-shared');
+  assert.match(f.modal.innerHTML, /status unavailable/);
+  assert.match(f.modal.innerHTML, /重新检查/);
+  fail = false; await f.ACTIONS.wbRecheck();
+  assert.equal(f.WB.accountOpen.verified, true);
+  assert.equal(f.WB.accountOpen.status.supported, true);
+  assert.equal(f.document.getElementById('cdReady').checked, false);
 });

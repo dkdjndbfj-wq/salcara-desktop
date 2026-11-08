@@ -48,6 +48,12 @@ type claudeElicitationLease struct {
 	once  sync.Once
 }
 
+func (lease *claudeElicitationLease) revoke() {
+	if lease != nil {
+		lease.once.Do(func() { close(lease.done) })
+	}
+}
+
 func (a *claudeAgent) prepareElicitationHook(exe string, settings Settings, id, cwd string) (*claudeElicitationLease, string) {
 	if settings.LocalPort <= 0 || settings.LocalPort > 65535 {
 		return nil, ""
@@ -94,7 +100,7 @@ func (a *claudeAgent) revokeElicitationHook(id string, lease *claudeElicitationL
 		delete(a.elicitationHooks, id)
 	}
 	a.mu.Unlock()
-	lease.once.Do(func() { close(lease.done) })
+	lease.revoke()
 }
 
 func (a *claudeAgent) activeElicitationLease(id string, lease *claudeElicitationLease) bool {
@@ -185,6 +191,7 @@ func (a *claudeAgent) answerElicitation(r *http.Request, req claudeElicitationRe
 		return claudeElicitationResult("decline", nil)
 	}
 	ev := questionEvent("mcp-form", form.questions, "MCP · "+req.Server, req.Message, lease.cwd)
+	ev.ApprovalOptions = &protocol.ApprovalOptions{Version: 1, Decisions: []string{"allow", "deny"}}
 	validate := func(answers map[string][]string) error {
 		// No agent mutex here: the approval registry validates under its own
 		// mutex, while session decoration acquires locks in the opposite order.
@@ -200,9 +207,16 @@ func (a *claudeAgent) answerElicitation(r *http.Request, req claudeElicitationRe
 		}
 		return form.validate(answers)
 	}
-	p, ev := a.aps.addValidatedRequest(sk, "claude", "", ev, validate)
+	p, ev := a.aps.addValidatedRequestForLifetimes(sk, "claude", "", ev, validate, lease.done, r.Context().Done())
+	if p == nil {
+		return claudeElicitationResult("cancel", nil)
+	}
+	if !a.activeElicitationLease(req.Session, lease) {
+		a.aps.remove(p.id)
+		return claudeElicitationResult("cancel", nil)
+	}
 	a.emit(ev)
-	a.setApprovalStatus(req.Session)
+	a.setElicitationApprovalStatus(req.Session, lease)
 	stop := make(chan struct{})
 	finished := make(chan struct{})
 	go func() {
@@ -217,8 +231,13 @@ func (a *claudeAgent) answerElicitation(r *http.Request, req claudeElicitationRe
 	}()
 	ans := a.aps.wait(p, stop)
 	close(finished)
+	if r.Context().Err() != nil || !a.activeElicitationLease(req.Session, lease) {
+		ans = approvalAnswer{decision: "deny", by: "desktop", noReply: true}
+	}
 	a.emit(protocol.Event{SessionKey: sk, Type: "approval.resolved", ApprovalID: p.id, Decision: ans.decision, By: ans.by})
-	a.setApprovalStatus(req.Session)
+	if a.activeElicitationLease(req.Session, lease) {
+		a.setElicitationApprovalStatus(req.Session, lease)
+	}
 	if ans.decision == "allow" && r.Context().Err() == nil && a.activeElicitationLease(req.Session, lease) {
 		if content, err := form.content(ans.answers); err == nil {
 			return claudeElicitationResult("accept", content)
@@ -228,4 +247,17 @@ func (a *claudeAgent) answerElicitation(r *http.Request, req claudeElicitationRe
 		return claudeElicitationResult("cancel", nil)
 	}
 	return claudeElicitationResult("decline", nil)
+}
+
+func (a *claudeAgent) setElicitationApprovalStatus(id string, lease *claudeElicitationLease) {
+	if lease == nil {
+		return
+	}
+	a.mu.Lock()
+	p := a.procs[id]
+	current := !a.closed && p != nil && p.elicitationHook == lease && a.elicitationHooks[id] == lease
+	a.mu.Unlock()
+	if current {
+		a.setScopedApprovalStatus(p, lease)
+	}
 }

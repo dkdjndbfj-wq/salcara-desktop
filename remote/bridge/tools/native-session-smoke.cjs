@@ -9,9 +9,10 @@ const crypto = require('node:crypto');
 const readline = require('node:readline');
 const { spawn } = require('node:child_process');
 const bridgeRoot = path.resolve(__dirname, '..');
-const [codexExe, gatewayExe, bridgeExe] = process.argv.slice(2);
-for (const exe of [codexExe, gatewayExe, bridgeExe]) assert(exe && path.isAbsolute(exe) && fs.existsSync(exe), 'explicit executable paths required');
+const [codexExe, gatewayExe, bridgeExe, hubExe] = process.argv.slice(2);
+for (const exe of [codexExe, gatewayExe, bridgeExe, hubExe]) assert(exe && path.isAbsolute(exe) && fs.existsSync(exe), 'explicit executable paths required');
 assert(path.resolve(bridgeExe).startsWith(path.join(bridgeRoot, 'output') + path.sep), 'only a fixture Bridge binary may be used');
+assert(path.resolve(hubExe).startsWith(path.join(bridgeRoot, 'output') + path.sep), 'only a fixture Hub binary may be used');
 assert(path.resolve(gatewayExe) === path.join(bridgeRoot, 'output', 'protocol-smoke.exe'), 'only the loopback synthetic gateway is allowed');
 const port = Number(process.env.SALCARA_NATIVE_SESSION_TEST_PORT || 47842);
 assert(Number.isInteger(port) && port >= 47840 && port <= 47900, 'explicit fixture-only port range required');
@@ -20,9 +21,10 @@ const consoleURL = `http://127.0.0.1:${port}`;
 const model = 'non-openai-fixture', apiKey = 'synthetic-loopback-credential';
 const firstPrompt = 'NATIVE_SESSION_FIRST_MARKER: This is a fixture-only first turn, preserve it in the original thread. Reply only.';
 const phonePrompt = 'NATIVE_SESSION_PHONE_MARKER: Continue this SAME original thread through the paired-phone fixture. Any supplied synthetic tool is restricted to this fixture project.';
-let phase = 'prepare', fixture, gateway, producer, bridge, cookie = '', phoneToken = '', deviceId = '', ownsConsole = false;
+let phase = 'prepare', fixture, gateway, producer, bridge, hub, cookie = '', phoneToken = '', deviceId = '', accountId = '', ownsConsole = false, gatewayBase = '', activeSessionKey = '';
 let sseAbort, streamTask, streamError;
 const phoneEvents = [], producerNotes = [], report = { paidModelRequests: 0, realPhoneCameraUsed: false, steps: [] };
+const answeredApprovals = new Set();
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 function passed(label) { report.steps.push(label); console.log(`PASS ${label}`); }
 function assertLoopback(value) { const url = new URL(value); assert.equal(url.protocol, 'http:'); assert.equal(url.hostname, '127.0.0.1'); return url; }
@@ -44,14 +46,15 @@ async function request(base, route, body, headers = {}) {
 const local = (route, body) => request(consoleURL, route, body, { Cookie: cookie, Origin: consoleURL });
 const phone = (route, body) => request(site, '/salcara-hub/v1' + route, body, phoneToken ? { 'X-Salcara-Pair-Token': phoneToken } : {});
 async function phoneCommand(command) {
-  const response = await phone('/app/commands', { deviceId, command });
+  const response = await phone('/app/commands', { deviceId, command, ...(command.operationId ? { requestId: command.operationId } : {}) });
   assert.equal(response.status, 200, `${command.type}: HTTP ${response.status}`);
   assert.equal(response.json.ok, true, `${command.type}: ${response.json.error || 'failed'}`);
   return response.json.result;
 }
 function spawnFixture(exe, args, env = process.env, cwd = bridgeRoot) {
   const child = spawn(exe, args, { env, cwd, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
-  child.stderr.resume();
+  child.fixtureStderr = '';
+  child.stderr.on('data', bytes => { child.fixtureStderr = (child.fixtureStderr + bytes.toString()).slice(-12000); });
   return child;
 }
 async function endOwnChild(child) {
@@ -87,16 +90,17 @@ async function pairActualQR() {
   const started = await local('/api/pair/start', {});
   assert.equal(started.status, 200); assert(started.json.qrUrl);
   const png = await local(started.json.qrUrl); assert.equal(png.status, 200);
-  const zxingRoot = path.resolve(bridgeRoot, '..', '..', 'node_modules', 'zxing-wasm');
+  const zxingRoot = path.join(bridgeRoot, 'output', 'single-scan-e2e-tools', 'node_modules', 'zxing-wasm');
   const decoder = require(path.join(zxingRoot, 'dist', 'cjs', 'reader', 'index.js'));
   await decoder.prepareZXingModule({ overrides: { wasmBinary: fs.readFileSync(path.join(zxingRoot, 'dist', 'reader', 'zxing_reader.wasm')) }, fireImmediately: true });
   const decoded = await decoder.readBarcodes(new Uint8Array(png.bytes), { formats: ['QRCode'] });
   assert.equal(decoded.length, 1);
   const qr = JSON.parse(decoded[0].text);
   assert.equal(qr.hubUrl, site + '/salcara-hub/v1'); assert.equal(qr.deviceId, deviceId);
-  const claim = await phone('/app/pair/qr', { deviceId, ticket: qr.ticket });
+  const claim = await phone('/app/pair/qr', { deviceId, ticket: qr.ticket, phoneId: crypto.randomBytes(32).toString('hex') });
   assert.equal(claim.status, 200); assert(/^[a-f0-9]{64}$/.test(claim.json.pair_token));
   phoneToken = claim.json.pair_token;
+  await poll('Bridge confirms physical phone binding', async () => (await local('/api/state')).json.hub.pairing?.paired === true);
 }
 async function startPhoneStream(sessionKey) {
   sseAbort = new AbortController();
@@ -115,13 +119,14 @@ async function startPhoneStream(sessionKey) {
           let event; try { event = JSON.parse(data); } catch { continue; }
           if (event.deviceId !== deviceId || event.sessionKey !== sessionKey) continue;
           phoneEvents.push(event);
-          if (event.type === 'approval.request') {
+          if (event.type === 'approval.request' && !answeredApprovals.has(event.approvalId)) {
             // Authorize only this known synthetic fixture operation, never an
             // arbitrary agent request accidentally routed to this test device.
             const expected = (event.kind === 'file_change' && JSON.stringify(event).includes('fixture-result.txt'))
               || (event.kind === 'command' && JSON.stringify(event).includes('Get-Location'));
             if (!expected) throw new Error('unexpected non-fixture approval request');
-            await phoneCommand({ type: 'approval.respond', approvalId: event.approvalId, decision: 'allow' });
+            await phoneCommand({ type: 'approval.respond', sessionKey, accountId, approvalId: event.approvalId, decision: 'allow' });
+            answeredApprovals.add(event.approvalId);
           }
         }
       }
@@ -133,19 +138,32 @@ async function startPhoneStream(sessionKey) {
   const deadline = setTimeout(() => { console.error(`TIMEOUT phase=${phase}`); producer?.kill(); if (ownsConsole) void local('/api/quit', {}); gateway?.kill(); process.exitCode = 1; }, 160_000);
   try {
     await freePort(port);
-    assert.equal((await request(site, '/salcara-hub/v1/ping')).json.protocolVersion, 1);
+    await freePort(Number(new URL(site).port));
     fixture = fs.mkdtempSync(path.join(bridgeRoot, 'output', 'native-session-smoke-'));
     assert(fixture.startsWith(path.join(bridgeRoot, 'output') + path.sep));
     for (const name of ['codex-home', 'claude-home', 'codex-app', 'claude-app', 'project', 'user-profile', 'appdata', 'localappdata', 'bridge-config']) fs.mkdirSync(path.join(fixture, name));
+    const hubRoot = process.env.SALCARA_NATIVE_SESSION_HUB_FIXTURE_ROOT;
+    if (hubRoot) assert(path.isAbsolute(hubRoot) && fs.statSync(hubRoot).isDirectory(), 'Hub fixture root must be an existing absolute directory');
+    const hubDir = hubRoot ? fs.mkdtempSync(path.join(hubRoot, 'salcara-codex-audit-hub-')) : path.join(fixture, 'hub');
+    if (!hubRoot) fs.mkdirSync(hubDir);
+    const disk = fs.statfsSync(hubDir), free = disk.bavail * disk.bsize;
+    const reserve = Math.max(disk.blocks * disk.bsize / 20, 2 * 1024 ** 3);
+    assert(free > reserve + 32 * 1024 ** 2, 'Hub fixture volume is below its production storage reserve; set SALCARA_NATIVE_SESSION_HUB_FIXTURE_ROOT to a volume with enough space');
+    report.hubFixture = hubDir;
+    const enrollmentClaim = crypto.randomBytes(32).toString('hex');
+    fs.writeFileSync(path.join(hubDir, 'device-enrollment-claims.json'), JSON.stringify({ version: 1, claims: [{ hash: crypto.createHash('sha256').update(Buffer.from(enrollmentClaim, 'hex')).digest('hex'), expiresAt: Date.now() + 3600000 }] }));
     const home = path.join(fixture, 'codex-home'), project = path.join(fixture, 'project'), configDir = path.join(fixture, 'bridge-config');
     const env = { ...process.env, CODEX_HOME: home, CLAUDE_CONFIG_DIR: path.join(fixture, 'claude-home'), CODEX_ELECTRON_USER_DATA_PATH: path.join(fixture, 'codex-app'), CLAUDE_USER_DATA_DIR: path.join(fixture, 'claude-app'), USERPROFILE: path.join(fixture, 'user-profile'), HOME: path.join(fixture, 'user-profile'), APPDATA: path.join(fixture, 'appdata'), LOCALAPPDATA: path.join(fixture, 'localappdata'), OPENAI_API_KEY: apiKey, OPENAI_BASE_URL: '', SUB2API_API_KEY: '', ANTHROPIC_API_KEY: '', ANTHROPIC_AUTH_TOKEN: '', ANTHROPIC_BASE_URL: '', SALCARA_BRIDGE_PORT: String(port), SALCARA_BRIDGE_CONFIG_DIR: configDir, SALCARA_EMBEDDED_WINDOW: '1', SALCARA_NO_SHELL_PATH: '1' };
+    for (const name of ['CODEX_TOOL_PIPE', 'CODEX_APP_TOOLS_PIPE_PATH', 'CODEX_TOOL_CALL_ID', 'CODEX_THREAD_ID', 'CODEX_TURN_ID']) delete env[name];
     gateway = spawnFixture(gatewayExe, ['chat']);
     const base = await new Promise((resolve, reject) => { const lines = readline.createInterface({ input: gateway.stdout }); lines.once('line', (line) => { lines.close(); resolve(line); }); gateway.once('error', reject); });
-    assertLoopback(base);
+    assertLoopback(base); gatewayBase = base;
     const apiRoot = base + '/gateway/codex';
+    hub = spawnFixture(hubExe, ['-listen', '127.0.0.1:' + new URL(site).port, '-data-dir', hubDir, '-public-url', apiRoot + '/salcara-hub']);
+    await poll('isolated Hub ready', async () => { try { return (await request(site, '/salcara-hub/v1/ping')).json.protocolVersion === 1; } catch { return false; } });
     fs.writeFileSync(path.join(home, 'config.toml'), `model = "${model}"\nmodel_provider = "openai"\nopenai_base_url = "${apiRoot}/v1"\ncli_auth_credentials_store = "file"\n`);
     fs.writeFileSync(path.join(home, 'auth.json'), JSON.stringify({ auth_mode: 'apikey', OPENAI_API_KEY: apiKey }));
-    const account = { id: 'native-fixture-api', name: 'Synthetic loopback API', kind: 'api', baseUrl: apiRoot, key: apiKey, model, models: [model], authMode: 'bearer', protocol: 'responses' };
+    const account = { id: 'native-fixture-api', name: 'Synthetic loopback API', kind: 'api', sourceType: 'api_key', wire: 'responses', baseUrl: apiRoot, key: apiKey, model, models: [model], authMode: 'bearer', protocol: 'responses' };
     const fingerprint = crypto.createHash('sha256').update(['codex', apiRoot, apiKey, model, 'bearer', 'responses'].join('\0')).digest('hex');
     fs.writeFileSync(path.join(configDir, 'config.json'), JSON.stringify({
       autostart: false, autostartDecided: true, openConsoleOnStart: false, deviceName: 'Native original-session fixture ' + path.basename(fixture),
@@ -162,7 +180,7 @@ async function startPhoneStream(sessionKey) {
     await rpc('initialize', { clientInfo: { name: 'salcara_external_native_fixture', version: '1.3.0' }, capabilities: { experimentalApi: true } });
     producer.stdin.write(JSON.stringify({ jsonrpc: '2.0', method: 'initialized' }) + '\n');
     const started = await rpc('thread/start', { model, modelProvider: 'openai', cwd: project, approvalPolicy: 'never', sandbox: 'workspace-write', ephemeral: false });
-    const threadId = started.thread.id, sessionKey = 'codex:' + threadId;
+    const threadId = started.thread.id, sessionKey = 'codex:' + threadId; activeSessionKey = sessionKey;
     await rpc('thread/name/set', { threadId, name: 'Native original-session phone acceptance fixture' });
     const turn = await rpc('turn/start', { threadId, input: [{ type: 'text', text: firstPrompt }] });
     assert.equal((await waitTurn(turn.turn.id)).status, 'completed');
@@ -171,6 +189,11 @@ async function startPhoneStream(sessionKey) {
     assert(JSON.stringify(initial).includes('Synthetic Grok-compatible reply'));
     assert(!producerNotes.some((item) => item.method === 'error'), 'producer transport retry/error');
     await endOwnChild(producer); assert(producer.exitCode !== null || producer.signalCode !== null);
+    // Retire the original synthetic credential. Successful phone execution
+    // must now use its explicitly selected vault source through Bridge.
+    const retiredAuth = JSON.stringify({ auth_mode: 'apikey', OPENAI_API_KEY: 'synthetic-retired-credential' });
+    fs.writeFileSync(path.join(home, 'auth.json'), retiredAuth);
+    env.OPENAI_API_KEY = 'synthetic-retired-credential';
     passed('Actual Codex app-server persisted completed first turn; producer exited; original thread ID recorded');
 
     phase = 'actual Bridge original history';
@@ -185,11 +208,19 @@ async function startPhoneStream(sessionKey) {
     passed('Actual Bridge read the independently-created original session and both first-turn messages from same HOME');
 
     phase = 'Hub pairing';
-    const connected = await local('/api/remote/discover', { url: site, connect: true }); assert.equal(connected.status, 200);
-    await poll('Hub device online', async () => (await local('/api/state')).json.hub.state === 'connected');
+    const connected = await local('/api/remote/discover', { url: site, connect: true, enrollmentClaim }); assert.equal(connected.status, 200);
+    await poll('Hub device online', async () => {
+      const state = (await local('/api/state')).json.hub;
+      report.lastHubState = { state: state.state, error: state.error, lastError: state.lastError };
+      return state.state === 'connected';
+    });
     const cfg = JSON.parse(fs.readFileSync(path.join(configDir, 'config.json'))); deviceId = cfg.deviceId;
     assert.equal(cfg.accountKey, ''); assert.equal(cfg.remoteDeviceOnly, true);
     await pairActualQR();
+    const status = await phoneCommand({ type: 'agents.status' });
+    assert.equal(status.apis.length, 1);
+    accountId = status.apis[0].id;
+    await phoneCommand({ type: 'agents.api.set', agent: 'codex', accountId, model });
     const phoneList = await phoneCommand({ type: 'sessions.list', tool: 'codex' }); assert(phoneList.sessions.some((item) => item.sessionKey === sessionKey));
     const phoneHistory = await phoneCommand({ type: 'session.open', sessionKey });
     assert(JSON.stringify(phoneHistory.events).includes('NATIVE_SESSION_FIRST_MARKER')); assert(JSON.stringify(phoneHistory.events).includes('Synthetic Grok-compatible reply'));
@@ -202,7 +233,8 @@ async function startPhoneStream(sessionKey) {
       return value.session.controllable && value.session.status === 'idle';
     }, 45_000);
     phase = 'paired phone continuation';
-    await phoneCommand({ type: 'session.send', sessionKey, text: phonePrompt });
+    await phoneCommand({ type: 'features.list', tool: 'codex', sessionKey, accountId, cwd: project });
+    await phoneCommand({ type: 'session.send', sessionKey, accountId, model, permissionMode: 'ask', text: phonePrompt });
     await poll('phone SSE turn completion', async () => {
       if (streamError) throw streamError;
       const failed = phoneEvents.find((event) => event.type === 'turn' && event.status === 'failed'); if (failed) throw new Error('remote turn failed: ' + failed.error);
@@ -211,6 +243,7 @@ async function startPhoneStream(sessionKey) {
     assert(phoneEvents.some((event) => event.type === 'message' && event.role === 'user' && event.text.includes('NATIVE_SESSION_PHONE_MARKER')));
     assert(phoneEvents.some((event) => event.type === 'message' && event.role === 'assistant' && event.final && event.text.includes('Synthetic Grok-compatible reply')));
     assert(!phoneEvents.some((event) => event.type === 'notice' && (event.level === 'error' || event.text.includes('重试'))), 'remote transport retry/error');
+    assert.equal(answeredApprovals.size, 1, 'fixture command must be approved through paired phone');
     const finalHistory = await phoneCommand({ type: 'session.open', sessionKey });
     assert.equal(finalHistory.session.sessionKey, sessionKey);
     for (const marker of ['NATIVE_SESSION_FIRST_MARKER', 'NATIVE_SESSION_PHONE_MARKER', 'Synthetic Grok-compatible reply']) assert(JSON.stringify(finalHistory.events).includes(marker), 'history lost: ' + marker);
@@ -222,18 +255,83 @@ async function startPhoneStream(sessionKey) {
     const stats = statsResponse.json || JSON.parse(statsResponse.bytes.toString()); assert(stats.modelOK); assert(stats.calls >= 2);
     passed('Paired-phone session.send resumed SAME native thread; app SSE delivered user echo, final assistant reply and completed turn');
     passed('Original first-turn history remains intact; exactly one session; no fork or replacement session');
-    Object.assign(report, { ok: true, fixture, threadId, sessionKey, deviceId, nativeProducerExitedBeforeBridge: true, bridgeReadOriginalHome: true, phoneTokenOnly: true, liveAssistantReplyReceived: true, originalHistoryPreserved: true, noFork: true, phoneSseEventTypes: [...new Set(phoneEvents.map((event) => event.type))], syntheticModelRequests: stats.calls, noTransportRetries: true });
+
+    phase = 'same-session exact turn stop';
+    await phoneCommand({ type: 'session.send', sessionKey, accountId, model, text: 'NATIVE_SESSION_STOP_MARKER: synthetic long-running request for exact-turn interruption.' });
+    const fixtureStats = async () => {
+      const value = await request(base, '/fixture-stats');
+      return value.json || JSON.parse(value.bytes.toString());
+    };
+    await poll('synthetic upstream sees stop fixture', async () => (await fixtureStats()).stopStarted);
+    const active = await phoneCommand({ type: 'session.open', sessionKey });
+    const expectedTurnId = active.session.activeTurnId;
+    assert(expectedTurnId, 'exact active turn required for stop');
+    const stopped = await phoneCommand({ type: 'session.interrupt', sessionKey, expectedTurnId, operationId: crypto.randomUUID() });
+    assert.equal(stopped.turnId, expectedTurnId);
+    assert(['requested', 'stopped', 'already_finished'].includes(stopped.status));
+    await poll('exact interrupted turn arrives through SSE', async () => phoneEvents.some(event => event.type === 'turn' && event.turnId === expectedTurnId && event.status === 'interrupted'));
+    await poll('upstream request canceled', async () => (await fixtureStats()).stopCanceled);
+    sseAbort.abort(); await streamTask;
+    await startPhoneStream(sessionKey);
+    const recovered = await phoneCommand({ type: 'session.open', sessionKey });
+    assert.equal(recovered.session.lastTerminalTurnId, expectedTurnId);
+    assert.equal(recovered.session.activeTurnId || '', '');
+    assert(JSON.stringify(recovered.events).includes('NATIVE_SESSION_FIRST_MARKER'));
+    passed('Paired phone interrupted the exact live Codex turn; upstream canceled; reconnected phone recovered terminal state and original history');
+    report.exactTurnStopped = true;
+    report.upstreamCancellationObserved = true;
+    report.reconnectHistoryVerified = true;
+    report.phoneApprovalsVerified = answeredApprovals.size;
+    phase = 'terminal continuation and receipt replay';
+    const continuationStartIndex = phoneEvents.length;
+    const earlierTurns = new Set([...phoneEvents, ...recovered.events].map(event => event.turnId).filter(Boolean));
+    const continuedCommand = { type: 'session.continue', sessionKey, accountId, model, permissionMode: 'ask', expectedTurnId, operationId: crypto.randomUUID(), text: 'NATIVE_SESSION_CONTINUE_MARKER: resume the same original conversation after the verified interruption.' };
+    const continued = await phoneCommand(continuedCommand);
+    assert.equal(continued.accepted, true);
+    assert.equal(continued.sessionKey, sessionKey);
+    assert.equal(continued.previousTurnId, expectedTurnId);
+    assert.equal(continued.operationId, continuedCommand.operationId);
+    let continuationTurnId;
+    await poll('continuation completed through SSE', async () => {
+      const done = phoneEvents.slice(continuationStartIndex).find(event => event.type === 'turn' && event.turnId && !earlierTurns.has(event.turnId) && event.turnId !== expectedTurnId && event.status === 'completed');
+      continuationTurnId = done?.turnId;
+      return Boolean(continuationTurnId);
+    });
+    if (continued.turnId) assert.equal(continued.turnId, continuationTurnId);
+    const callsBeforeReplay = (await fixtureStats()).calls;
+    assert.deepEqual(await phoneCommand(continuedCommand), continued);
+    assert.equal((await fixtureStats()).calls, callsBeforeReplay, 'replaying a receipt must not execute another model turn');
+    const continuedHistory = await phoneCommand({ type: 'session.open', sessionKey });
+    assert.equal(continuedHistory.session.sessionKey, sessionKey);
+    assert.equal(continuedHistory.session.lastTerminalTurnId, continuationTurnId);
+    assert(JSON.stringify(continuedHistory.events).includes('NATIVE_SESSION_CONTINUE_MARKER'));
+    passed('Terminal continuation kept the same conversation; replayed operation returned the same receipt without another model request');
+    report.terminalContinuationVerified = true;
+    report.continuedTurnId = continuationTurnId;
+    report.receiptReplayVerified = true;
+    stats.calls = (await fixtureStats()).calls;
+    assert.equal(fs.readFileSync(path.join(home, 'auth.json'), 'utf8'), retiredAuth, 'phone execution must not overwrite native authentication');
+    report.nativeAuthenticationUnchanged = true;
+    Object.assign(report, { ok: true, fixture, threadId, sessionKey, deviceId, nativeProducerExitedBeforeBridge: true, bridgeReadOriginalHome: true, phoneTokenOnly: true, liveAssistantReplyReceived: true, originalHistoryPreserved: true, noFork: true, phoneSseEventTypes: [...new Set(phoneEvents.map((event) => event.type))], syntheticModelRequests: stats.calls, noModelTransportRetryNotices: true });
     fs.writeFileSync(path.join(fixture, 'acceptance-report.json'), JSON.stringify(report, null, 2));
     console.log('RESULT complete: real native Codex -> actual Bridge -> actual Hub -> simulated paired-phone SSE; sanitized acceptance report saved');
   } catch (error) {
     console.error(`FAILED phase=${phase}: ${String(error.message || error).replace(/synthetic-[A-Za-z0-9-]*credential/g, '[fixture credential]')}`);
     process.exitCode = 1;
-    if (fixture) fs.writeFileSync(path.join(fixture, 'acceptance-report.json'), JSON.stringify({ ...report, ok: false, phase, fixture }, null, 2));
+    const diagnostics = {
+      error: String(error.message || error),
+      phoneEvents: phoneEvents.map(({ type, status, turnId, approvalId, kind, level, errorCode }) => ({ type, status, turnId, approvalId, kind, level, errorCode })),
+      answeredApprovals: answeredApprovals.size,
+      hubStderr: hub?.fixtureStderr,
+    };
+    if (gatewayBase) { try { const value = await request(gatewayBase, '/fixture-stats'); diagnostics.fixtureStats = value.json || JSON.parse(value.bytes.toString()); } catch {} }
+    if (phoneToken && activeSessionKey) { try { const value = await phoneCommand({ type: 'session.open', sessionKey: activeSessionKey }); diagnostics.session = { status: value.session.status, activeTurnId: value.session.activeTurnId, lastTerminalTurnId: value.session.lastTerminalTurnId }; } catch {} }
+    if (fixture) fs.writeFileSync(path.join(fixture, 'acceptance-report.json'), JSON.stringify({ ...report, ok: false, phase, fixture, diagnostics }, null, 2).replace(/synthetic-[A-Za-z0-9-]*credential/g, '[fixture credential]'));
   } finally {
     clearTimeout(deadline); sseAbort?.abort(); if (streamTask) await streamTask;
     if (phoneToken) { try { await phone('/app/pair/revoke', {}); } catch {} }
     if (bridge && ownsConsole) { try { await local('/api/quit', {}); } catch {} }
-    await endOwnChild(bridge); await endOwnChild(producer); await endOwnChild(gateway);
-    console.log('CLEANUP only own fixture processes stopped; shared Hub and original user Codex untouched');
+    await endOwnChild(bridge); await endOwnChild(producer); await endOwnChild(gateway); await endOwnChild(hub);
+    console.log('CLEANUP only own fixture processes stopped; original user Codex untouched');
   }
 })();

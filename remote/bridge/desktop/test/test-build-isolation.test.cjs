@@ -14,7 +14,7 @@ function inspect(version, initial = {}) {
       if (name === 'electron') return { app };
       if (name === './package.json') return { version };
       if (name === 'node:child_process') return { spawn() { throw new Error('Unexpected tool launch'); } };
-      return require(name);
+      return name.startsWith('./') ? require(path.resolve(__dirname, '..', name)) : require(name);
     } });
   vm.runInContext(source, context);
   return { env, paths, port: vm.runInContext('consolePort', context), title: vm.runInContext('appTitle', context) };

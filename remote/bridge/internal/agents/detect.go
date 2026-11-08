@@ -51,6 +51,9 @@ func candidatePaths(name string) []string {
 					filepath.Join(local, "Programs", app, "resources", "bin", "codex.exe"))
 			}
 		}
+		if name == "hermes" {
+			out = append(out, hermesInstallCandidates(home, filepath.Join(local, "hermes"), true)...)
+		}
 		return out
 	}
 	if runtime.GOOS == "darwin" && name == "codex" {
@@ -62,7 +65,38 @@ func candidatePaths(name string) []string {
 				filepath.Join(app, "Contents", "MacOS", "codex"))
 		}
 	}
+	if name == "hermes" {
+		out = append(out, hermesInstallCandidates(home, filepath.Join(home, ".hermes"), false)...)
+	}
 	return out
+}
+
+func hermesInstallCandidates(userHome, defaultHome string, windows bool) []string {
+	configured := strings.TrimSpace(os.Getenv("HERMES_HOME"))
+	if configured == "~" {
+		configured = userHome
+	} else if strings.HasPrefix(configured, "~/") || strings.HasPrefix(configured, "~\\") {
+		configured = filepath.Join(userHome, configured[2:])
+	}
+	var paths []string
+	for _, home := range []string{configured, defaultHome} {
+		if home == "" {
+			continue
+		}
+		if abs, err := filepath.Abs(home); err == nil {
+			home = abs
+		}
+		if windows {
+			for _, dir := range []string{filepath.Join(home, "bin"), filepath.Join(home, "hermes-agent", "venv", "Scripts"), filepath.Join(home, "venv", "Scripts"), filepath.Join(home, ".venv", "Scripts")} {
+				paths = append(paths, filepath.Join(dir, "hermes.exe"), filepath.Join(dir, "hermes.cmd"))
+			}
+		} else {
+			for _, dir := range []string{filepath.Join(home, "bin"), filepath.Join(home, "hermes-agent", "venv", "bin"), filepath.Join(home, "venv", "bin")} {
+				paths = append(paths, filepath.Join(dir, "hermes"))
+			}
+		}
+	}
+	return paths
 }
 
 // findExecutable resolves a tool: explicit override, PATH, then the well-known locations.

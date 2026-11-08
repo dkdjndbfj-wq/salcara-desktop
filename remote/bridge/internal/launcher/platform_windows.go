@@ -3,10 +3,12 @@
 package launcher
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -107,59 +109,377 @@ func copyTools(in map[string]Tool) map[string]Tool {
 func psLiteral(s string) string { return "'" + strings.ReplaceAll(s, "'", "''") + "'" }
 
 func startPlatform(ctx context.Context, p Plan) (int, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
 	if p.RuntimeDir == "" {
 		p.RuntimeDir = p.ProfileDir
 	}
 	if !isDesktop(p.Tool.ID) {
-		args := []string{}
-		for _, a := range p.Args {
-			args = append(args, psLiteral(a))
-		}
-		script := "$ErrorActionPreference = 'Stop'\nSet-Location -LiteralPath " + psLiteral(p.Workspace) + "\n& " + psLiteral(p.Tool.Path) + " " + strings.Join(args, " ") + "\nif ($LASTEXITCODE) { Write-Host ('Tool exited: ' + $LASTEXITCODE) }\n"
-		path := filepath.Join(p.RuntimeDir, "launch-cli.ps1")
-		if err := os.WriteFile(path, append([]byte{0xef, 0xbb, 0xbf}, []byte(script)...), 0o600); err != nil {
-			return 0, err
-		}
 		// exec.Cmd normally supplies NUL stdin/stdout. An interactive coding CLI
 		// needs real console handles, so let ShellExecute create its own console.
-		return startTerminal(ctx, p, path)
+		return startTerminal(ctx, p)
 	}
 	if p.Tool.Family == "" {
 		// A plain CreateProcess of a Store app loses its package identity. Fail closed.
 		if strings.Contains(strings.ToLower(p.Tool.Path), `\windowsapps\`) {
 			return 0, errors.New("无法识别商店应用的包身份，请清空自定义路径后重新检测")
 		}
-		return startDirect(p, false)
+		LaunchPhase(ctx, "start", "创建工具进程", "创建桌面应用进程")
+		return startDirectContext(ctx, p, false)
 	}
 	return startPackaged(ctx, p)
 }
 
-func startTerminal(ctx context.Context, p Plan, path string) (int, error) {
+func startTerminal(ctx context.Context, p Plan) (int, error) {
 	ctx, cancel := context.WithTimeout(ctx, 12*time.Second)
 	defer cancel()
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	id := config.RandomToken(8)
+	path := filepath.Join(p.RuntimeDir, ".launch-cli-"+id+".ps1")
+	statusPath := filepath.Join(p.RuntimeDir, ".launch-cli-"+id+".status")
+	defer os.Remove(path)
+	defer os.Remove(statusPath)
+	defer os.Remove(statusPath + ".tmp")
+	defer os.Remove(statusPath + ".started")
+	defer os.Remove(statusPath + ".started.tmp")
+	if err := os.WriteFile(path, append([]byte{0xef, 0xbb, 0xbf}, []byte(windowsCLILaunchScript(p, statusPath))...), 0o600); err != nil {
+		return 0, safeWindowsLaunchError("写入启动程序失败", err)
+	}
 	args := []string{"-NoLogo", "-NoProfile", "-NoExit", "-ExecutionPolicy", "Bypass", "-File", path}
 	quoted := []string{}
 	for _, arg := range args {
 		quoted = append(quoted, syscall.EscapeArg(arg))
 	}
-	script := "$ErrorActionPreference='Stop'; $psi=New-Object System.Diagnostics.ProcessStartInfo; $psi.FileName=" + psLiteral(powershell()) + "; $psi.Arguments=" + psLiteral(strings.Join(quoted, " ")) + "; $psi.WorkingDirectory=" + psLiteral(p.Workspace) + "; $psi.UseShellExecute=$true; $psi.WindowStyle='Normal'; $child=[System.Diagnostics.Process]::Start($psi); Write-Output $child.Id"
+	script := windowsLaunchExceptionScript + "\n$child=$null; try { $psi=New-Object System.Diagnostics.ProcessStartInfo; $psi.FileName=" + psLiteral(powershell()) + "; $psi.Arguments=" + psLiteral(strings.Join(quoted, " ")) + "; $psi.WorkingDirectory=" + psLiteral(p.Workspace) + "; $psi.UseShellExecute=$true; $psi.WindowStyle='Normal'; $child=[System.Diagnostics.Process]::Start($psi); @{state='shell';pid=$child.Id} | ConvertTo-Json -Compress } catch { if ($null -ne $child) { @{state='shell';pid=$child.Id} | ConvertTo-Json -Compress } else { New-LaunchFailure $_.Exception | ConvertTo-Json -Compress } }"
 	cmd := exec.CommandContext(ctx, powershell(), "-NoProfile", "-NonInteractive", "-Command", script)
 	cmd.Env = p.Environment
 	configureProcess(cmd, false)
-	b, err := cmd.Output()
+	LaunchPhase(ctx, "start", "创建工具进程", "打开交互终端并创建工具入口进程")
+	// After submission, a lost helper response cannot prove that no target was
+	// created. Claude's terminal supervisor then owns the pin's lifetime.
+	var output bytes.Buffer
+	cmd.Stdout = &output
+	if err := cmd.Start(); err != nil {
+		return 0, safeWindowsLaunchError("无法打开交互终端", err)
+	}
+	preserveUnconfirmed := p.ClaudeSettingsPin != ""
+	wait := func() (int, error) {
+		return waitWindowsLaunchReceiptWithPin(ctx, statusPath, "工具入口进程", preserveUnconfirmed)
+	}
+	err := cmd.Wait()
 	if err != nil {
-		return 0, errors.New("无法打开交互终端，请检查 PowerShell 和程序路径")
+		if ctx.Err() != nil || preserveUnconfirmed {
+			// Cancellation may race the helper's final stdout after the target
+			// has already produced its own receipt. Keep that process configured.
+			return wait()
+		}
+		return 0, safeWindowsLaunchError("无法打开交互终端", err)
 	}
-	pid, err := strconv.Atoi(strings.TrimSpace(string(b)))
-	if err != nil || pid <= 0 {
-		return 0, errors.New("终端没有返回启动确认")
+	receipt, err := parseWindowsLaunchReceipt(output.Bytes())
+	if err != nil {
+		if preserveUnconfirmed {
+			return wait()
+		}
+		return 0, errors.New("终端没有返回有效启动回执")
 	}
-	return pid, nil
+	if receipt.State == "failed" {
+		return 0, windowsLaunchReceiptError("无法打开交互终端", receipt)
+	}
+	if receipt.State != "shell" || receipt.PID <= 0 {
+		if preserveUnconfirmed {
+			return wait()
+		}
+		return 0, errors.New("终端没有返回有效启动回执")
+	}
+	// A shell PID proves only that the terminal was opened. Success requires a
+	// separate receipt from Process.Start for the selected executable itself.
+	return wait()
+}
+
+// Error messages are intentionally absent from the cross-process contract:
+// PowerShell exception text can include the entire script or credential args.
+// Native codes and known exception types retain actionable OS failure causes.
+const windowsLaunchExceptionScript = `$ErrorActionPreference = 'Stop'
+function New-LaunchFailure($exception) {
+  $base = $exception.GetBaseException()
+  $value = @{state='failed'; exception=[string]$base.GetType().FullName; hresult=[int]$base.HResult}
+  if ($base -is [System.ComponentModel.Win32Exception]) { $value.nativeCode = [uint32]$base.NativeErrorCode }
+  return $value
+}
+`
+
+func windowsLaunchReceiptScript(statusPath string) string {
+	return windowsLaunchExceptionScript + "$launchStatus = " + psLiteral(statusPath) + `
+function Write-LaunchReceipt($value) {
+  $destination = $launchStatus
+  if ($value.state -eq 'started') { $destination += '.started' }
+  if ([IO.File]::Exists($destination)) { return }
+  $temporary = $destination + '.tmp'
+  [IO.File]::WriteAllText($temporary, ($value | ConvertTo-Json -Compress))
+  [IO.File]::Move($temporary, $destination)
+}
+`
+}
+
+func windowsCLILaunchScript(p Plan, statusPath string) string {
+	argv := make([]string, 0, len(p.Args))
+	for _, arg := range p.Args {
+		argv = append(argv, syscall.EscapeArg(arg))
+	}
+	script := windowsLaunchReceiptScript(statusPath) + `$child = $null
+try {
+  $psi = New-Object System.Diagnostics.ProcessStartInfo
+  $psi.FileName = ` + psLiteral(p.Tool.Path) + `
+  $psi.Arguments = ` + psLiteral(strings.Join(argv, " ")) + `
+  $psi.WorkingDirectory = ` + psLiteral(p.Workspace) + `
+  $psi.UseShellExecute = $false
+  $psi.CreateNoWindow = $false
+  $psi.RedirectStandardInput = $false
+  $psi.RedirectStandardOutput = $false
+  $psi.RedirectStandardError = $false
+  $child = [System.Diagnostics.Process]::Start($psi)
+  Write-LaunchReceipt @{state='started';pid=$child.Id}
+  if ($child.WaitForExit(1200) -and $child.ExitCode -ne 0) {
+    Write-LaunchReceipt @{state='failed';pid=$child.Id;exitCode=[int]$child.ExitCode}
+  } else {
+    Write-LaunchReceipt @{state='ready';pid=$child.Id}
+    $child.WaitForExit()
+    if ($child.ExitCode -ne 0) { Write-Host ('Tool exited: ' + $child.ExitCode) }
+  }
+} catch {
+  $failure = New-LaunchFailure $_.Exception
+  if ($null -ne $child) { $failure.pid = $child.Id }
+  Write-LaunchReceipt $failure
+}
+`
+	if p.ClaudeSettingsPin != "" {
+		// A receipt write can fail after Process.Start. Keep the API pin until
+		// that child exits even when reporting/confirmation fails.
+		script += `finally {
+  if ($null -ne $child) { try { $child.WaitForExit() } catch {} }
+  Remove-Item -LiteralPath ` + psLiteral(p.ClaudeSettingsPin) + ` -Force -ErrorAction SilentlyContinue
+  try { [IO.Directory]::Delete(` + psLiteral(filepath.Dir(p.ClaudeSettingsPin)) + `, $false) } catch {}
+}
+`
+	}
+	return script
+}
+
+type windowsLaunchReceipt struct {
+	State      string  `json:"state"`
+	PID        int     `json:"pid,omitempty"`
+	ExitCode   *int32  `json:"exitCode,omitempty"`
+	NativeCode *uint32 `json:"nativeCode,omitempty"`
+	HResult    *int32  `json:"hresult,omitempty"`
+	Exception  string  `json:"exception,omitempty"`
+}
+
+func parseWindowsLaunchReceipt(data []byte) (windowsLaunchReceipt, error) {
+	var receipt windowsLaunchReceipt
+	if len(data) > 4096 {
+		return receipt, errors.New("invalid launch receipt")
+	}
+	dec := json.NewDecoder(strings.NewReader(strings.TrimPrefix(strings.TrimSpace(string(data)), "\ufeff")))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&receipt); err != nil {
+		return windowsLaunchReceipt{}, errors.New("invalid launch receipt")
+	}
+	if err := dec.Decode(new(any)); err != io.EOF {
+		return windowsLaunchReceipt{}, errors.New("invalid launch receipt")
+	}
+	if len(receipt.Exception) > 256 {
+		return windowsLaunchReceipt{}, errors.New("invalid launch receipt")
+	}
+	switch receipt.State {
+	case "shell", "started", "ready":
+		if receipt.PID <= 0 || receipt.ExitCode != nil || receipt.NativeCode != nil || receipt.HResult != nil || receipt.Exception != "" {
+			return windowsLaunchReceipt{}, errors.New("invalid launch receipt")
+		}
+	case "dispatched":
+		if receipt.PID != 0 || receipt.ExitCode != nil || receipt.NativeCode != nil || receipt.HResult != nil || receipt.Exception != "" {
+			return windowsLaunchReceipt{}, errors.New("invalid launch receipt")
+		}
+	case "failed":
+		if receipt.ExitCode != nil && (*receipt.ExitCode == 0 || receipt.PID <= 0) {
+			return windowsLaunchReceipt{}, errors.New("invalid launch receipt")
+		}
+	default:
+		return windowsLaunchReceipt{}, errors.New("invalid launch receipt")
+	}
+	return receipt, nil
+}
+
+func windowsLaunchReceiptError(label string, receipt windowsLaunchReceipt) error {
+	if receipt.ExitCode != nil {
+		return fmt.Errorf("%s启动后立即退出（退出码 %d，0x%08X）", label, *receipt.ExitCode, uint32(*receipt.ExitCode))
+	}
+	if receipt.NativeCode != nil && *receipt.NativeCode != 0 {
+		return fmt.Errorf("%s：%s（系统错误 %d）", label, strings.TrimSpace(syscall.Errno(*receipt.NativeCode).Error()), *receipt.NativeCode)
+	}
+	if receipt.HResult != nil && uint32(*receipt.HResult)&0xffff0000 == 0x80070000 {
+		code := uint32(*receipt.HResult) & 0xffff
+		return fmt.Errorf("%s：%s（系统错误 %d）", label, strings.TrimSpace(syscall.Errno(code).Error()), code)
+	}
+	reason := "系统无法执行启动操作"
+	switch receipt.Exception {
+	case "System.IO.FileNotFoundException", "System.Management.Automation.CommandNotFoundException":
+		reason = "没有找到程序或启动命令"
+	case "System.IO.DirectoryNotFoundException", "System.Management.Automation.ItemNotFoundException":
+		reason = "启动目录不存在"
+	case "System.UnauthorizedAccessException":
+		reason = "系统拒绝访问程序或启动目录"
+	case "System.ArgumentException":
+		reason = "启动参数无效"
+	case "System.InvalidOperationException":
+		reason = "进程启动状态无效"
+	}
+	if receipt.HResult != nil {
+		return fmt.Errorf("%s：%s（HRESULT 0x%08X）", label, reason, uint32(*receipt.HResult))
+	}
+	return fmt.Errorf("%s：%s", label, reason)
+}
+
+func safeWindowsLaunchError(label string, err error) error {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return fmt.Errorf("%s：%w", label, err)
+	}
+	var code syscall.Errno
+	if errors.As(err, &code) {
+		value := uint32(code)
+		return windowsLaunchReceiptError(label, windowsLaunchReceipt{NativeCode: &value})
+	}
+	var exit *exec.ExitError
+	if errors.As(err, &exit) {
+		return fmt.Errorf("%s（启动程序退出码 %d）", label, exit.ExitCode())
+	}
+	return fmt.Errorf("%s：系统无法执行启动操作", label)
+}
+
+func readWindowsLaunchReceipt(path string) (windowsLaunchReceipt, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return windowsLaunchReceipt{}, err
+	}
+	defer file.Close()
+	data, err := io.ReadAll(io.LimitReader(file, 4097))
+	if err != nil {
+		return windowsLaunchReceipt{}, err
+	}
+	return parseWindowsLaunchReceipt(data)
+}
+
+func waitWindowsLaunchReceipt(ctx context.Context, statusPath, label string) (int, error) {
+	return waitWindowsLaunchReceiptWithPin(ctx, statusPath, label, false)
+}
+
+func waitWindowsLaunchReceiptWithPin(ctx context.Context, statusPath, label string, preserveUnconfirmed bool) (int, error) {
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+	waitCtx := ctx
+	finish := func() {}
+	defer func() { finish() }()
+	createdPID := 0
+	created := func(pid int) {
+		if createdPID != 0 {
+			return
+		}
+		createdPID = pid
+		// Process.Start is irreversible. Once its receipt exists, a request
+		// cancellation must not turn a live process into a rollback. Finish
+		// only the short early-exit check, independently of the HTTP lifetime.
+		waitCtx, finish = context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
+		LaunchPhase(ctx, "confirm", "等待进程启动确认", "已创建"+label+"，检查是否立即退出")
+	}
+	keepCreated := func() (int, error) {
+		LaunchWarning(ctx, "confirm", "已创建"+label+"，但未收到完整启动检查回执；配置与授权已保留")
+		return createdPID, nil
+	}
+	keepUnconfirmed := func() (int, error) {
+		LaunchWarning(ctx, "confirm", "启动请求已提交，但进程状态未确认；配置与 API 设置已保留，请检查终端后再重试")
+		return 0, nil
+	}
+	for {
+		// Read receipts before cancellation: the helper can publish a target
+		// PID immediately before the request is disconnected or times out.
+		receipt, err := readWindowsLaunchReceipt(statusPath)
+		if err != nil || receipt.State == "failed" && receipt.ExitCode == nil {
+			started, startedErr := readWindowsLaunchReceipt(statusPath + ".started")
+			if startedErr == nil && started.State == "started" {
+				created(started.PID)
+			} else if startedErr != nil && !os.IsNotExist(startedErr) && os.IsNotExist(err) {
+				if createdPID > 0 {
+					return keepCreated()
+				}
+				if preserveUnconfirmed {
+					return keepUnconfirmed()
+				}
+				return 0, safeWindowsLaunchError("读取进程启动回执失败", startedErr)
+			}
+		}
+		if err == nil {
+			targetCreated := receipt.State == "started" || receipt.State == "ready" || receipt.State == "failed" && receipt.PID > 0
+			if targetCreated {
+				if createdPID > 0 && createdPID != receipt.PID {
+					return keepCreated()
+				}
+				created(receipt.PID)
+			}
+			switch receipt.State {
+			case "ready":
+				return receipt.PID, nil
+			case "failed":
+				if createdPID > 0 && receipt.ExitCode == nil {
+					return keepCreated()
+				}
+				return 0, windowsLaunchReceiptError(label, receipt)
+			case "started":
+			default:
+				if createdPID > 0 {
+					return keepCreated()
+				}
+				if preserveUnconfirmed {
+					return keepUnconfirmed()
+				}
+				return 0, errors.New("工具进程尚未返回有效启动确认")
+			}
+		} else if !os.IsNotExist(err) {
+			if createdPID > 0 {
+				return keepCreated()
+			}
+			if preserveUnconfirmed {
+				return keepUnconfirmed()
+			}
+			return 0, safeWindowsLaunchError("读取进程启动回执失败", err)
+		}
+		if err := waitCtx.Err(); err != nil {
+			if createdPID > 0 {
+				return keepCreated()
+			}
+			if preserveUnconfirmed {
+				return keepUnconfirmed()
+			}
+			if errors.Is(err, context.Canceled) {
+				return 0, fmt.Errorf("等待进程启动确认已取消：%w", err)
+			}
+			return 0, fmt.Errorf("未在时限内收到工具进程的启动确认：%w", err)
+		}
+		select {
+		case <-waitCtx.Done():
+			// Check one last receipt before deciding that no target was made.
+		case <-ticker.C:
+		}
+	}
 }
 
 func startPackaged(ctx context.Context, p Plan) (int, error) {
 	ctx, cancel := context.WithTimeout(ctx, 16*time.Second)
 	defer cancel()
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
 	id := config.RandomToken(8)
 	dataPath := filepath.Join(p.RuntimeDir, ".launch-"+id+".json")
 	scriptPath := filepath.Join(p.RuntimeDir, ".launch-"+id+".ps1")
@@ -167,6 +487,9 @@ func startPackaged(ctx context.Context, p Plan) (int, error) {
 	defer os.Remove(dataPath)
 	defer os.Remove(scriptPath)
 	defer os.Remove(statusPath)
+	defer os.Remove(statusPath + ".tmp")
+	defer os.Remove(statusPath + ".started")
+	defer os.Remove(statusPath + ".started.tmp")
 	env := map[string]string{}
 	allowed := map[string]bool{"CODEX_HOME": true, "CODEX_ELECTRON_USER_DATA_PATH": true, "OPENAI_API_KEY": true, "CLAUDE_CONFIG_DIR": true, "CLAUDE_USER_DATA_DIR": true, "ANTHROPIC_API_KEY": true, "ANTHROPIC_AUTH_TOKEN": true, "ANTHROPIC_BASE_URL": true, "ANTHROPIC_MODEL": true, "PATH": true}
 	for _, kv := range p.Environment {
@@ -181,12 +504,41 @@ func startPackaged(ctx context.Context, p Plan) (int, error) {
 	}
 	b, _ := json.Marshal(map[string]any{"exe": p.Tool.Path, "args": strings.Join(argv, " "), "cwd": p.Workspace, "env": env, "status": statusPath})
 	if err := os.WriteFile(dataPath, b, 0o600); err != nil {
-		return 0, err
+		return 0, safeWindowsLaunchError("保存应用启动配置失败", err)
 	}
 	// The helper command line contains paths only, never an API key.
-	script := `$ErrorActionPreference = 'Stop'
-$d = Get-Content -LiteralPath ` + psLiteral(dataPath) + ` -Raw -Encoding UTF8 | ConvertFrom-Json
-try {
+	script := windowsPackagedLaunchScript(dataPath, statusPath)
+	if err := os.WriteFile(scriptPath, append([]byte{0xef, 0xbb, 0xbf}, []byte(script)...), 0o600); err != nil {
+		return 0, safeWindowsLaunchError("写入应用启动程序失败", err)
+	}
+	innerArgs := "-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File " + syscall.EscapeArg(scriptPath)
+	outer := windowsLaunchExceptionScript + "\ntry { Invoke-CommandInDesktopPackage -PackageFamilyName " + psLiteral(p.Tool.Family) + " -AppId " + psLiteral(p.Tool.AppID) + " -PreventBreakaway -Command " + psLiteral(powershell()) + " -Args " + psLiteral(innerArgs) + " | Out-Null; @{state='dispatched'} | ConvertTo-Json -Compress } catch { New-LaunchFailure $_.Exception | ConvertTo-Json -Compress }"
+	cmd := exec.CommandContext(ctx, powershell(), "-NoProfile", "-NonInteractive", "-Command", outer)
+	configureProcess(cmd, false)
+	LaunchPhase(ctx, "start", "创建工具进程", "在商店应用包内创建桌面进程")
+	output, err := cmd.Output()
+	if err != nil {
+		if ctx.Err() != nil {
+			return waitWindowsLaunchReceipt(ctx, statusPath, "桌面应用进程")
+		}
+		return 0, safeWindowsLaunchError("商店应用包启动失败", err)
+	}
+	receipt, err := parseWindowsLaunchReceipt(output)
+	if err != nil {
+		return 0, errors.New("商店应用包没有返回有效启动回执")
+	}
+	if receipt.State == "failed" {
+		return 0, windowsLaunchReceiptError("商店应用包启动失败", receipt)
+	}
+	if receipt.State != "dispatched" {
+		return 0, errors.New("商店应用包没有返回有效启动回执")
+	}
+	return waitWindowsLaunchReceipt(ctx, statusPath, "桌面应用进程")
+}
+
+func windowsPackagedLaunchScript(dataPath, statusPath string) string {
+	return windowsLaunchReceiptScript(statusPath) + `try {
+  $d = Get-Content -LiteralPath ` + psLiteral(dataPath) + ` -Raw -Encoding UTF8 | ConvertFrom-Json
   $psi = New-Object System.Diagnostics.ProcessStartInfo
   $psi.FileName = $d.exe
   $psi.Arguments = $d.args
@@ -195,38 +547,12 @@ try {
   foreach ($key in @('OPENAI_API_KEY','OPENAI_BASE_URL','SUB2API_API_KEY','ANTHROPIC_API_KEY','ANTHROPIC_AUTH_TOKEN','ANTHROPIC_BASE_URL','ANTHROPIC_MODEL','CLAUDE_CODE_OAUTH_TOKEN','ELECTRON_RUN_AS_NODE')) { $psi.EnvironmentVariables.Remove($key) }
   foreach ($entry in $d.env.PSObject.Properties) { $psi.EnvironmentVariables[$entry.Name] = [string]$entry.Value }
   $child = [System.Diagnostics.Process]::Start($psi)
-  Start-Sleep -Milliseconds 1200
-  if ($child.HasExited -and $child.ExitCode -ne 0) { throw 'Early exit' }
-  [IO.File]::WriteAllText($d.status, [string]$child.Id)
-} catch { [IO.File]::WriteAllText($d.status, 'FAILED') }
+  Write-LaunchReceipt @{state='started';pid=$child.Id}
+  if ($child.WaitForExit(1200) -and $child.ExitCode -ne 0) {
+    Write-LaunchReceipt @{state='failed';pid=$child.Id;exitCode=[int]$child.ExitCode}
+  } else { Write-LaunchReceipt @{state='ready';pid=$child.Id} }
+} catch { Write-LaunchReceipt (New-LaunchFailure $_.Exception) }
 `
-	if err := os.WriteFile(scriptPath, append([]byte{0xef, 0xbb, 0xbf}, []byte(script)...), 0o600); err != nil {
-		return 0, err
-	}
-	innerArgs := "-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File " + syscall.EscapeArg(scriptPath)
-	outer := "$ErrorActionPreference='Stop'; Invoke-CommandInDesktopPackage -PackageFamilyName " + psLiteral(p.Tool.Family) + " -AppId " + psLiteral(p.Tool.AppID) + " -PreventBreakaway -Command " + psLiteral(powershell()) + " -Args " + psLiteral(innerArgs)
-	cmd := exec.CommandContext(ctx, powershell(), "-NoProfile", "-NonInteractive", "-Command", outer)
-	configureProcess(cmd, false)
-	if err := cmd.Run(); err != nil {
-		return 0, fmt.Errorf("商店应用包启动失败，请重新检测程序或使用 CLI")
-	}
-	ticker := time.NewTicker(150 * time.Millisecond)
-	defer ticker.Stop()
-	for {
-		b, err := os.ReadFile(statusPath)
-		if err == nil {
-			var pid int
-			if _, err := fmt.Sscanf(string(b), "%d", &pid); err == nil && pid > 0 {
-				return pid, nil
-			}
-			return 0, errors.New("桌面应用启动后立即退出，请检查应用版本和本地实例日志")
-		}
-		select {
-		case <-ctx.Done():
-			return 0, errors.New("没有收到桌面应用的启动确认，请检查程序自己的日志")
-		case <-ticker.C:
-		}
-	}
 }
 
 func originalAppData(t Tool) string {

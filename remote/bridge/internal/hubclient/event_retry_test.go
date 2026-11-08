@@ -90,6 +90,7 @@ func TestOrdinaryReconnectRetainsQueueUntilFreshPairStatus(t *testing.T) {
 	c := economyClient(t)
 	c.o.FlushInterval = 10 * time.Millisecond
 	if err := c.o.Store.Update(func(cfg *config.Config) error {
+		cfg.RelayRoot = server.URL
 		cfg.HubURL = server.URL
 		cfg.RemoteDeviceOnly = true
 		cfg.PhoneBindingID, cfg.PhoneHash = strings.Repeat("a", 64), strings.Repeat("b", 64)

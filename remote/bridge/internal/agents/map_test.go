@@ -2,7 +2,9 @@ package agents
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -39,6 +41,9 @@ func TestCodexItemMapping(t *testing.T) {
 		{`{"type":"fileChange","id":"2","status":"completed","changes":[{"path":"/w/new.txt","kind":{"type":"add"},"diff":"hi\n"}]}`, "file_change", "创建 new.txt|done"},
 		{`{"type":"mcpToolCall","id":"3","server":"gh","tool":"search","status":"completed","arguments":{"q":1},"result":{"content":[{"type":"text","text":"r"}]},"error":null}`, "mcp", "调用 gh.search|done"},
 		{`{"type":"webSearch","id":"4","query":"go generics","action":{"type":"search","query":"go generics"}}`, "web", "搜索网页 “go generics”|done"},
+		{`{"type":"imageView","id":"4b","path":"C:\\work\\input.png"}`, "image_view", "查看图片|done"},
+		{`{"type":"imageGeneration","id":"5","status":"completed","savedPath":"C:\\work\\generated.png"}`, "image_generation", "生成图片|done"},
+		{`{"type":"imageGeneration","id":"6","status":"completed","result":"iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB"}`, "image_generation", "生成图片|done"},
 	}
 	for _, c := range cases {
 		var it cxItem
@@ -52,6 +57,9 @@ func TestCodexItemMapping(t *testing.T) {
 		if it.Type == "fileChange" && !strings.Contains(e.Diff, "+++ b/w/new.txt\n@@ -0,0 +1,1 @@\n+hi") {
 			t.Fatalf("diff %q", e.Diff)
 		}
+		if it.Type == "imageGeneration" && strings.Contains(c.item, `"id":"6"`) && !strings.HasPrefix(e.Detail, "image-base64:") {
+			t.Fatalf("base64 image fallback missing: %+v", e)
+		}
 	}
 	if codexClient(json.RawMessage(`"appServer"`), "", false) != "Codex App" ||
 		codexClient(json.RawMessage(`"vscode"`), "Codex Desktop", false) != "Codex App" ||
@@ -62,6 +70,9 @@ func TestCodexItemMapping(t *testing.T) {
 }
 
 func TestClaudeToolDescriptions(t *testing.T) {
+	if d := describeClaudeTool("Skill", map[string]any{"skill": "review", "args": "检查代码"}, "", false); d.kind != "skill" || d.title != "使用技能 · review" || d.detail != "检查代码" {
+		t.Fatalf("skill activity is not mapped explicitly: %+v", d)
+	}
 	d := describeClaudeTool("TodoWrite", map[string]any{"todos": []any{
 		map[string]any{"content": "a", "status": "completed"}, map[string]any{"content": "b", "status": "in_progress"}}}, "", false)
 	if d.kind != "plan" || d.title != "计划 · 1/2" || d.detail != "✓ a\n▸ b" {
@@ -82,16 +93,27 @@ func TestClaudeToolDescriptions(t *testing.T) {
 	}
 }
 
+func TestClaudeImagesRemainOpaqueUntilHubDecoration(t *testing.T) {
+	raw := `{"id":"msg-image","role":"assistant","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="}}]}`
+	m := newClaudeMapper("claude:image", "")
+	events := m.assistant([]byte(raw), "msg-image", 1)
+	if len(events) != 1 || events[0].Text != "[图片]" || len(events[0].ImageData) != 1 {
+		t.Fatalf("image block was not retained for private decoration: %+v", events)
+	}
+}
+
 func TestClaudeStreamIDsMatchFinal(t *testing.T) {
 	m := newClaudeMapper("claude:s", "")
 	m.stream(json.RawMessage(`{"type":"message_start","message":{"id":"msg_X"}}`))
 	m.stream(json.RawMessage(`{"type":"content_block_start","index":0,"content_block":{"type":"thinking"}}`))
 	p := m.stream(json.RawMessage(`{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"hm"}}`))
 	m.stream(json.RawMessage(`{"type":"content_block_start","index":1,"content_block":{"type":"text"}}`))
-	q := m.stream(json.RawMessage(`{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"Hi"}}`))
+	q1 := m.stream(json.RawMessage(`{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"一"}}`))
+	q := m.stream(json.RawMessage(`{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"起"}}`))
 	f1 := m.assistant(json.RawMessage(`{"id":"msg_X","content":[{"type":"thinking","thinking":"hm"}]}`), "", 1)
-	f2 := m.assistant(json.RawMessage(`{"id":"msg_X","content":[{"type":"text","text":"Hi"}]}`), "", 1)
-	if p[0].ID != f1[0].ID || q[0].ID != f2[0].ID || p[0].Type != "reasoning" || q[0].Type != "message" {
+	f2 := m.assistant(json.RawMessage(`{"id":"msg_X","content":[{"type":"text","text":"一起"}]}`), "", 1)
+	if p[0].ID != f1[0].ID || q[0].ID != f2[0].ID || p[0].Type != "reasoning" || q[0].Type != "message" ||
+		q1[0].Final || q[0].Final || q1[0].Text != "一" || q[0].Text != "一起" || !f2[0].Final || f2[0].Text != q[0].Text {
 		t.Fatalf("%+v %+v %+v %+v", p, q, f1, f2)
 	}
 }
@@ -109,6 +131,130 @@ func TestThrottle(t *testing.T) {
 	time.Sleep(2 * streamInterval)
 	if len(got) != 2 || got[1].Text != "done" {
 		t.Fatalf("got %d events: %+v", len(got), got)
+	}
+}
+
+func TestThrottleFinalWaitsForInFlightTimer(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	events := make(chan protocol.Event, 8)
+	var once sync.Once
+	th := newThrottle(func(e protocol.Event) {
+		if e.Text == "partial" {
+			once.Do(func() { close(started) })
+			<-release
+		}
+		events <- e
+	})
+	key := func(text string) protocol.Event { return protocol.Event{Type: "message", ID: "ordered", Text: text} }
+	th.Update(key("initial")) // immediate emission
+	th.Update(key("partial")) // timer emission
+	select {
+	case <-started:
+	case <-time.After(2 * streamInterval):
+		t.Fatal("timer partial did not start")
+	}
+	// Final must wait for the timer's sink call. If it emits first, the old
+	// partial can arrive after the terminal event and corrupt the phone timeline.
+	done := make(chan struct{})
+	go func() {
+		th.Final(protocol.Event{Type: "message", ID: "ordered", Text: "final", Final: true})
+		close(done)
+	}()
+	select {
+	case <-done:
+		t.Fatal("Final overtook an in-flight partial")
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(release)
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("Final did not complete after the partial drained")
+	}
+	var got []string
+	for len(got) < 3 {
+		select {
+		case e := <-events:
+			got = append(got, e.Text)
+		case <-time.After(time.Second):
+			t.Fatalf("missing ordered events: %v", got)
+		}
+	}
+	if got[0] != "initial" || got[1] != "partial" || got[2] != "final" {
+		t.Fatalf("events out of order: %v", got)
+	}
+}
+
+func TestThrottleBoundsUnterminatedStreams(t *testing.T) {
+	th := newThrottle(func(protocol.Event) {})
+	for i := 0; i < maxThrottlePending+128; i++ {
+		th.Update(protocol.Event{Type: "message", SessionKey: "bounded", ID: fmt.Sprintf("stream-%d", i), Text: "partial"})
+	}
+	th.mu.Lock()
+	got := len(th.pending)
+	th.mu.Unlock()
+	if got > maxThrottlePending {
+		t.Fatalf("unterminated stream state exceeded bound: %d", got)
+	}
+}
+
+func TestThrottleCapacityRefusesPartialButAlwaysEmitsFinal(t *testing.T) {
+	final := make(chan struct{}, 1)
+	th := newThrottle(func(e protocol.Event) {
+		if e.Final {
+			final <- struct{}{}
+		}
+	})
+	for i := 0; i < maxThrottlePending; i++ {
+		th.Update(protocol.Event{Type: "message", SessionKey: "bounded", ID: fmt.Sprintf("stream-%d", i), Text: "partial"})
+	}
+	th.Update(protocol.Event{Type: "message", SessionKey: "bounded", ID: "overflow", Text: "partial"})
+	th.mu.Lock()
+	if len(th.pending) != maxThrottlePending {
+		t.Fatalf("partial capacity changed: %d", len(th.pending))
+	}
+	th.mu.Unlock()
+	// Final is not a partial admission and must remain deliverable while the
+	// bounded stream table is full.
+	th.Final(protocol.Event{Type: "message", SessionKey: "bounded", ID: "overflow", Text: "final", Final: true})
+	select {
+	case <-final:
+	case <-time.After(time.Second):
+		t.Fatal("capacity overflow lost its terminal event")
+	}
+}
+
+func TestThrottleDropCancelsPendingAndCloseRejectsNewEvents(t *testing.T) {
+	events := make(chan protocol.Event, 4)
+	th := newThrottle(func(e protocol.Event) { events <- e })
+	e := protocol.Event{Type: "message", SessionKey: "drop", ID: "one", Text: "partial"}
+	th.Update(e)
+	th.Drop(e)
+	th.mu.Lock()
+	if len(th.pending) != 0 {
+		t.Fatalf("Drop retained pending state: %d", len(th.pending))
+	}
+	th.mu.Unlock()
+	// The event was emitted immediately, but Drop ensures no later timer
+	// snapshot can be produced for the same entry.
+	select {
+	case <-events:
+	default:
+	}
+	time.Sleep(streamInterval + 20*time.Millisecond)
+	select {
+	case got := <-events:
+		t.Fatalf("Drop allowed a late event: %+v", got)
+	default:
+	}
+	th.Close()
+	th.Final(protocol.Event{Type: "message", SessionKey: "drop", ID: "closed", Text: "final", Final: true})
+	th.Update(protocol.Event{Type: "message", SessionKey: "drop", ID: "closed", Text: "partial"})
+	select {
+	case got := <-events:
+		t.Fatalf("Close emitted after shutdown: %+v", got)
+	default:
 	}
 }
 

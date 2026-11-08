@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"salcara/bridge/internal/config"
 	"salcara/bridge/internal/protocol"
 )
 
@@ -36,6 +37,113 @@ func TestApprovalSnapshotOnlyCurrentScopedRequestsAndNoAutomaticDecision(t *test
 	}
 	if len(newApprovals().snapshot("codex:original")) != 0 {
 		t.Fatal("new process reconstructed cached approvals")
+	}
+}
+
+func TestScopedApprovalCannotAnswerSiblingSession(t *testing.T) {
+	a := newApprovals()
+	p, _ := a.addRequest("codex:b", "codex", "ref", protocol.Event{Kind: "command"})
+	if a.answerForSession("codex:a", p.id, approvalAnswer{decision: "allow"}) {
+		t.Fatal("A answered B's approval")
+	}
+	select {
+	case <-p.ch:
+		t.Fatal("mismatched response consumed request")
+	default:
+	}
+	if !a.answerForSession("codex:b", p.id, approvalAnswer{decision: "allow"}) {
+		t.Fatal("legitimate scoped answer rejected")
+	}
+	if got := <-p.ch; got.decision != "allow" {
+		t.Fatal("approval semantics changed")
+	}
+}
+
+func TestScopedApprovalRequiresExecutingWorkerSnapshot(t *testing.T) {
+	for _, family := range []string{"codex", "claude"} {
+		t.Run(family, func(t *testing.T) {
+			account := config.LocalAccount{ID: "fixture", Kind: "api", SourceType: "api_key", BaseURL: "https://fixture.invalid", Key: "fixture-key"}
+			cfg := config.Config{LocalAccounts: []config.LocalAccount{account}, RemoteAPI: map[string]config.RemoteAPI{family: {AccountID: account.ID}}, RemoteExecutionArmed: true, GatewayRuntimeKey: "runtime-fixture"}
+			cfg.RemoteStationAuthorization = &config.StationAuthorization{Identity: config.RemoteIdentity(cfg), Revision: "r1", Station: protocol.StationPolicy{Version: 1, APIBases: []string{account.BaseURL}}}
+			settings := SettingsWithGateway(cfg, 47831)
+			registry := newApprovals()
+			t.Cleanup(registry.cancelAll)
+			var adapter Agent
+			if family == "codex" {
+				adapter = &codexAgent{settings: func() Settings { return settings }, conn: &rpcConn{}, connSig: codexSig(settings), aps: registry}
+			} else {
+				adapter = &claudeAgent{settings: func() Settings { return settings }, aps: registry, procs: map[string]*claudeProc{"original": {done: make(chan struct{}), workerSettingsSig: claudeSettingsSig(settings, "")}}}
+			}
+			key := family + ":original"
+			p, _ := registry.addRequest(key, family, "", protocol.Event{Kind: "command"})
+			authorized := WithConfigSnapshot(context.Background(), cfg)
+			cfg.LocalAccounts[0].Key = "other-fixture-key"
+			changed := WithConfigSnapshot(context.Background(), cfg)
+			// The current settings callback may now describe B, but a pending
+			// request from worker A must not be answered using B's authorization.
+			settings = SettingsWithGateway(cfg, 47831)
+			if RespondForSession(changed, adapter, key, p.id, ApprovalResponse{Decision: "allow"}) {
+				t.Fatal("B's snapshot answered worker A's approval")
+			}
+			select {
+			case <-p.ch:
+				t.Fatal("mismatched worker consumed the pending request")
+			default:
+			}
+			if !RespondForSession(authorized, adapter, key, p.id, ApprovalResponse{Decision: "allow_session"}) {
+				t.Fatal("matching executing worker snapshot rejected")
+			}
+			if ans := <-p.ch; ans.decision != "allow_session" {
+				t.Fatal("matching command response lost its semantics")
+			}
+		})
+	}
+}
+
+func TestScopedApprovalRejectsMissingSessionAndExitedWorker(t *testing.T) {
+	for _, family := range []string{"codex", "claude"} {
+		for _, state := range []string{"missing_scope", "exited", "closing"} {
+			t.Run(family+"/"+state, func(t *testing.T) {
+				registry := newApprovals()
+				t.Cleanup(registry.cancelAll)
+				settings := Settings{CodexKey: "fixture-key", ClaudeKey: "fixture-key"}
+				var adapter Agent
+				if family == "codex" {
+					adapter = &codexAgent{settings: func() Settings { return settings }, conn: &rpcConn{closed: state == "exited"}, connSig: codexSig(settings), aps: registry, closed: state == "closing"}
+				} else {
+					done := make(chan struct{})
+					if state == "exited" {
+						close(done)
+					}
+					adapter = &claudeAgent{settings: func() Settings { return settings }, aps: registry, procs: map[string]*claudeProc{"original": {done: done, workerSettingsSig: claudeSettingsSig(settings, "")}}, closed: state == "closing"}
+				}
+				key := family + ":original"
+				p, _ := registry.addRequest(key, family, "", protocol.Event{Kind: "command"})
+				if state == "missing_scope" {
+					key = ""
+				}
+				if RespondForSession(context.Background(), adapter, key, p.id, ApprovalResponse{Decision: "allow"}) {
+					t.Fatal("unscoped/dead worker approval accepted")
+				}
+				select {
+				case <-p.ch:
+					t.Fatal("invalid response consumed the request")
+				default:
+				}
+			})
+		}
+	}
+}
+
+func TestScopedApprovalDoesNotFallBackToLegacyIDOnlyAdapter(t *testing.T) {
+	a, _, _, _ := newCodexQuestionFixture(t, "ask")
+	p, _ := a.aps.addRequest("codex:fixture-thread", "codex", "", protocol.Event{Kind: "command"})
+	legacy := legacyQuestionAdapter{a}
+	if RespondForSession(context.Background(), legacy, "codex:fixture-thread", p.id, ApprovalResponse{Decision: "allow"}) {
+		t.Fatal("remote scope silently downgraded to an ID-only adapter")
+	}
+	if !RespondWithAnswers(legacy, p.id, ApprovalResponse{Decision: "allow"}) {
+		t.Fatal("local legacy command approvals stopped working")
 	}
 }
 

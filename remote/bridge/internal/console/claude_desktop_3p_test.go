@@ -42,6 +42,7 @@ func consoleClaude3PFixture(t *testing.T) (*Server, http.Handler, map[string]str
 		return launcher.Claude3PPlatform{Root: root, Version: toolcfg.ClaudeDesktop3PVersion}, nil
 	}
 	s := New(Deps{Store: store, Local: local, ClaudeDesktop: service, Port: 47831})
+	t.Cleanup(s.CloseUsageLedger)
 	hdr := map[string]string{"Cookie": CookieName + "=" + s.Token(), "Content-Type": "application/json", "Origin": "http://127.0.0.1:47831"}
 	return s, s.Handler(), hdr, root, calls
 }
@@ -54,10 +55,13 @@ func TestClaudeDesktop3PConsoleContractHasNoSecretsAndOptionalModel(t *testing.T
 	}
 	var fields map[string]any
 	_ = json.Unmarshal(status.Body.Bytes(), &fields)
-	for _, name := range []string{"available", "supported", "managed", "version", "mode", "requiresModeChange", "recoverable", "message"} {
+	for _, name := range []string{"available", "supported", "managed", "version", "mode", "requiresModeChange", "recoverable", "upstreamVerified", "sourceEvidence", "message"} {
 		if _, ok := fields[name]; !ok {
 			t.Fatal("missing status field", name)
 		}
+	}
+	if fields["upstreamVerified"] != false || fields["sourceEvidence"] != "local_profile_only" {
+		t.Fatalf("local profile was presented as upstream proof: %#v", fields)
 	}
 	for _, body := range []string{`{"id":"shared-api"}`, `{"id":"shared-api","confirmed":true}`} {
 		w := do(h, "POST", "/api/local/claude-desktop/switch", host, hdr, body)

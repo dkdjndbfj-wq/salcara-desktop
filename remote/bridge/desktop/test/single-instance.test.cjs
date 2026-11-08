@@ -15,7 +15,7 @@ function fixture(ownsLock) {
       if (name === 'electron') return { app };
       if (name === './package.json') return { version: '1.6.3' };
       if (name === 'node:child_process') return { spawn() { starts++; throw new Error('Unexpected Agent/core launch'); } };
-      return require(name);
+      return name.startsWith('./') ? require(path.resolve(__dirname, '..', name)) : require(name);
     } });
   vm.runInContext(source, context);
   return { handlers, context, quits: () => quits, starts: () => starts };

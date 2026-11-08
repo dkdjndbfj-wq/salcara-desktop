@@ -87,6 +87,48 @@ func TestPhoneModelCatalogOnlyReturnsFreshCatalogMembers(t *testing.T) {
 	}
 }
 
+func TestPhoneModelCatalogAppliesCardModelPolicy(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/models" {
+			t.Fatalf("unexpected provider path %q", r.URL.Path)
+		}
+		_, _ = w.Write([]byte(`{"data":[{"id":"allowed-model"},{"id":"blocked-model"},{"id":"unlisted-model"}]}`))
+	}))
+	defer server.Close()
+	a := config.LocalAccount{
+		ID: "policy", Kind: "api", Key: "fake-policy-key", BaseURL: server.URL,
+		// The deny rule wins even if a future edit accidentally puts the same
+		// model in both lists.
+		ModelAllowlist: []string{"allowed-model", "blocked-model"},
+		ModelDenylist:  []string{"blocked-model"},
+		Models:         []string{"blocked-model", "stale-model"},
+	}
+	c := statusFixture(t, config.Config{LocalAccounts: []config.LocalAccount{a}, RemoteAPI: map[string]config.RemoteAPI{"codex": {AccountID: a.ID}}})
+	c.SetManager(&fakeManager{list: []agents.Agent{&fakeAgent{id: "codex"}}})
+	result, err := c.Dispatch(context.Background(), map[string]any{"type": "models.list", "tool": "codex", "refresh": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := result.(map[string]any)["models"].([]string)
+	if !reflect.DeepEqual(got, []string{"allowed-model"}) {
+		t.Fatalf("models.list exposed a denied/unlisted model: %v", got)
+	}
+	stored, ok := c.o.Store.Get().LocalAccount(a.ID)
+	if !ok || !reflect.DeepEqual(stored.Models, []string{"allowed-model"}) {
+		t.Fatalf("filtered catalogue was not persisted: %+v", stored.Models)
+	}
+	// The early status surface can run before models.list. It must not leak a
+	// stale denied hint from the account snapshot either.
+	status, err := c.Dispatch(context.Background(), map[string]any{"type": "agents.status"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	options, ok := status.(map[string]any)["apis"].([]remoteAPIOption)
+	if !ok || len(options) != 1 || !reflect.DeepEqual(options[0].Models, []string{"allowed-model"}) {
+		t.Fatalf("status API hints ignored card policy: %#v", status)
+	}
+}
+
 func TestPhoneChangingAPIRequiresSupportedModelBeforeStartOrResume(t *testing.T) {
 	for _, family := range []string{"codex", "claude"} {
 		t.Run(family, func(t *testing.T) {
@@ -191,7 +233,7 @@ func TestPhoneModelValidationDoesNotChangeToolLoginOrNativeDesktop(t *testing.T)
 }
 
 func TestPhoneCatalogCredentialsChangedDuringReadCannotPublish(t *testing.T) {
-	for _, change := range []string{"key", "auth", "wire"} {
+	for _, change := range []string{"key", "auth", "wire", "policy"} {
 		t.Run(change, func(t *testing.T) {
 			entered, release := make(chan struct{}), make(chan struct{})
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -222,6 +264,8 @@ func TestPhoneCatalogCredentialsChangedDuringReadCannotPublish(t *testing.T) {
 					cfg.LocalAccounts[0].AuthMode = "api-key"
 				case "wire":
 					cfg.LocalAccounts[0].Wire = "chat"
+				case "policy":
+					cfg.LocalAccounts[0].ModelDenylist = []string{"old-key-catalog"}
 				}
 				return nil
 			}); err != nil {

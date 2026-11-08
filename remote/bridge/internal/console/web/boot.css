@@ -7,7 +7,7 @@ html.booting .boot { display: block; position: fixed; inset: 0; z-index: 80; poi
 @media (max-height: 760px) { html.booting .boot { --S: 188px; } }
 @media (max-height: 620px) { html.booting .boot { --S: 157px; } }
 @media (max-width: 760px) { html.booting .boot { --S: 175px; } }
-html.booting .stage > .hud, html.booting .stage > .orb-zone, html.booting .stage > .foot { opacity: 0; }
+html.booting .desktop-header, html.booting .desktop-nav, html.booting .home-hero .orb-zone, html.booting .home-copy, html.booting .home-stats, html.booting .home-workspace, html.booting .panel-back { opacity: 0; }
 html.booting .orb, html.booting .orb-shadow { animation: none !important; }
 
 .boot-scene { position: absolute; left: 50%; top: var(--cy); width: 0; height: 0; transform-origin: 0 0; }

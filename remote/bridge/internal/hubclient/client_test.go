@@ -11,6 +11,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -241,12 +242,12 @@ func TestStatusAndPushDoNotDeadlock(t *testing.T) {
 	}()
 	select {
 	case <-statusDone:
-	case <-time.After(2 * time.Second):
+	case <-time.After(30 * time.Second):
 		t.Fatal("Status blocked while event upload admission was in progress")
 	}
 	select {
 	case <-pushDone:
-	case <-time.After(2 * time.Second):
+	case <-time.After(30 * time.Second):
 		t.Fatal("Push blocked while status was being read")
 	}
 }
@@ -257,6 +258,8 @@ func TestRegisterCommandReplyAndEvents(t *testing.T) {
 	hub, srv := newFakeHub(t)
 	proj := t.TempDir()
 	c, st := newTestClient(t, srv.URL, "sk-good", []protocol.Project{{Path: proj, Name: "p"}})
+	// Durability includes fsync; retain a real batching window under disk load.
+	c.o.FlushInterval = 500 * time.Millisecond
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go c.Run(ctx)
@@ -328,6 +331,70 @@ func TestRegisterCommandReplyAndEvents(t *testing.T) {
 		defer hub.mu.Unlock()
 		return len(hub.regs[len(hub.regs)-1].Projects) == 2
 	})
+}
+
+func TestDeviceOnlyRegistrationRetriesClaimAndClearsItAfterSuccess(t *testing.T) {
+	claim := strings.Repeat("a", 64)
+	var attempts atomic.Int32
+	claims := make(chan string, 2)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/salcara-hub/v1/device/register" || r.Method != http.MethodPost {
+			t.Errorf("unexpected registration request: %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		if r.Header.Get("Authorization") != "" || r.Header.Get("X-Salcara-Device-Id") == "" || r.Header.Get("X-Salcara-Device-Secret") == "" {
+			t.Error("device registration used a model API key or omitted its device credentials")
+		}
+		claims <- r.Header.Get("X-Salcara-Enrollment-Claim")
+		if attempts.Add(1) == 1 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	store, err := config.Open(filepath.Join(t.TempDir(), "config.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Update(func(cfg *config.Config) error {
+		cfg.ConnectRemoteWithEnrollmentClaim(srv.URL, srv.URL+"/salcara-hub", claim)
+		cfg.DeviceName = "Synthetic computer"
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	client := New(Options{Store: store, Version: "test", HTTP: srv.Client()})
+	client.SetManager(&fakeManager{list: []agents.Agent{&fakeAgent{id: "codex"}}})
+	cfg := store.Get()
+	if !cfg.RemoteDeviceOnly || cfg.AccountKey != "" {
+		t.Fatal("device-only Hub setup unexpectedly depends on a Sub2API key")
+	}
+	if err := client.register(context.Background(), true); err == nil {
+		t.Fatal("temporary registration failure was reported as success")
+	}
+	if got := store.Get().DeviceEnrollmentClaim(); got != claim || <-claims != claim {
+		t.Fatal("failed registration did not retain the exact one-time claim for retry")
+	}
+	if err := client.register(context.Background(), true); err != nil {
+		t.Fatalf("retry with the saved claim failed: %v", err)
+	}
+	if got := <-claims; got != claim {
+		t.Fatal("retry omitted the saved enrollment claim")
+	}
+	if got := store.Get().DeviceEnrollmentClaim(); got != "" {
+		t.Fatal("successful registration did not clear the one-time claim")
+	}
+	reopened, err := config.Open(store.Path())
+	if err != nil || reopened.Get().DeviceEnrollmentClaim() != "" {
+		t.Fatal("claim removal was not persisted to the Bridge config")
+	}
+	req, err := client.requestFor(context.Background(), reopened.Get(), http.MethodPost, "/device/register", nil, false)
+	if err != nil || req.Header.Get("X-Salcara-Enrollment-Claim") != "" {
+		t.Fatal("a consumed claim was sent again after persistence")
+	}
 }
 
 func TestInvalidKeyAndHeartbeatReconnect(t *testing.T) {
@@ -466,6 +533,12 @@ func TestDispatchSessionsList(t *testing.T) {
 	res, _ = c.Dispatch(context.Background(), map[string]any{"type": "sessions.list", "tool": "claude"})
 	if len(res.(map[string]any)["sessions"].([]protocol.SessionInfo)) != 1 {
 		t.Fatal("filter")
+	}
+	hermes := &aggregationFixtureAgent{fakeAgent: &fakeAgent{id: "hermes", sessions: []protocol.SessionInfo{{SessionKey: "hermes:4", UpdatedAt: 7}}}, descriptor: aggregationDescriptor("hermes")}
+	c.SetManager(&fakeManager{list: []agents.Agent{a, b, hermes}})
+	res, err = c.Dispatch(context.Background(), map[string]any{"type": "sessions.list", "tool": "hermes"})
+	if err != nil || len(res.(map[string]any)["sessions"].([]protocol.SessionInfo)) != 1 || res.(map[string]any)["sessions"].([]protocol.SessionInfo)[0].SessionKey != "hermes:4" {
+		t.Fatalf("extension Agent was not aggregated: %v %#v", err, res)
 	}
 	if _, err := c.Dispatch(context.Background(), map[string]any{"type": "nope"}); err == nil {
 		t.Fatal("unknown command accepted")

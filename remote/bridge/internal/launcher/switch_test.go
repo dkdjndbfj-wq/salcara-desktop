@@ -27,6 +27,12 @@ func fixtureFile(t *testing.T, root, name, content string) string {
 func switchFixture(t *testing.T, kind, target string) (*Service, string, string) {
 	t.Helper()
 	root, appData := t.TempDir(), t.TempDir()
+	// Synthetic Start functions do not supervise a real child. Keep per-launch
+	// credential files inside the test's cleanup boundary.
+	runtimeTemp := t.TempDir()
+	for _, key := range []string{"TMPDIR", "TMP", "TEMP"} {
+		t.Setenv(key, runtimeTemp)
+	}
 	t.Setenv("CODEX_HOME", root)
 	t.Setenv("CLAUDE_CONFIG_DIR", root)
 	t.Setenv("CODEX_ELECTRON_USER_DATA_PATH", appData)
@@ -178,6 +184,63 @@ func TestSwitchFailureRollsBackImmediatelyPreviousAccount(t *testing.T) {
 		if string(b) != string(f.Data) {
 			t.Fatal("did not restore immediately previous account")
 		}
+	}
+}
+
+func TestCodexCatalogIsRolledBackWithCredentials(t *testing.T) {
+	s, root, _ := switchFixture(t, "codex", "codex-desktop")
+	fixtureFile(t, root, "config.toml", "# original\n")
+	first := account("codex", "first", "first-key")
+	first.Models = []string{"gpt-first", "claude-first"}
+	first.CatalogOverride = true
+	if _, err := s.Switch(context.Background(), first, "codex-desktop", t.TempDir(), nil); err != nil {
+		t.Fatal(err)
+	}
+	paths := []string{filepath.Join(root, "config.toml"), filepath.Join(root, "auth.json"), toolcfg.CodexCatalogPath(root)}
+	before, err := captureFiles(paths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second := first
+	second.Key = "second-key"
+	second.Models = []string{"grok-second", "deepseek-second"}
+	s.Start = func(context.Context, Plan) (int, error) { return 0, errors.New("synthetic start failure") }
+	if _, err := s.Switch(context.Background(), second, "codex-desktop", t.TempDir(), nil); err == nil {
+		t.Fatal("failed start was accepted")
+	}
+	assertRetained(t, map[string]string{
+		paths[0]: digest(before[0].Data), paths[1]: digest(before[1].Data), paths[2]: digest(before[2].Data),
+	})
+	for i, path := range paths {
+		got, readErr := os.ReadFile(path)
+		if readErr != nil || string(got) != string(before[i].Data) {
+			t.Fatalf("rollback did not restore %s", filepath.Base(path))
+		}
+	}
+}
+
+func TestCodexCatalogRestoreKeepsOriginalUserFile(t *testing.T) {
+	s, root, _ := switchFixture(t, "codex", "codex-desktop")
+	originalConfig := "# original user settings\n"
+	originalCatalog := []byte(`{"models":[{"slug":"user-model"}]}\n`)
+	fixtureFile(t, root, "config.toml", originalConfig)
+	fixtureFile(t, root, toolcfg.CodexCatalogFile, string(originalCatalog))
+	a := account("codex", "first", "first-key")
+	a.Models = []string{"gpt-first", "claude-first"}
+	a.CatalogOverride = true
+	if _, err := s.Switch(context.Background(), a, "codex-desktop", t.TempDir(), nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RestoreDefault("codex"); err != nil {
+		t.Fatal(err)
+	}
+	configBytes, err := os.ReadFile(filepath.Join(root, "config.toml"))
+	if err != nil || string(configBytes) != originalConfig {
+		t.Fatal("original Codex config was not restored")
+	}
+	catalogBytes, err := os.ReadFile(toolcfg.CodexCatalogPath(root))
+	if err != nil || string(catalogBytes) != string(originalCatalog) {
+		t.Fatal("original user catalogue was not restored")
 	}
 }
 

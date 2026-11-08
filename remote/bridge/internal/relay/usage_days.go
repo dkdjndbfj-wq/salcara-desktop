@@ -2,10 +2,8 @@ package relay
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -35,7 +33,6 @@ func UsageDays(ctx context.Context, root, key string, days int) (map[string]any,
 		return nil, fmt.Errorf("连不上：%w", err)
 	}
 	defer resp.Body.Close()
-	b, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
 	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
 		return nil, ErrInvalidKey
 	}
@@ -45,9 +42,5 @@ func UsageDays(ctx context.Context, root, key string, days int) (map[string]any,
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("返回 %d", resp.StatusCode)
 	}
-	var m map[string]any
-	if err := json.Unmarshal(b, &m); err != nil {
-		return nil, errors.New("这个服务商不提供用量查询")
-	}
-	return m, nil
+	return decodeUsageResponse(resp.Body, 4<<20)
 }

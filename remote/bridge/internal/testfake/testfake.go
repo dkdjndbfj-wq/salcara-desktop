@@ -125,6 +125,7 @@ func fakeThread(id, source, preview string) map[string]any {
 }
 
 func fakeCodex(args []string) {
+	apiAuthenticated := false
 	fakeLog("codex-args.jsonl", map[string]any{"args": args, "key": os.Getenv("SUB2API_API_KEY")})
 	f := &fakeRPC{waiting: map[string]chan json.RawMessage{}}
 	var turnMu sync.Mutex
@@ -160,6 +161,30 @@ func fakeCodex(args []string) {
 		case "initialize":
 			reply(map[string]any{"userAgent": "fake", "codexHome": "/tmp", "platformFamily": "unix", "platformOs": "linux"})
 		case "initialized":
+		case "account/login/start":
+			fakeLog("codex-calls.jsonl", map[string]any{"method": m.Method, "selectedKey": str(p, "apiKey") == "fake-loopback"})
+			if os.Getenv("SALCARA_FAKE_CODEX_AUTH") == "login-error" {
+				f.send(map[string]any{"id": m.ID, "error": map[string]any{"code": -32603, "message": "synthetic-private-auth-error"}})
+				continue
+			}
+			apiAuthenticated = true
+			reply(map[string]any{"type": "apiKey"})
+		case "account/read":
+			fakeLog("codex-calls.jsonl", map[string]any{"method": m.Method})
+			mode := os.Getenv("SALCARA_FAKE_CODEX_AUTH")
+			if mode == "read-error" {
+				f.send(map[string]any{"id": m.ID, "error": map[string]any{"code": -32603, "message": "synthetic-private-auth-error"}})
+				continue
+			}
+			var account any
+			if apiAuthenticated && mode != "no-account" {
+				kind := "apiKey"
+				if mode == "wrong-kind" {
+					kind = "chatgpt"
+				}
+				account = map[string]any{"type": kind}
+			}
+			reply(map[string]any{"account": account, "requiresOpenaiAuth": true})
 		case "config/read":
 			fakeLog("codex-calls.jsonl", map[string]any{"method": m.Method, "params": p})
 			if os.Getenv("SALCARA_FAKE_CODEX_CONFIG") == "error" {
@@ -167,7 +192,18 @@ func fakeCodex(args []string) {
 				continue
 			}
 			cfg := map[string]any{}
-			if override := os.Getenv("SALCARA_FAKE_CODEX_CONFIG"); override != "" {
+			override := os.Getenv("SALCARA_FAKE_CODEX_CONFIG")
+			if str(p, "cwd") != "" {
+				if project := os.Getenv("SALCARA_FAKE_CODEX_PROJECT_CONFIG"); project != "" {
+					override = project
+				}
+				if name := os.Getenv("SALCARA_FAKE_CODEX_PROJECT_CONFIG_FILE"); name != "" {
+					if b, err := os.ReadFile(name); err == nil {
+						override = string(b)
+					}
+				}
+			}
+			if override != "" {
 				_ = json.Unmarshal([]byte(override), &cfg)
 			} else {
 				for i := 0; i+1 < len(args); i++ {

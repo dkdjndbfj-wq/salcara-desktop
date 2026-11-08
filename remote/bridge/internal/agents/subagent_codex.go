@@ -86,7 +86,7 @@ func codexAgentStatus(status, message string) (string, string) {
 	case "shutdown":
 		state, prefix = "done", "已关闭"
 	case "interrupted":
-		state, prefix = "failed", "已中断"
+		state, prefix = "interrupted", "被中断"
 	case "errored":
 		state, prefix = "failed", "子任务失败"
 	case "notFound":

@@ -89,12 +89,12 @@ func codexPageFixture(t *testing.T) (*codexAgent, *pagedCodexTransport, *recorde
 func TestCodexOfficialMessagePagingNeverReadsFullHistoryAndRetainsInsideTurn(t *testing.T) {
 	a, transport, _ := codexPageFixture(t)
 	_, page, cursor, err := a.OpenMessagesPage(context.Background(), "original", "", 2)
-	if err != nil || len(page) != 2 || cursor == "" || transport.params[1]["itemsView"] != "full" {
+	if err != nil || len(page) != 3 || page[2].Type != "turn" || page[2].Status != "completed" || cursor == "" || transport.params[1]["itemsView"] != "full" {
 		t.Fatal(len(page), err)
 	}
 	seen := map[string]bool{}
 	for _, event := range page {
-		seen[event.ID] = true
+		seen[codexPagedEventID(event)] = true
 	}
 	// Host cursor anchors are turn IDs, so appends do not move older pages.
 	for cursor != "" {
@@ -103,15 +103,25 @@ func TestCodexOfficialMessagePagingNeverReadsFullHistoryAndRetainsInsideTurn(t *
 			t.Fatal(err)
 		}
 		for _, event := range page {
-			if seen[event.ID] {
-				t.Fatal("duplicate", event.ID)
+			id := codexPagedEventID(event)
+			if seen[id] {
+				t.Fatal("duplicate", id)
 			}
-			seen[event.ID] = true
+			seen[id] = true
 		}
 	}
-	if len(seen) != 27 || transport.fullReads != 0 {
+	// All 27 messages and each of the nine real completed-turn boundaries
+	// survive message-count pagination; boundary events are not messages.
+	if len(seen) != 36 || transport.fullReads != 0 {
 		t.Fatal("missing history or full read", len(seen), transport.fullReads)
 	}
+}
+
+func codexPagedEventID(event protocol.Event) string {
+	if event.Type == "turn" {
+		return "turn:" + event.TurnID + ":" + event.Status
+	}
+	return event.ID
 }
 
 func TestCodexHistoryFallbackIsOnlyForDefiniteUnsupportedMethod(t *testing.T) {
@@ -121,7 +131,7 @@ func TestCodexHistoryFallbackIsOnlyForDefiniteUnsupportedMethod(t *testing.T) {
 			transport.code = code
 			_, page, cursor, err := a.OpenMessagesPage(context.Background(), "original", "", 2)
 			if code == -32601 || code == -32602 {
-				if err != nil || len(page) != 2 || cursor == "" || transport.fullReads != 1 {
+				if err != nil || len(page) != 3 || page[2].Type != "turn" || page[2].Status != "completed" || cursor == "" || transport.fullReads != 1 {
 					t.Fatal("legacy fallback failed", err)
 				}
 				_, _, _, err = a.OpenMessagesPage(context.Background(), "original", cursor, 10)

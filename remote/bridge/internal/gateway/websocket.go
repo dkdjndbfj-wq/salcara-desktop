@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -15,14 +16,20 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/gorilla/websocket"
 	"salcara/bridge/internal/config"
+	"salcara/bridge/internal/usageledger"
+
+	"github.com/gorilla/websocket"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 )
 
 type wsHistory struct {
-	id      string
-	request map[string]any
-	input   []any
+	id            string
+	request       map[string]any
+	input         []any
+	clientModel   string
+	upstreamModel string
+	credential    string
 }
 
 func wsInputs(value any) ([]any, bool) {
@@ -43,7 +50,11 @@ func wsError(conn *websocket.Conn, code, message string) {
 	_ = conn.WriteJSON(map[string]any{"type": "error", "status": 400, "error": map[string]any{"type": "invalid_request_error", "code": code, "message": message}})
 }
 
-func (h *Handler) serveWebSocket(w http.ResponseWriter, r *http.Request, account config.LocalAccount) {
+func (h *Handler) serveWebSocket(w http.ResponseWriter, r *http.Request, account config.LocalAccount, target, key string, currentAuthorization func() bool) {
+	if !currentAuthorization() {
+		fail(w, 409, "API 授权已变更，请重新连接")
+		return
+	}
 	up := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return r.Header.Get("Origin") == "" }}
 	conn, err := up.Upgrade(w, r, nil)
 	if err != nil {
@@ -82,14 +93,32 @@ func (h *Handler) serveWebSocket(w http.ResponseWriter, r *http.Request, account
 	var last wsHistory
 	identity := config.AccountFingerprint(account)
 	for raw := range frames {
-		current, valid := h.Source("codex")
-		if !valid || config.AccountFingerprint(current) != identity {
+		currentKey := h.gatewayKey(target)
+		if !currentAuthorization() || !h.accountStillCurrent(target, account) || config.AccountFingerprint(account) != identity || currentKey == "" || subtle.ConstantTimeCompare([]byte(currentKey), []byte(key)) != 1 {
 			wsError(conn, "configuration_changed", "API 配置已更改，请在原工具重新连接；未使用其他 Key")
 			return
 		}
-		var in map[string]any
-		if json.Unmarshal(raw, &in) != nil || in["type"] != "response.create" {
+		in, valid := webSocketEnvelope(raw)
+		if !valid || in["type"] != "response.create" {
 			wsError(conn, "invalid_event", "仅支持 response.create JSON 消息")
+			continue
+		}
+		if value, present := in["generate"]; present {
+			if _, ok := value.(bool); !ok {
+				wsError(conn, "invalid_generate", "generate 必须是布尔值")
+				continue
+			}
+		}
+		if value, present := in["stream"]; present && value != true {
+			wsError(conn, "invalid_stream", "WebSocket 仅支持流式响应")
+			continue
+		}
+		if value := in["background"]; value != nil && value != false {
+			wsError(conn, "unsupported_background", "本机 WebSocket 不支持后台任务")
+			continue
+		}
+		if in["conversation"] != nil {
+			wsError(conn, "unsupported_conversation", "请通过本连接的 previous_response_id 或完整 input 续接会话")
 			continue
 		}
 		if in["stream_id"] != nil && in["stream_id"] != "" {
@@ -107,25 +136,48 @@ func (h *Handler) serveWebSocket(w http.ResponseWriter, r *http.Request, account
 				continue
 			}
 		}
+		previousCredential := ""
 		if previous, _ := in["previous_response_id"].(string); previous != "" {
 			if last.id != previous {
 				wsError(conn, "previous_response_not_found", "连接内的原上下文已失效，请重传完整原会话，不能丢弃历史")
 				continue
 			}
 			input = append(append([]any{}, last.input...), input...)
+			previousCredential = last.credential
 			// Codex's incremental socket requests may omit unchanged tools/model.
 			for key, value := range last.request {
-				if _, present := in[key]; !present && key != "input" && key != "instructions" {
+				if _, present := in[key]; !present && key != "input" && key != "instructions" && key != "model" {
 					in[key] = value
 				}
 			}
+			if _, present := in["model"]; !present {
+				// Resolve the original client name once again under the current
+				// policy; an upstream name may itself shadow another alias.
+				in["model"] = last.clientModel
+			}
 		}
-		model, _ := in["model"].(string)
+		clientModel, _ := in["model"].(string)
+		model := clientModel
+		if h.WebSocketModel != nil {
+			var allowed bool
+			model, allowed = h.WebSocketModel(clientModel)
+			if !allowed {
+				wsError(conn, "invalid_model", "模型不符合本客户端和账号的权限，未自动更换模型")
+				continue
+			}
+		}
 		known := model != "" && model == account.Model
 		for _, m := range account.Models {
 			known = known || (model != "" && model == m)
 		}
-		if !known {
+		if account.CredentialRef != "" && account.SourceType == "official_account" && config.ValidCatalogModel(model) {
+			known = true // Native picker metadata is not an account entitlement check.
+		}
+		warmupModelKnown := known && config.ModelAllowed(account, model)
+		if in["generate"] == false && h.WebSocketModelKnown != nil {
+			warmupModelKnown = h.WebSocketModelKnown(model)
+		}
+		if (h.BeforeDispatchAccount == nil || in["generate"] == false && h.WebSocketModelKnown == nil) && !warmupModelKnown {
 			wsError(conn, "invalid_model", "模型未在此 Key 的卡片配置中，未自动更换模型")
 			continue
 		}
@@ -135,11 +187,19 @@ func (h *Handler) serveWebSocket(w http.ResponseWriter, r *http.Request, account
 		delete(in, "previous_response_id")
 		delete(in, "generate")
 		delete(in, "background")
-		in["input"], in["stream"] = input, true
+		in["model"], in["input"], in["stream"] = model, input, true
 		body, err := json.Marshal(in)
 		if err != nil || len(body) > maxBody {
 			wsError(conn, "context_too_large", "原上下文超过本地限制，未截断历史")
 			continue
+		}
+		if h.NormalizeRequest != nil {
+			var status int
+			body, status = h.NormalizeRequest(body)
+			if status != 0 {
+				wsError(conn, "invalid_tool_model", "请求的模型命名空间或工具模型权限无效")
+				continue
+			}
 		}
 		if warmup {
 			var random [16]byte
@@ -152,10 +212,66 @@ func (h *Handler) serveWebSocket(w http.ResponseWriter, r *http.Request, account
 			if conn.WriteJSON(map[string]any{"type": "response.completed", "response": response}) != nil {
 				return
 			}
-			last = wsHistory{id: id, request: in, input: input}
+			last = wsHistory{id: id, request: in, input: input, clientModel: clientModel, upstreamModel: model}
 			continue // local preparation only: zero upstream inference or billing.
 		}
-		request := r.Clone(ctx)
+		frameAccount := account
+		frameCurrent := func() bool {
+			currentKey := h.gatewayKey(target)
+			// The loop header already verified the exact socket account for this
+			// turn. Do not re-read Source between validation and the pinned inner
+			// call; that would expose old context to a replacement credential.
+			return currentAuthorization() && currentKey != "" && subtle.ConstantTimeCompare([]byte(currentKey), []byte(key)) == 1
+		}
+		frameRelease := func() {}
+		usedAccountHook := false
+		if h.BeforeDispatchAccount != nil {
+			selected, selectedCurrent, release, status := h.BeforeDispatchAccount(ctx, account, body)
+			if release != nil {
+				frameRelease = release
+			}
+			if status != 0 {
+				frameRelease()
+				wsError(conn, "execution_not_allowed", "当前请求的执行限制不允许继续")
+				continue
+			}
+			if selected.ID == "" || selectedCurrent == nil {
+				frameRelease()
+				wsError(conn, "configuration_changed", "API 授权已变更，请重新连接")
+				continue
+			}
+			frameAccount, usedAccountHook = selected, true
+			frameCurrent = func() bool {
+				currentKey := h.gatewayKey(target)
+				return currentAuthorization() && selectedCurrent() && currentKey != "" && subtle.ConstantTimeCompare([]byte(currentKey), []byte(key)) == 1
+			}
+		}
+		if !frameCurrent() {
+			frameRelease()
+			wsError(conn, "configuration_changed", "API 授权已变更，请重新连接")
+			continue
+		}
+		if previousCredential != "" && !replayableTextBody(body) {
+			selectedCredential, valid := CredentialBudgetIdentity(frameAccount)
+			if !valid || selectedCredential != previousCredential {
+				frameRelease()
+				wsError(conn, "previous_account_unavailable", "原会话包含账号专属资源，原账号暂不可用，请稍后重试；未转交其他账号")
+				continue
+			}
+		}
+		known = model != "" && model == frameAccount.Model
+		for _, candidate := range frameAccount.Models {
+			known = known || model != "" && model == candidate
+		}
+		if frameAccount.CredentialRef != "" && frameAccount.SourceType == "official_account" && config.ValidCatalogModel(model) {
+			known = true
+		}
+		if !known || !config.ModelAllowed(frameAccount, model) {
+			frameRelease()
+			wsError(conn, "invalid_model", "模型不符合本次图片账号的权限，未自动更换模型")
+			continue
+		}
+		request := r.Clone(cliproxyexecutor.WithDownstreamWebsocket(ctx))
 		request.Method = http.MethodPost
 		request.Header = r.Header.Clone()
 		request.Header.Del("Connection")
@@ -168,9 +284,40 @@ func (h *Handler) serveWebSocket(w http.ResponseWriter, r *http.Request, account
 		// A switch between validation and forwarding must not put old context on
 		// a newly selected Key. Pin the already verified socket account for this call.
 		pinned := *h
-		pinned.Source = func(target string) (config.LocalAccount, bool) { return account, target == "codex" }
+		completedCredential := ""
+		observeAttempt := pinned.AttemptObserver
+		pinned.AttemptObserver = func(selected config.LocalAccount, o usageledger.Observation) {
+			completedCredential, _ = CredentialBudgetIdentity(selected)
+			if observeAttempt != nil {
+				observeAttempt(selected, o)
+			}
+		}
+		pinned.Source = func(requestTarget string) (config.LocalAccount, bool) {
+			return frameAccount, requestTarget == target && frameCurrent()
+		}
+		// The outer WebSocket selected and pinned the account. Keep a health-only
+		// pool reference when the caller supplied one; Accounts remains nil, so
+		// the inner translation cannot select a second account for this frame.
+		pinned.Accounts = nil
+		pinned.PoolGroup = nil
+		pinned.PoolEnabled = nil
+		pinned.NormalizeRequest = nil
+		pinned.BeforeDispatchAccount = nil
+		if usedAccountHook {
+			// The account hook already owns all per-turn resources. Do not run the
+			// legacy image-only hook again in the inner HTTP translation call.
+			pinned.BeforeDispatch = nil
+		}
+		pinned.InitialAttemptRelease = frameRelease
 		pinned.ServeHTTP(writer, request)
-		if writer.finish() != nil {
+		// The translated socket request is always stream=true. ServeHTTP has
+		// drained the upstream and flushed every SSE event before returning, so
+		// release the selected member before the final local [DONE] flush and
+		// the next turn. A provider response.completed frame can already have
+		// reached the client; that frame is not a local resource-release fence.
+		frameRelease()
+		finishErr := writer.finish()
+		if finishErr != nil {
 			return
 		}
 		if writer.completed != nil {
@@ -179,7 +326,7 @@ func (h *Handler) serveWebSocket(w http.ResponseWriter, r *http.Request, account
 			history := append(append([]any{}, input...), output...)
 			encoded, _ := json.Marshal(history)
 			if id != "" && len(encoded) <= maxBody {
-				last = wsHistory{id: id, request: in, input: history}
+				last = wsHistory{id: id, request: in, input: history, clientModel: clientModel, upstreamModel: model, credential: completedCredential}
 			} else {
 				last = wsHistory{}
 			}
@@ -195,6 +342,7 @@ type wsWriter struct {
 	buffer    []byte
 	err       error
 	completed map[string]any
+	failed    bool
 }
 
 func (w *wsWriter) Header() http.Header { return w.header }
@@ -242,7 +390,11 @@ func (w *wsWriter) Flush() {
 		}
 		_ = w.conn.SetWriteDeadline(time.Now().Add(30 * time.Second))
 		w.err = w.conn.WriteMessage(websocket.TextMessage, payload)
-		if event["type"] == "response.completed" {
+		response, _ := event["response"].(map[string]any)
+		if event["error"] != nil || event["type"] == "error" || event["type"] == "response.failed" || event["type"] == "response.incomplete" || response["status"] == "failed" || response["status"] == "incomplete" {
+			w.failed, w.completed = true, nil
+		}
+		if event["type"] == "response.completed" && !w.failed {
 			w.completed, _ = event["response"].(map[string]any)
 		}
 	}

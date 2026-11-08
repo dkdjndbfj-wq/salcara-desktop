@@ -1,5 +1,6 @@
 const { app, BrowserWindow, Menu, Notification, Tray, nativeImage, nativeTheme, shell, ipcMain, screen, dialog } = require('electron');
 const { spawn } = require('node:child_process');
+const { randomBytes } = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
 
@@ -30,7 +31,13 @@ let attached = false;    // using a core that was already running (not our child
 let updater = null;      // desktop/updater.cjs, created on first use
 let updateWin = null;    // the update window
 let announced = '';      // the version the update window was last opened for by itself
+let pluginSystem = null, pluginCoreLink = null, pluginQuitDone = false, pluginQuitStarted = false;
 let updateOwner = null;  // owning child/cookie during a two-phase update
+const updatePolicy = require('./update-policy.cjs');
+let policyError = '', policySync = null;
+// The plugin hook is a desktop-local capability. Generate it per process and
+// keep it out of the renderer, command line, and persisted user configuration.
+const localToken = randomBytes(32).toString('hex');
 
 if (!app.requestSingleInstanceLock()) {
   app.quit();
@@ -116,14 +123,18 @@ function hideToBall() {
 /* ---------- floating ball ---------- */
 const BALL_W = 400;
 const BALL_H = 210;
-const ROUTES = new Set(['', 'overview', 'accounts', 'setup', 'login', 'usage', 'settings', 'sessions']);
+const ROUTES = new Set(['', 'overview', 'accounts', 'mcp', 'plugins', 'setup', 'login', 'usage', 'settings', 'sessions']);
 let ballEnabled = true;
 let closedDuringStart = false; // closed on the start-up page: go straight to the ball once the core is up
-let ballDrag = null;
+let ballIpc = null, ballShowRevision = 0;
+let ballWanted = false, ballPage = null, ballRecovery = null, ballFailures = [];
 
 function ballStateFile() { return path.join(app.getPath('userData'), 'floating-ball.json'); }
 function readBallState() {
-  try { return JSON.parse(fs.readFileSync(ballStateFile(), 'utf8')); } catch { return {}; }
+  try {
+    const state = JSON.parse(fs.readFileSync(ballStateFile(), 'utf8'));
+    return state && typeof state === 'object' && !Array.isArray(state) ? state : {};
+  } catch { return {}; }
 }
 function saveBallState(extra) {
   try {
@@ -135,14 +146,64 @@ function saveBallState(extra) {
 
 // Keep the ball's centre on a visible display.
 function ballBounds() {
-  const saved = readBallState();
-  const display = saved.x !== undefined ? screen.getDisplayNearestPoint({ x: saved.x + BALL_W / 2, y: saved.y + BALL_H / 2 }) : screen.getPrimaryDisplay();
-  const wa = display.workArea;
-  let x = saved.x !== undefined ? saved.x : wa.x + wa.width - BALL_W / 2 - 84;
-  let y = saved.y !== undefined ? saved.y : wa.y + wa.height - BALL_H / 2 - 150;
-  x = Math.min(Math.max(x, wa.x - BALL_W / 2 + 40), wa.x + wa.width - BALL_W / 2 - 40);
-  y = Math.min(Math.max(y, wa.y - BALL_H / 2 + 40), wa.y + wa.height - BALL_H / 2 - 40);
-  return { x: Math.round(x), y: Math.round(y), width: BALL_W, height: BALL_H };
+  return require('./ball-ipc.cjs').restoredBallBounds(readBallState(), screen, BALL_W, BALL_H);
+}
+
+function mainVisible() { return window && !window.isDestroyed() && window.isVisible(); }
+function cancelBallRecovery() { if (ballRecovery !== null) clearTimeout(ballRecovery); ballRecovery = null; }
+
+function revealBall(current) {
+  if (ball !== current || current.isDestroyed() || ballPage?.state !== 'ready' || current.isVisible()
+    || !ballWanted || !ballEnabled || quitting || mainVisible()) return;
+  current.setBounds(ballBounds());
+  ballIpc.reset(current);
+  current.showInactive();
+  current.webContents.send('ball:shown', ballIpc.reset(current, true));
+}
+
+function failBallPage(current, error) {
+  if (ball !== current || current.isDestroyed() || ballPage?.window !== current || ballPage.state === 'failed') return;
+  ballPage.state = 'failed';
+  ballIpc.reset(current); current.hide();
+  console.error('Floating ball page unavailable:', error);
+  cancelBallRecovery();
+  if (!ballWanted || !ballEnabled || quitting || mainVisible()) return;
+  const now = Date.now();
+  ballFailures = ballFailures.filter(at => now - at < 60000);
+  // A transient load/process failure can recover quietly. Repeated crashes
+  // must not create an endless renderer restart loop in the background.
+  if (ballFailures.length >= 3) return;
+  const delay = [250, 750, 2000][ballFailures.length];
+  ballFailures.push(now);
+  const revision = ballShowRevision, page = ballPage, version = page.version;
+  ballRecovery = setTimeout(() => {
+    ballRecovery = null;
+    if (ball !== current || current.isDestroyed() || ballPage !== page || page.version !== version
+      || revision !== ballShowRevision || !ballWanted || !ballEnabled || quitting || mainVisible()) return;
+    loadBallPage(current);
+  }, delay);
+}
+
+function loadBallPage(current) {
+  if (ball !== current || current.isDestroyed() || ballPage?.window !== current) return;
+  cancelBallRecovery();
+  const page = ballPage, version = ++page.version;
+  page.state = 'loading';
+  ballIpc.reset(current); current.hide();
+  const failed = error => {
+    if (ballPage !== page || page.version !== version || error?.code === 'ERR_ABORTED') return;
+    failBallPage(current, error?.message || String(error));
+  };
+  const loaded = () => {
+    if (ball !== current || current.isDestroyed() || ballPage !== page || page.version !== version || page.state !== 'loading') return;
+    page.state = 'ready'; revealBall(current);
+  };
+  // Native load events do not identify which loadURL call they belong to. A
+  // delayed did-fail-load from a superseded navigation must not fail this page;
+  // did-finish-load can also describe Chromium's error document. Settle both
+  // outcomes through this call's versioned Promise instead.
+  try { Promise.resolve(current.loadURL(consoleURL + 'ball.html')).then(loaded, failed).catch(failed); }
+  catch (error) { failed(error); }
 }
 
 function createBall() {
@@ -168,22 +229,33 @@ function createBall() {
   ball.setIgnoreMouseEvents(true, { forward: true });
   ball.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   ball.webContents.on('will-navigate', (event) => event.preventDefault());
-  ball.on('closed', () => { ball = null; });
-  ball.loadURL(consoleURL + 'ball.html');
+  const created = ball;
+  ballPage = { window: created, state: 'loading', version: 0 };
+  ballIpc.watch(created);
+  created.on('unresponsive', () => failBallPage(created, 'renderer unresponsive'));
+  created.webContents.on('render-process-gone', (_event, details) => failBallPage(created, details?.reason || 'renderer exited'));
+  ball.on('closed', () => {
+    if (ball === created) { cancelBallRecovery(); ball = null; ballPage = null; ballShowRevision++; }
+  });
+  loadBallPage(created);
   return ball;
 }
 
 function showBall() {
-  if (!ballEnabled || quitting) return;
+  if (!ballEnabled || quitting || mainVisible()) return;
+  ballWanted = true;
   if (!ball || ball.isDestroyed()) createBall();
-  ball.setBounds(ballBounds());
-  ball.setIgnoreMouseEvents(true, { forward: true });
-  const reveal = () => { if (ball && !ball.isDestroyed()) { ball.showInactive(); ball.webContents.send('ball:shown'); } };
-  if (ball.webContents.isLoading()) ball.webContents.once('did-finish-load', reveal); else reveal();
+  // Repeated close/background requests must not reset an in-flight drag to
+  // the position saved before it, or restart the already visible animation.
+  if (ball.isVisible()) return;
+  ballShowRevision++;
+  if (ballPage?.state === 'failed') loadBallPage(ball);
+  else revealBall(ball);
 }
 
 function hideBall() {
-  if (ball && !ball.isDestroyed()) ball.hide();
+  ballWanted = false; ballShowRevision++; cancelBallRecovery();
+  if (ball && !ball.isDestroyed()) { ballIpc?.reset(ball); ball.hide(); }
 }
 
 function fromConsole(event) {
@@ -216,8 +288,11 @@ function windowBackground() {
 }
 
 function registerIpc() {
+  ballIpc = require('./ball-ipc.cjs').registerBallIpc({ ipcMain, screen, getBall: () => ball, consoleURL, showWindow, savePosition: saveBallState, width: BALL_W, height: BALL_H });
   const updateIpc = require('./update-ipc.cjs').registerUpdateIpc({ ipcMain, getWindow: () => updateWin,
-    updateURL: require('node:url').pathToFileURL(path.join(__dirname, 'update.html')).href, getUpdater, checkForUpdate });
+    updateURL: require('node:url').pathToFileURL(path.join(__dirname, 'update.html')).href, getUpdater, checkForUpdate,
+    showTasks: () => showWindow(), getState: () => ({ ...getUpdater().state(), policyError }),
+    copyDiagnostics: value => require('electron').clipboard.writeText(value) });
   require('./window-ipc.cjs').registerWindowIpc({ ipcMain, dialog, getWindow: () => window, consoleURL, fromSplash, hide: hideToBall,
     hideSplash: () => { closedDuringStart = true; if (window && !window.isDestroyed()) window.hide(); }, path,
     closeUpdate: event => { if (!updateIpc.allowed(event)) return false; updateIpc.close(event); return true; } });
@@ -257,28 +332,18 @@ function registerIpc() {
     if (await waitForBridge()) await window.loadURL(consoleURL).catch(() => {});
     else await window.loadFile(path.join(__dirname, 'loading.html'), { query: { error: `核心仍然无法启动。请检查本机 ${consolePort} 端口是否被其他程序占用。`, retry: '1' } }).catch(() => {});
   });
-  ipcMain.on('ball:show', (event, route) => {
-    if (!fromConsole(event)) return;
-    showWindow(typeof route === 'string' ? route : '');
-  });
-  ipcMain.on('ball:interactive', (event, on) => {
-    if (!fromConsole(event) || !ball || ball.isDestroyed()) return;
-    if (on) ball.setIgnoreMouseEvents(false); else if (!ballDrag) ball.setIgnoreMouseEvents(true, { forward: true });
-  });
-  ipcMain.on('ball:drag', (event, phase) => {
-    if (!fromConsole(event) || !ball || ball.isDestroyed()) return;
-    const cursor = screen.getCursorScreenPoint();
-    if (phase === 'start') {
-      const [x, y] = ball.getPosition();
-      ballDrag = { dx: cursor.x - x, dy: cursor.y - y };
-    } else if (phase === 'move' && ballDrag) {
-      ball.setPosition(Math.round(cursor.x - ballDrag.dx), Math.round(cursor.y - ballDrag.dy));
-    } else if (phase === 'end') {
-      ballDrag = null;
-      const [x, y] = ball.getPosition();
-      saveBallState({ x, y });
-    }
-  });
+}
+
+async function startPluginSystem() {
+  // The window must exist before plugin callbacks can send UI events. Finish
+  // binding the authenticated loopback hook before starting a new core so the
+  // first local run receives the same plugin configuration as later restarts.
+  pluginSystem = await require('./plugin-ipc.cjs').init({ app, getWindow: () => window, getBall: () => ball, consoleURL, showWindow, localToken });
+  const { hookPort } = pluginSystem;
+  pluginCoreLink = require('./plugin-core-link.cjs').createCoreLink({ consoleURL, hookPort, token: localToken, onState: state => pluginSystem?.setConnection(state) });
+  process.env.SALCARA_PLUGIN_HOOK_PORT = String(hookPort);
+  process.env.SALCARA_PLUGIN_HOOK_TOKEN = localToken;
+  void pluginCoreLink.start();
 }
 
 function setBallEnabled(on) {
@@ -311,8 +376,8 @@ function createWindow() {
     },
   });
   window.setMenuBarVisibility(false);
-  // Official download pages open in the system browser; nothing else leaves the app.
-  const external = new Set(['https://chatgpt.com/codex', 'https://claude.ai/download', 'https://git-scm.com/download/win']);
+  // Known download pages and the project repository open in the system browser.
+  const external = new Set(['https://chatgpt.com/codex', 'https://claude.ai/download', 'https://git-scm.com/download/win', 'https://github.com/dkdjndbfj-wq/salcara-desktop']);
   window.webContents.setWindowOpenHandler(({ url }) => {
     if (external.has(url)) shell.openExternal(url);
     return { action: 'deny' };
@@ -380,6 +445,11 @@ function spawnCore() {
     env: {
       ...process.env,
       SALCARA_EMBEDDED_WINDOW: '1',
+      SALCARA_UPDATE_POLICY: JSON.stringify(updatePolicy.corePolicy(getUpdater().state())),
+      // Plugin hook server — set by plugin-ipc.cjs after init(); absent on very
+      // first launch (before the hook server is up) but present on restarts.
+      ...(process.env.SALCARA_PLUGIN_HOOK_PORT  ? { SALCARA_PLUGIN_HOOK_PORT:  process.env.SALCARA_PLUGIN_HOOK_PORT  } : {}),
+      ...(process.env.SALCARA_PLUGIN_HOOK_TOKEN ? { SALCARA_PLUGIN_HOOK_TOKEN: process.env.SALCARA_PLUGIN_HOOK_TOKEN } : {}),
       // Start at login launches this app (tray + floating ball), not the bare core.
       ...(app.isPackaged ? { SALCARA_DESKTOP_EXE: process.execPath } : {}),
       ...(!app.isPackaged ? { SALCARA_DESKTOP_COMPANION_DIR: path.resolve(__dirname, '../../desktop-companion') } : {}),
@@ -443,7 +513,7 @@ function attachToRunningCore() {
 }
 
 function reloadBall() {
-  if (ball && !ball.isDestroyed()) ball.webContents.reload();
+  if (ball && !ball.isDestroyed()) loadBallPage(ball);
 }
 
 function notify(title, body) {
@@ -463,28 +533,57 @@ function updateRepo() {
 function getUpdater() {
   if (updater) return updater;
   const { createUpdater } = require('./updater.cjs');
-  let lastPhase = '';
+  let lastUpdateMenu = '';
   updater = createUpdater({
     app, shell, platform: process.platform, arch: process.arch, execPath: process.execPath, isPackaged: app.isPackaged,
-    repo: updateRepo(), publicKey: String(require('./package.json').salcaraUpdatePublicKey || ''), userData: app.getPath('userData'),
+    repo: updateRepo(), publicKey: String(require('./package.json').salcaraUpdatePublicKey || ''),
+    controlURL: String(require('./package.json').salcaraUpdateControlURL || ''), userData: app.getPath('userData'),
     onChange(state) {
-      if (updateWin && !updateWin.isDestroyed()) updateWin.webContents.send('upd:state', state);
-      if (state.phase !== lastPhase) { lastPhase = state.phase; updateTrayMenu(); }
+      broadcastUpdateState(state);
+      void syncUpdatePolicy();
+      const menu = `${state.phase}:${state.version || ''}:${state.required}`;
+      if (menu !== lastUpdateMenu) { lastUpdateMenu = menu; updateTrayMenu(); }
     },
     beforeInstall: stopForUpdate,
     commitInstall: commitForUpdate,
     installAborted: abortForUpdate,
+    recoverAtLogin: true,
   });
   return updater;
 }
 function updateSummary() {
-  const st = getUpdater().state();
-  const known = ['available', 'downloading', 'verifying', 'ready'].includes(st.phase) && st.version;
-  return { current: app.getVersion(), configured: Boolean(updateRepo()), phase: st.phase, update: known ? { version: st.version } : null };
+  return updatePolicy.summary({ ...getUpdater().state(), policyError }, Boolean(updateRepo()));
+}
+function broadcastUpdateState(state = getUpdater().state()) {
+  if (updateWin && !updateWin.isDestroyed()) updateWin.webContents.send('upd:state', { ...state, policyError });
+  if (window && !window.isDestroyed()) window.webContents.send('update:state', updatePolicy.summary({ ...state, policyError }, Boolean(updateRepo())));
+}
+async function syncUpdatePolicy(force = false) {
+  // An unknown/offline/unsigned check has no authority to clear a requirement
+  // already held by an attached core. Only publish verified release policy.
+  if (!getUpdater().state().policyVerified) return;
+  if (!policySync) policySync = updatePolicy.createPolicySync({
+    async apply(policy) {
+      const cookies = await require('electron').session.defaultSession.cookies.get({ url: consoleURL, name: 'salcara_console' });
+      if (cookies.length !== 1) throw new Error('Core session unavailable');
+      const headers = { 'Content-Type': 'application/json', Origin: consoleURL.slice(0, -1), Cookie: `salcara_console=${cookies[0].value}` };
+      const identityResponse = await fetch(consoleURL + 'api/update/policy', { headers, signal: AbortSignal.timeout(5000) });
+      const identity = await identityResponse.json();
+      if (!identityResponse.ok || !Number.isInteger(identity.pid) || !/^\d+\.\d+\.\d+(?:-test\.\d+)?$/.test(identity.version)) throw new Error('Core version unavailable');
+      const coreRequired = Boolean(policy.minimumSupportedVersion && require('./updater.cjs').newer(policy.minimumSupportedVersion, identity.version));
+      const response = await fetch(consoleURL + 'api/update/policy', { method: 'POST', headers, signal: AbortSignal.timeout(5000),
+        body: JSON.stringify({ pid: identity.pid, version: identity.version, ...policy, required: coreRequired }) });
+      if (!response.ok || (await response.json()).ok !== true) throw new Error('Core policy rejected');
+    },
+    onError(message) { if (policyError !== message) { policyError = message; broadcastUpdateState(); } },
+  });
+  return policySync.sync(updatePolicy.corePolicy(getUpdater().state()), force);
 }
 function updateTrayItems() {
   if (!updater) return [];
   const st = updater.state();
+  if (st.required) return [{ label: `需要更新至 ${st.version}（当前版本不再支持）`, click: () => openUpdateWindow(false) }];
+  if (st.phase === 'waiting') return [{ label: '更新已下载，等待任务结束后自动安装', click: () => openUpdateWindow(false) }];
   if (st.phase === 'ready') return [{ label: `重启以完成更新 ${st.version}`, click: () => openUpdateWindow(false) }];
   if (st.phase === 'downloading' || st.phase === 'verifying') return [{ label: `正在下载更新 ${st.version}…`, click: () => openUpdateWindow(false) }];
   if (st.phase === 'available') return [{ label: `有新版本 ${st.version}`, click: () => openUpdateWindow(false) }];
@@ -494,10 +593,13 @@ async function checkForUpdate(manual) {
   getUpdater().cleanup();
   const st = await getUpdater().check(manual);
   // Found by the periodic check: open the window once per version, without taking focus, unless skipped.
-  if (!manual && st.phase === 'available' && st.version && announced !== st.version && !getUpdater().skipped(st.version)) {
-    announced = st.version;
-    openUpdateWindow(true);
+  await syncUpdatePolicy();
+  const key = updatePolicy.announcementKey(st);
+  if (!manual && (st.phase === 'available' || st.required) && key && announced !== key && !getUpdater().skipped(st.version)) {
+    announced = key;
+    openUpdateWindow(!st.required);
   }
+  if (['available', 'ready', 'waiting'].includes(st.phase) && st.canInstall && !st.autoPaused && !st.autoBlocked && !st.distributionReason && (manual || !getUpdater().skipped(st.version))) void getUpdater().startAutoUpdate({ manual: false });
   return st;
 }
 function openUpdateWindow(quiet) {
@@ -506,16 +608,21 @@ function openUpdateWindow(quiet) {
     return;
   }
   updateWin = new BrowserWindow({
-    title: '软件更新', width: 440, height: 560, resizable: false, maximizable: false, minimizable: false, fullscreenable: false,
+    title: '软件更新', width: 480, height: 650, resizable: false, maximizable: false, minimizable: false, fullscreenable: false,
     frame: false, roundedCorners: true, show: false, backgroundColor: windowBackground(), icon: nativeImage.createFromPath(appIcon()),
     webPreferences: { nodeIntegration: false, contextIsolation: true, sandbox: true, webviewTag: false, preload: path.join(__dirname, 'preload.cjs') },
   });
   updateWin.setMenuBarVisibility(false);
+  // Use the very same CSS as the home screen; packaged builds carry that source
+  // as a resource, and development reads it directly from the console.
+  const orbStyle = fs.readFileSync(app.isPackaged ? path.join(process.resourcesPath, 'home-orb.css') : path.resolve(__dirname, '../internal/console/web/home-orb.css'), 'utf8');
+  updateWin.webContents.on('dom-ready', () => { if (updateWin && !updateWin.isDestroyed()) void updateWin.webContents.insertCSS(orbStyle); });
   updateWin.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   updateWin.webContents.on('will-navigate', (event) => event.preventDefault());
   updateWin.once('ready-to-show', () => { if (quiet) updateWin.showInactive(); else updateWin.show(); });
   updateWin.on('closed', () => { updateWin = null; });
   updateWin.loadFile(path.join(__dirname, 'update.html'));
+  updateWin.webContents.once('did-finish-load', () => broadcastUpdateState());
 }
 /** Before the folders are swapped: stop the core and let the app quit. */
 async function stopForUpdate() {
@@ -537,7 +644,11 @@ async function updateRequest(action) {
       body: JSON.stringify({ pid: updateOwner.child.pid, version: app.getVersion() }),
     });
   const body = await response.json();
-  if (!response.ok || body.ok !== true) throw new Error(body.error || '核心未允许更新');
+  if (!response.ok || body.ok !== true) {
+    const error = new Error(body.error || '核心未允许更新');
+    error.updateBusy = action === 'prepare' && response.status === 409 && body.code === 'update_busy';
+    throw error;
+  }
 }
 
 async function commitForUpdate() {
@@ -566,7 +677,7 @@ function reportUpdateResult() {
   const done = getUpdater().afterRestart();
   if (!done) return;
   if (done.ok) notify(`已更新到 ${app.getVersion()}`, '新版本已经在运行。');
-  else notify('更新没有完成', `仍在使用 ${app.getVersion()}。可以在「设置 → 版本更新」里重试。`);
+  else notify('更新已回退', `仍在使用 ${app.getVersion()}，已停止对失败版本的自动重试。可以在「设置 → 版本更新」中查看详情。`);
 }
 
 async function start() {
@@ -577,6 +688,13 @@ async function start() {
   registerIpc();
   createWindow();
   createTray();
+  getUpdater().cleanup();
+  if (getUpdater().state().required) { announced = updatePolicy.announcementKey(getUpdater().state()); openUpdateWindow(false); }
+  setTimeout(() => void checkForUpdate(false), 20000);
+  setInterval(() => void checkForUpdate(false), 2 * 3600 * 1000);
+  setInterval(() => { if (policyError || getUpdater().state().required) void syncUpdatePolicy(true); }, 10000);
+  try { await startPluginSystem(); }
+  catch (error) { console.error('[plugins] init failed:', error); }
   if (await healthy()) attachToRunningCore();
   else spawnCore();
   if (!(await waitForBridge())) {
@@ -584,6 +702,7 @@ async function start() {
     if (startHidden) showWindow();
     return;
   }
+  void pluginCoreLink?.start();
   // Let the start-up animation finish, then hand over to the console, which
   // carries the orb and the name to their places (?boot=1). Skipped when
   // starting hidden: nobody is watching.
@@ -598,15 +717,26 @@ async function start() {
     else await window.loadURL(consoleURL + '?boot=1');
   }
   if (startHidden || closedDuringStart || !window.isVisible()) showBall();
+  await syncUpdatePolicy(true);
   getUpdater().cleanup();
   reportUpdateResult();
   setTimeout(() => getUpdater().cleanup(), 5000);
-  setTimeout(() => void checkForUpdate(false), 20000);
-  setInterval(() => void checkForUpdate(false), 2 * 3600 * 1000);
 }
 
-app.on('before-quit', () => {
+app.on('before-quit', event => {
+  if (!pluginQuitDone && pluginSystem) {
+    event.preventDefault();
+    if (pluginQuitStarted) return;
+    pluginQuitStarted = true; quitting = true;
+    void (async () => {
+      try { await pluginCoreLink?.stop(); await require('./plugin-ipc.cjs').close(); }
+      catch (error) { console.error('[plugins] shutdown failed:', error); }
+      finally { pluginQuitDone = true; app.quit(); }
+    })();
+    return;
+  }
   quitting = true;
+  cancelBallRecovery();
   clearInterval(attachTimer);
   if (bridge && bridge.exitCode === null) bridge.kill();
 });

@@ -2,7 +2,7 @@
 /* 环境: detect Claude Code / Codex CLI (and Git on Windows) and install them
    with the vendors' official installers in one click. */
 
-const SU = { poll: 0, discoveryPoll: 0, job: null, cached: null, local: null };
+const SU = { poll: 0, discoveryPoll: 0, discoveryDelay: 500, renderView: null, renderSignature: '', job: null, cached: null, local: null };
 
 function suRow(item, busy) {
   const ok = item.installed;
@@ -26,7 +26,7 @@ function suRow(item, busy) {
 
 function suJob(job) {
   if (!job) return '';
-  const name = { claude: 'Claude Code', codex: 'Codex CLI', git: 'Git' }[job.tool] || job.tool;
+  const name = { claude: 'Claude Code', codex: 'Codex CLI', git: 'Git', 'claude-sdk': 'Claude 会话管理', 'deepseek-harness': 'DeepSeek Harness', hermes: 'Hermes Agent' }[job.tool] || job.tool;
   const head = job.state === 'running' ? `正在安装 ${name}…` : job.state === 'done' ? `${name} 安装完成` : `${name} 安装失败${job.error ? '：' + job.error : ''}`;
   return `<div class="card" id="suJob">
     <div class="su-head">${job.state === 'running' ? '' : icon(job.state === 'done' ? 'check' : 'warn')}<span>${esc(head)}</span><span class="spacer"></span>
@@ -41,6 +41,20 @@ function renderSetup(view, r, local) {
   SU.job = r.job && (r.job.state === 'running' || Date.now() - (r.job.finished || 0) < 60_000) ? r.job : null;
   const busy = SU.job && SU.job.state === 'running';
   const missing = r.items.filter((item) => item.required && !item.installed);
+  const setupDot = $('#setupDot');
+  if (setupDot) setupDot.hidden = missing.length === 0;
+  const signature = JSON.stringify({
+    os: r.os,
+    discoveryPending: r.discoveryPending,
+    items: r.items.map((item) => [item.id, item.name, item.required, item.installed, item.source, item.installable, item.download, item.version, item.role, item.note]),
+    job: SU.job && [SU.job.tool, SU.job.state, SU.job.error, SU.job.finished],
+    tools: local?.tools?.map((item) => [item.id, item.name, item.available, item.path]),
+    toolPaths: local?.toolPaths,
+  });
+  if (SU.renderView === view && SU.renderSignature === signature) {
+    if (busy) suPoll();
+    return;
+  }
   $('#headActions').innerHTML = `<button class="btn sm" data-act="suRefresh">${icon('refresh')}重新检测</button>`;
   view.innerHTML = `
     ${missing.length ? `<div class="callout warn">${ico('warn')}<div>还差 ${missing.map((item) => esc(item.name)).join('、')}。装好后手机才能继续这台电脑上的对话。</div></div>`
@@ -48,13 +62,16 @@ function renderSetup(view, r, local) {
     <div class="su-list">${r.items.map((item) => suRow(item, busy)).join('')}</div>
     ${suJob(SU.job)}
     ${local && local.tools ? localToolPathsPanel(local) : ''}
-    <p class="su-foot">使用 Anthropic 与 OpenAI 的官方安装脚本${r.os === 'windows' ? '，Git 通过 winget 安装' : ''}。</p>`;
+    <p class="su-foot">CLI 使用官方安装脚本，会话管理使用 Anthropic 官方 SDK${r.os === 'windows' ? '，Git 通过 winget 安装' : ''}。</p>`;
+  SU.renderView = view;
+  SU.renderSignature = signature;
   if (busy) suPoll();
 }
 var RENDER_setup = function (view) {
   // Keep the panel visible while local executable/version checks run.
   if (SU.cached) renderSetup(view, SU.cached, SU.local);
-  else view.innerHTML = '<div class="card"><div class="skeleton" style="width:44%"></div><div class="skeleton" style="width:82%;margin-top:12px"></div><div class="skeleton" style="width:66%;margin-top:12px"></div></div>';
+  else view.innerHTML = typeof pageSkeleton === 'function' ? pageSkeleton('setup') : '<div class="card"><div class="skeleton" style="width:44%"></div><div class="skeleton" style="width:82%;margin-top:12px"></div></div>';
+  SU.discoveryDelay = 500;
   void loadSetup(view);
 };
 
@@ -65,9 +82,12 @@ async function loadSetup(view, refresh = false) {
     if (view.isConnected === false || S.route !== 'setup') return;
     SU.cached = r; SU.local = local;
     renderSetup(view, r, local);
-    if (r.discoveryPending || local?.discoveryPending) SU.discoveryPoll = setTimeout(() => {
-      if (view.isConnected !== false && S.route === 'setup') void loadSetup(view);
-    }, 500);
+    if (r.discoveryPending || local?.discoveryPending) {
+      if (!document.hidden) SU.discoveryPoll = setTimeout(() => {
+        if (view.isConnected !== false && S.route === 'setup' && !document.hidden) void loadSetup(view);
+      }, SU.discoveryDelay);
+      SU.discoveryDelay = Math.min(4000, SU.discoveryDelay * 2);
+    } else SU.discoveryDelay = 500;
   } catch (error) {
     if (view.isConnected !== false && S.route === 'setup' && !SU.cached) view.innerHTML = `<div class="callout bad">${ico('warn')}<div>${esc(error.message)}</div></div>`;
   }

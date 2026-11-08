@@ -1,6 +1,7 @@
 package agents
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -179,6 +180,41 @@ func (a *codexAgent) RespondWithAnswers(id string, response ApprovalResponse) bo
 
 func (a *claudeAgent) RespondWithAnswers(id string, response ApprovalResponse) bool {
 	return a.aps.answer(id, approvalAnswer{decision: normalizeDecision(response.Decision), message: response.Message, by: "phone", answers: response.Answers})
+}
+
+func (a *codexAgent) RespondForSession(ctx context.Context, sessionKey, id string, response ApprovalResponse) bool {
+	if !strings.HasPrefix(sessionKey, "codex:") || strings.TrimPrefix(sessionKey, "codex:") == "" {
+		return false
+	}
+	s := settingsForContext(ctx, a.settings)
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	// Keep the worker check and registry consumption inside one lifecycle
+	// lock, so a settings restart cannot replace the checked worker between them.
+	if a.closed || a.conn == nil || !a.conn.alive() || a.connSig != codexSig(s) {
+		return false
+	}
+	return a.aps.answerForSessionSource(sessionKey, id, approvalAnswer{decision: normalizeDecision(response.Decision), message: response.Message, by: "phone", answers: response.Answers}, a.conn.done)
+}
+
+func (a *claudeAgent) RespondForSession(ctx context.Context, sessionKey, id string, response ApprovalResponse) bool {
+	s := settingsForContext(ctx, a.settings)
+	_, session, ok := strings.Cut(sessionKey, ":")
+	if !ok || session == "" || !strings.HasPrefix(sessionKey, "claude:") {
+		return false
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	p := a.procs[session]
+	if a.closed || p == nil || p.workerSettingsSig != claudeSettingsSig(s, a.exeOverride) {
+		return false
+	}
+	select {
+	case <-p.done:
+		return false
+	default:
+	}
+	return a.aps.answerForSession(sessionKey, id, approvalAnswer{decision: normalizeDecision(response.Decision), message: response.Message, by: "phone", answers: response.Answers})
 }
 
 type formRule struct {

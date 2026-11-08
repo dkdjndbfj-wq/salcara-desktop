@@ -1,0 +1,7 @@
+/* A source label above the existing message bubble; it grants no actions. */
+.msg-envelope { display: flex; flex-direction: column; gap: 6px; max-width: 86%; min-width: 0; }
+.msg-envelope.user { align-self: flex-end; align-items: flex-end; }
+.msg-envelope > .msg { max-width: 100%; }
+.msg-origin { display: flex; align-items: center; gap: 6px; max-width: 100%; padding: 0 2px; color: var(--muted); font-size: 12px; line-height: 18px; }
+.msg-origin img { flex: 0 0 16px; width: 16px; height: 16px; object-fit: contain; }
+.msg-origin span { min-width: 0; overflow-wrap: anywhere; }

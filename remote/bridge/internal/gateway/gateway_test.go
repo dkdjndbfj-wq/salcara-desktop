@@ -208,6 +208,29 @@ func TestGatewayLoopbackAuthenticationAndSourceInvalidation(t *testing.T) {
 	}
 }
 
+func TestGatewayLeaseRotationRejectsPreviousProcessCredential(t *testing.T) {
+	lease := "fresh-process-lease"
+	h := New(func() string { return lease }, func(string) (config.LocalAccount, bool) { return config.LocalAccount{}, false })
+	request := func(key string) int {
+		r := httptest.NewRequest("GET", "/gateway/codex/v1/models", nil)
+		r.RemoteAddr = "127.0.0.1:10"
+		r.Header.Set("Authorization", "Bearer "+key)
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		return w.Code
+	}
+	if got := request("old-process-lease"); got != http.StatusUnauthorized {
+		t.Fatalf("stale gateway lease was accepted: %d", got)
+	}
+	if got := request(lease); got != http.StatusConflict {
+		t.Fatalf("fresh lease did not reach account validation: %d", got)
+	}
+	lease = "next-process-lease"
+	if got := request("fresh-process-lease"); got != http.StatusUnauthorized {
+		t.Fatalf("rotated gateway lease remained valid: %d", got)
+	}
+}
+
 func TestTruncatedAndErroredStreamsNeverManufactureCompletion(t *testing.T) {
 	for _, output := range []string{`data: {"choices":[{"index":0,"delta":{"content":"partial"}}]}` + "\n\n", `data: {"error":{"message":"` + upstreamTestKey + `"}}` + "\n\n"} {
 		h := fixtureGateway(t, "codex", "chat", output, "text/event-stream", nil)

@@ -1,6 +1,24 @@
 name: Build Windows installer and signed updates
 on:
   workflow_dispatch:
+    inputs:
+      minimum_supported_version:
+        description: '最低支持的桌面版本（留空为普通更新；三段数字且不得高于本次版本）'
+        required: false
+        type: string
+      update_reason:
+        description: '必须更新的原因（可选，最多 1000 字符；需同时填写最低支持版本）'
+        required: false
+        type: string
+      windows_signing:
+        description: '使用已配置的 Windows 代码签名证书（默认关闭；更新包仍必须通过 Ed25519 签名）'
+        required: false
+        type: boolean
+        default: false
+      release_control:
+        description: '启用已发布的 GitHub 签名分发控制（需先运行 Publish signed desktop rollout control）'
+        type: boolean
+        default: false
 permissions:
   contents: read
 jobs:
@@ -60,9 +78,40 @@ jobs:
       - name: Build complete desktop directory
         working-directory: remote/bridge/desktop
         run: npm run package
+      - name: Import optional Windows code signing certificate
+        if: inputs.windows_signing
+        shell: pwsh
+        env:
+          CERTIFICATE_BASE64: ${{ secrets.SALCARA_WINDOWS_CERTIFICATE_BASE64 }}
+          CERTIFICATE_PASSWORD: ${{ secrets.SALCARA_WINDOWS_CERTIFICATE_PASSWORD }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:CERTIFICATE_BASE64)) { throw 'Windows signing was requested but no certificate is configured' }
+          $certificateFile = Join-Path $env:RUNNER_TEMP 'salcara-windows-signing.pfx'
+          try {
+            [IO.File]::WriteAllBytes($certificateFile, [Convert]::FromBase64String($env:CERTIFICATE_BASE64))
+            $password = ConvertTo-SecureString $env:CERTIFICATE_PASSWORD -AsPlainText -Force
+            $certificate = Import-PfxCertificate -FilePath $certificateFile -CertStoreLocation Cert:\CurrentUser\My -Password $password
+            if (@($certificate).Count -ne 1 -or -not $certificate.HasPrivateKey) { throw 'One code-signing certificate with its private key is required' }
+            "SALCARA_AUTHENTICODE_THUMBPRINT=$($certificate.Thumbprint)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+            $signTool = Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\bin\*\x64\signtool.exe' | Sort-Object FullName -Descending | Select-Object -First 1
+            if (-not $signTool) { throw 'Windows SDK signing tool is missing' }
+            "SALCARA_SIGNTOOL=$($signTool.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          } finally { if (Test-Path -LiteralPath $certificateFile) { Remove-Item -LiteralPath $certificateFile -Force } }
+      - name: Sign and verify Windows payload
+        if: inputs.windows_signing
+        working-directory: remote/bridge/desktop
+        run: node scripts/authenticode.cjs sign "out/Salcara Bridge-win32-x64"
       - name: Build current-user Windows installer
         working-directory: remote/bridge/desktop
         run: npm run installer
+      - name: Sign and verify Windows installer
+        if: inputs.windows_signing
+        working-directory: remote/bridge/desktop
+        shell: pwsh
+        run: |
+          $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          node scripts/authenticode.cjs sign "out/release/Salcara-Desktop-$version-win32-x64-setup.exe"
+          if ($LASTEXITCODE -ne 0) { throw 'Windows installer signing failed' }
       - name: Install, reinstall, downgrade protection and uninstall (isolated Windows user)
         shell: pwsh
         run: ./remote/bridge/desktop/scripts/test-installer.ps1
@@ -83,9 +132,17 @@ jobs:
       - name: Create and verify signed update manifest and archive
         working-directory: remote/bridge/desktop
         shell: pwsh
+        env:
+          RELEASE_MINIMUM_SUPPORTED_VERSION: ${{ inputs.minimum_supported_version }}
+          RELEASE_UPDATE_REASON: ${{ inputs.update_reason }}
+          RELEASE_CONTROL: ${{ inputs.release_control }}
         run: |
           $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
-          npm run release -- --notes "../../../docs/RELEASE-$version.md"
+          $releaseArgs = @('--notes', "../../../docs/RELEASE-$version.md")
+          if (-not [string]::IsNullOrWhiteSpace($env:RELEASE_MINIMUM_SUPPORTED_VERSION)) { $releaseArgs += @('--minimum-supported-version', $env:RELEASE_MINIMUM_SUPPORTED_VERSION) }
+          if (-not [string]::IsNullOrWhiteSpace($env:RELEASE_UPDATE_REASON)) { $releaseArgs += @('--update-reason', $env:RELEASE_UPDATE_REASON) }
+          if ($env:RELEASE_CONTROL -eq 'true') { $releaseArgs += @('--control-url', "https://github.com/$env:GITHUB_REPOSITORY/releases/download/update-control/control.json") }
+          node scripts/release.cjs @releaseArgs
           if ($LASTEXITCODE -ne 0) { throw 'Signed archive creation failed' }
       - name: Create portable download and checksum list
         working-directory: remote/bridge/desktop
@@ -112,5 +169,9 @@ jobs:
         run: |
           $keyPath = Join-Path $env:RUNNER_TEMP 'salcara-desktop-update-signing-key.pem'
           if (Test-Path -LiteralPath $keyPath) { Remove-Item -LiteralPath $keyPath -Force }
+          if ($env:SALCARA_AUTHENTICODE_THUMBPRINT -match '^[A-Fa-f0-9]{40}$') {
+            $certificatePath = 'Cert:\CurrentUser\My\' + $env:SALCARA_AUTHENTICODE_THUMBPRINT
+            if (Test-Path -LiteralPath $certificatePath) { Remove-Item -LiteralPath $certificatePath -DeleteKey -Force }
+          }
       # A separate verification workflow stages a draft v<version>; this workflow
       # does not create, overwrite or expose a GitHub Release on its own.

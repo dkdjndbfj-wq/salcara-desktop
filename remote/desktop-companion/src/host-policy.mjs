@@ -9,13 +9,21 @@ export const KNOWN_RESOURCES_PATH = String.raw`C:\Program Files\WindowsApps\Open
 export const KNOWN_ASAR_SHA256 = "fb7b2ee791bcbdb3c4a6375e9fec8fb404f3eaff995f0d293227354b298aff49";
 export const CURRENT_RESOURCES_PATH = String.raw`C:\Program Files\WindowsApps\OpenAI.Codex_26.930.2377.0_x64__2p2nqsd0c76g0\app\resources`;
 export const CURRENT_ASAR_SHA256 = "7a65bbbdf265aaa130a6670f1d310e7113646f9b86b2e9602e82fee400a92856";
-const RESEARCHED_HOSTS = new Map([[KNOWN_RESOURCES_PATH.toLowerCase(), KNOWN_ASAR_SHA256],
-  [CURRENT_RESOURCES_PATH.toLowerCase(), CURRENT_ASAR_SHA256]]);
+export const LATEST_RESOURCES_PATH = String.raw`C:\Program Files\WindowsApps\OpenAI.Codex_26.1007.2314.0_x64__2p2nqsd0c76g0\app\resources`;
+export const LATEST_ASAR_SHA256 = "c5fdef328cfa2ad9095786f9c3a7aaa447e68834d31299d6ef2592da02029038";
+export const LATEST_ARCHIVE_BYTES = 567399024;
+const LEGACY_MAX_ARCHIVE_BYTES = 512 * 1024 * 1024;
+// Each researched build has its own bound. A larger new package must not
+// expand the legacy limit or turn discovery of an unknown version into trust.
+const RESEARCHED_HOSTS = new Map([
+  [KNOWN_RESOURCES_PATH.toLowerCase(), { digest: KNOWN_ASAR_SHA256, maxBytes: LEGACY_MAX_ARCHIVE_BYTES }],
+  [CURRENT_RESOURCES_PATH.toLowerCase(), { digest: CURRENT_ASAR_SHA256, maxBytes: LEGACY_MAX_ARCHIVE_BYTES }],
+  [LATEST_RESOURCES_PATH.toLowerCase(), { digest: LATEST_ASAR_SHA256, maxBytes: LATEST_ARCHIVE_BYTES, archiveBytes: LATEST_ARCHIVE_BYTES }],
+]);
 export const WINDOWS_PIPE_PATTERN = /^\\\\\.\\pipe\\codex-browser-use-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const TOOL_CALL_PATTERN = /^call_[a-zA-Z0-9_-]{8,120}$/;
-const MAX_ARCHIVE_BYTES = 512 * 1024 * 1024;
 const VERSION_CHECK_TIMEOUT_MS = 3000;
 
 function matchesKnownResources(value) {
@@ -65,7 +73,7 @@ export function extractHostContext(meta) {
     turnId: (meta["openai/turnId"] ?? encoded.turn_id).toLowerCase() };
 }
 
-async function hashKnownArchive(archivePath) {
+async function hashKnownArchive(archivePath, maxBytes = LEGACY_MAX_ARCHIVE_BYTES) {
   let stream;
   let timer;
   try {
@@ -75,7 +83,7 @@ async function hashKnownArchive(archivePath) {
     let bytes = 0;
     for await (const chunk of stream) {
       bytes += chunk.length;
-      if (bytes > MAX_ARCHIVE_BYTES) throw new Error("ARCHIVE_TOO_LARGE");
+      if (bytes > maxBytes) throw new Error("ARCHIVE_TOO_LARGE");
       hash.update(chunk);
     }
     return hash.digest("hex");
@@ -94,6 +102,7 @@ export function createResourceVerifier({
   return async (resourcesPath) => {
     if (platform !== "win32" || !matchesKnownResources(resourcesPath)) return false;
     try {
+      const researched = RESEARCHED_HOSTS.get(resourcesPath.toLowerCase());
       // Refuse redirected package/resource paths. The only file read is app.asar.
       let current = resourcesPath;
       while (current !== win32.parse(current).root) {
@@ -105,9 +114,10 @@ export function createResourceVerifier({
       const archivePath = win32.join(resourcesPath, "app.asar");
       const archiveInfo = await inspectPath(archivePath);
       if (!archiveInfo.isFile() || archiveInfo.isSymbolicLink() || !Number.isSafeInteger(archiveInfo.size) ||
-          archiveInfo.size <= 0 || archiveInfo.size > MAX_ARCHIVE_BYTES ||
+          archiveInfo.size <= 0 || archiveInfo.size > researched.maxBytes ||
+          (researched.archiveBytes !== undefined && archiveInfo.size !== researched.archiveBytes) ||
           (await resolvePath(archivePath)).toLowerCase() !== archivePath.toLowerCase()) return false;
-      return await hashArchive(archivePath) === RESEARCHED_HOSTS.get(resourcesPath.toLowerCase());
+      return await hashArchive(archivePath, researched.maxBytes) === researched.digest;
     } catch {
       return false;
     }

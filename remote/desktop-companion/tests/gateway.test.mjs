@@ -7,6 +7,7 @@ import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { createDesktopConnect, validConnectArguments, DESKTOP_CAPABILITIES } from "../src/gateway.mjs";
 import { runPermissionHook } from "../src/permission-hook.mjs";
+import { createOperationLedger } from "../src/operation-ledger.mjs";
 
 const caller = "11111111-2222-4333-8444-555555555555";
 const target = "22222222-2222-4333-8444-555555555555";
@@ -37,7 +38,7 @@ async function fixture(overrides = {}) {
   await ready;
   const rpc = async (body, options = {}) => {
     return new Promise((resolve, reject) => {
-      const request = httpRequest(`http://127.0.0.1:${descriptor.port}/rpc`, { method: "POST", headers: {
+      const request = httpRequest(`http://127.0.0.1:${descriptor.port}/rpc`, { method: "POST", signal: options.signal, headers: {
         "Content-Type": "application/json", Authorization: `Bearer ${descriptor.token}`, ...options.headers,
       } }, (response) => {
         let data = ""; response.on("data", (chunk) => { data += chunk; });
@@ -48,6 +49,45 @@ async function fixture(overrides = {}) {
   };
   return { descriptor, done, controller, calls, rpc, connect, hashes: () => hashes, writes: () => writes, removes: () => removes };
 }
+
+test("runtime model schema preserves exact native options and receipt identity", async () => {
+  let catalogReads = 0;
+  const f = await fixture({ catalog: async () => { catalogReads++; return { names: ["list_threads", "read_thread", "send_message_to_thread"], sendOptions: { model: true, thinking: ["low", "high"] } }; } });
+  try {
+    const status = (await f.rpc({ type: "status" })).body.result;
+    assert.equal(status.capabilities.modelOverride, true);
+    assert.equal(status.modelOverrideTransport, "codex-tool-schema-v1");
+    assert.deepEqual(status.modelOptions, { model: true, thinking: ["low", "high"] });
+    const command = { type: "send", sessionKey: key, text: "same native task", model: "gpt-fixture", thinking: "high", operationId: "55555555-2222-4333-8444-555555555555" };
+    assert.equal((await f.rpc(command)).body.ok, true);
+    assert.equal((await f.rpc(command)).body.ok, true);
+    assert.equal(catalogReads, 2, "completed receipt must not re-probe or repeat the task");
+    const sent = f.calls.filter(call => call.tool === "send_message_to_thread");
+    assert.equal(sent.length, 1);
+    assert.deepEqual(sent[0].args, { threadId: target, prompt: command.text, model: "gpt-fixture", thinking: "high" });
+    for (const change of [{ model: "other" }, { thinking: "low" }]) {
+      assert.equal((await f.rpc({ ...command, ...change })).body.error, "OPERATION_CONFLICT");
+    }
+  } finally { f.controller.abort(); await f.done; }
+});
+
+test("missing, downgraded or unavailable host contract rejects overrides before dispatch", async () => {
+  for (const mode of ["legacy", "lost", "error", "thinking"]) {
+    let reads = 0;
+    const names = ["list_threads", "read_thread", "send_message_to_thread"];
+    const f = await fixture({ catalog: async () => {
+      reads++;
+      if (mode === "legacy" || mode === "lost" && reads > 1) return names;
+      if (mode === "error" && reads > 1) throw new Error("PRIVATE HOST DETAIL");
+      return { names, sendOptions: { model: true, thinking: ["low"] } };
+    } });
+    try {
+      const reply = await f.rpc({ type: "send", sessionKey: key, text: "not sent", model: "gpt-fixture", thinking: mode === "thinking" ? "high" : "low", operationId: "55555555-2222-4333-8444-555555555555" });
+      assert.equal(reply.body.error, "CAPABILITY_UNAVAILABLE", mode);
+      assert.equal(f.calls.filter(call => call.tool === "send_message_to_thread").length, 0);
+    } finally { f.controller.abort(); await f.done; }
+  }
+});
 
 test("connect arguments require explicit consent, bounded duration, canonical distinct original targets", () => {
   assert.equal(validConnectArguments(args), true);
@@ -187,6 +227,76 @@ test("concurrent identical operation shares one dispatch; ambiguous failure beco
     assert.equal((await f.rpc(request)).body.error, "OPERATION_UNCERTAIN");
     assert.equal(f.calls.filter(call => call.tool === "send_message_to_thread").length, 1);
   } finally { release(); f.controller.abort(); await f.done; }
+});
+
+for (const phase of ["get", "catalog", "begin"]) {
+  test(`disconnected request cannot first dispatch after awaiting ${phase}`, async () => {
+    let release; let entered; let catalogReads = 0;
+    const blocked = new Promise(resolve => { release = resolve; });
+    const started = new Promise(resolve => { entered = resolve; });
+    const pause = async () => { entered(); await blocked; };
+    const f = await fixture({
+      catalog: async () => {
+        if (++catalogReads > 1 && phase === "catalog") await pause();
+        return { names: ["list_threads", "read_thread", "send_message_to_thread"], sendOptions: { model: true } };
+      },
+      createLedger: async directory => {
+        const ledger = await createOperationLedger(directory);
+        return { ...ledger,
+          get: async id => { const receipt = await ledger.get(id); if (phase === "get") await pause(); return receipt; },
+          begin: async (...values) => { await ledger.begin(...values); if (phase === "begin") await pause(); },
+        };
+      },
+    });
+    const requestController = new AbortController();
+    try {
+      const command = { type: "send", sessionKey: key, text: "Not admitted", model: "fixture-model", operationId: randomUUID() };
+      const pending = f.rpc(command, { signal: requestController.signal }).catch(error => error);
+      await started;
+      // A live duplicate waits on the same operation. It gives the test a real
+      // completion response even though the original loopback socket is gone.
+      const duplicate = f.rpc(command);
+      requestController.abort();
+      assert.equal((await pending).code, "ABORT_ERR");
+      // Allow the loopback close to reach the server before releasing its I/O.
+      await new Promise(resolve => setTimeout(resolve, 30));
+      release();
+      assert.equal((await duplicate).body.error, "CONTROL_REVOKED");
+      assert.equal(f.calls.filter(call => call.tool === "send_message_to_thread").length, 0);
+      if (phase === "begin") {
+        assert.equal((await f.rpc(command)).body.error, "OPERATION_UNCERTAIN", "a durable reservation must never silently grant replay");
+      } else {
+        assert.equal((await f.rpc(command)).body.ok, true, "an operation not yet reserved can retry under a fresh live request");
+      }
+    } finally { requestController.abort(); release(); f.controller.abort(); await f.done; }
+  });
+}
+
+test("disconnect after native dispatch preserves the running call and its replay receipt", async () => {
+  let release; let entered; let nativeSignal;
+  const blocked = new Promise(resolve => { release = resolve; });
+  const started = new Promise(resolve => { entered = resolve; });
+  const f = await fixture({ nativeCall: async ({ tool, args: nativeArgs, signal }) => {
+    if (tool === "list_threads") return result({ schemaVersion: 4, threads: [], pinnedThreads: [] });
+    if (tool === "read_thread") return result({ schemaVersion: 1, thread: { id: target, kind: "codex", hostId: "local" }, turns: [] });
+    nativeSignal = signal; entered(); await blocked;
+    return result({ threadId: nativeArgs.threadId });
+  } });
+  const requestController = new AbortController();
+  try {
+    const command = { type: "send", sessionKey: key, text: "Already admitted", operationId: randomUUID() };
+    const pending = f.rpc(command, { signal: requestController.signal }).catch(error => error);
+    await started;
+    requestController.abort();
+    assert.equal((await pending).code, "ABORT_ERR");
+    await new Promise(resolve => setTimeout(resolve, 30));
+    assert.equal(nativeSignal.aborted, false, "transport loss must not cancel an accepted native task");
+    const retry = f.rpc(command);
+    release();
+    assert.equal((await retry).body.ok, true);
+    assert.equal((await f.rpc(command)).body.ok, true);
+    assert.equal(f.calls.filter(call => call.tool === "send_message_to_thread").length, 1);
+  } finally { requestController.abort(); release(); f.controller.abort(); await f.done; }
 });
 
 test("unsupported approval and interrupt are explicit capabilities, never native calls", async () => {

@@ -156,7 +156,9 @@ func TestWebSocketFailedTurnInvalidatesPreviousContext(t *testing.T) {
 		status              int
 	}{
 		{"http-error", `{"error":{"message":"fixture failure"}}`, "error", http.StatusBadGateway},
-		{"incomplete", "data: {\"type\":\"response.incomplete\",\"response\":{\"id\":\"resp-incomplete\",\"status\":\"incomplete\",\"output\":[]}}\n\n", "response.incomplete", http.StatusOK},
+		// Failed terminal frames are sanitized into a local error before the
+		// websocket receives them, and must still invalidate continuation.
+		{"incomplete", "data: {\"type\":\"response.incomplete\",\"response\":{\"id\":\"resp-incomplete\",\"status\":\"incomplete\",\"output\":[]}}\n\n", "error", http.StatusOK},
 		{"truncated", "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp-truncated\",\"status\":\"in_progress\"}}\n\n", "error", http.StatusOK},
 		{"sse-error", "data: {\"type\":\"error\",\"error\":{\"message\":\"fixture failure\"}}\n\n", "error", http.StatusOK},
 	} {

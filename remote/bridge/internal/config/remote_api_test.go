@@ -43,6 +43,25 @@ func TestInferProtocolLetsAnyToolUseAnyModelFamily(t *testing.T) {
 	}
 }
 
+func TestSetRemoteAPIForAgentNormalizesDesktopAndSupportsExtensionFamily(t *testing.T) {
+	c := Config{LocalAccounts: []LocalAccount{{ID: "a1", Name: "A", Kind: "api", Key: "k", BaseURL: "https://x.test"}}}
+	if err := c.SetRemoteAPIForAgent("claude-desktop", "a1", "claude-sonnet"); err != nil {
+		t.Fatal(err)
+	}
+	if got := c.RemoteAPI["claude"]; got.AccountID != "a1" || got.Model != "claude-sonnet" {
+		t.Fatalf("desktop alias did not share family: %+v", c.RemoteAPI)
+	}
+	if err := c.SetRemoteAPIForAgent("hermes", "a1", "gpt-5"); err != nil {
+		t.Fatal(err)
+	}
+	if got := c.RemoteAPI["hermes"]; got.AccountID != "a1" || got.Model != "gpt-5" {
+		t.Fatalf("extension family not stored: %+v", c.RemoteAPI)
+	}
+	if err := c.SetRemoteAPIForAgent("../escape", "a1", ""); err == nil {
+		t.Fatal("path-like extension family accepted")
+	}
+}
+
 func TestEmptyRemoteModelNeverInheritsVaultOrToolModel(t *testing.T) {
 	c := Config{
 		LocalAccounts:     []LocalAccount{{ID: "new", Kind: "api", Model: "vault-default", Models: []string{"new-only"}}},

@@ -93,6 +93,15 @@ func SetCodexCatalogTOML(content, dir, path string) string {
 	return joinLines(lines, eol)
 }
 
+// HasCodexCatalogPointer reports whether config.toml contains the exact
+// catalogue path owned by Bridge.  It is used only when migrating an older
+// switch backup that did not save the catalogue bytes: if the old profile
+// already pointed at our file, the original bytes are unknowable and callers
+// must fail closed instead of treating the current list as the user's backup.
+func HasCodexCatalogPointer(content, dir string) bool {
+	return SetCodexCatalogTOML(content, dir, "") != content
+}
+
 // ApplyCodexCatalog publishes (on) or withdraws (off) the API's models in the
 // Codex model picker of the Codex home dir. Runs after the switch wrote config.toml.
 func ApplyCodexCatalog(dir string, on bool, models []string, source string) error {
@@ -106,8 +115,9 @@ func ApplyCodexCatalog(dir string, on bool, models []string, source string) erro
 		if catalog, err = WriteCodexCatalog(dir, models, source); err != nil {
 			return err
 		}
-		// A stale cached list can hide the new entries until Codex refetches.
-		_ = os.Remove(filepath.Join(dir, "models_cache.json"))
+		// Do not delete models_cache.json: it may be a user-owned native cache.
+		// Codex reads the explicit model_catalog_json pointer on the next start;
+		// destroying an unrelated cache would make rollback impossible.
 	}
 	out := SetCodexCatalogTOML(string(b), dir, catalog)
 	if out == string(b) {

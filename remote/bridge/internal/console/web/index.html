@@ -11,11 +11,24 @@
 <link rel="stylesheet" href="theme.css">
 <link rel="stylesheet" href="remote.css">
 <link rel="stylesheet" href="workbench.css">
+<link rel="stylesheet" href="home-orb.css">
 <link rel="stylesheet" href="shell.css">
 <link rel="stylesheet" href="usage.css">
+<link rel="stylesheet" href="usage-ledger.css">
+<link rel="stylesheet" href="launch-progress.css">
 <link rel="stylesheet" href="select.css">
 <link rel="stylesheet" href="dark.css">
+<link rel="stylesheet" href="delegation.css">
+<link rel="stylesheet" href="remote-support.css">
+<link rel="stylesheet" href="account-daily.css">
+<link rel="stylesheet" href="account-health.css">
+<link rel="stylesheet" href="codex-api-profile.css">
+<link rel="stylesheet" href="codex-api-observation.css">
+<link rel="stylesheet" href="account-test.css">
 <link rel="stylesheet" href="boot.css">
+<link rel="stylesheet" href="desk3.css">
+<link rel="stylesheet" href="selfhost.css">
+<link rel="stylesheet" href="plugins.css">
 </head>
 <body>
 <div class="boot" id="boot" aria-hidden="true">
@@ -27,58 +40,109 @@
   <button type="button" id="winMin" aria-label="最小化" title="最小化"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M3.5 8h9"/></svg></button>
   <button type="button" class="x" id="winClose" aria-label="关闭（在后台继续运行）" title="关闭 · 在后台继续运行"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="m4 4 8 8M12 4l-8 8"/></svg></button>
 </div>
-<div class="stage" id="stage">
-  <header class="hud">
-    <div class="hud-brand">Salcara<span>Bridge</span></div>
-    <div class="conn" id="connPill"><span class="dot"></span><span class="conn-label">读取中…</span></div>
+<div class="app-shell">
+  <header class="desktop-header">
+    <div class="hud-brand desktop-brand"><span class="mini-orb" aria-hidden="true"><i></i><i></i></span><strong>Salcara <span>Bridge</span></strong><small>让工具连接起来</small></div>
+    <div class="desktop-status"><div class="conn" id="connPill" role="status"><span class="dot"></span><span class="conn-label">读取中…</span></div></div>
   </header>
-
-  <div class="orb-zone" id="orbZone">
-    <div class="orbit" aria-hidden="true"></div>
-    <div class="orb-shadow" aria-hidden="true"></div>
-    <button class="orb" id="orb" type="button" aria-label="打开菜单" aria-expanded="false">
-      <span class="orb-face" id="orbFace"><i class="eye"></i><i class="eye"></i></span>
-    </button>
-    <nav class="ring" id="nav" aria-label="主菜单">
-      <a href="#overview" data-route="overview"><span class="ico" data-icon="spark"></span><b>Agent</b></a>
+    <nav class="desktop-nav" id="nav" aria-label="主菜单">
+      <a href="#" data-route="home"><span class="ico" data-icon="home"></span><b>主页</b></a>
+      <a href="#overview" data-route="overview"><span class="ico" data-icon="plug"></span><b>Agent</b></a>
       <a href="#accounts" data-route="accounts"><span class="ico" data-icon="key"></span><b>API 密钥</b></a>
+      <a href="#login" data-route="login"><span class="ico" data-icon="phone"></span><b>手机远程</b><span class="nav-badge" id="approvalBadge" hidden>0</span></a>
+      <a href="#mcp" data-route="mcp"><span class="ico" data-icon="mcp"></span><b>MCP</b></a>
       <a href="#setup" data-route="setup"><span class="ico" data-icon="box"></span><b>环境</b><em class="ring-dot" id="setupDot" hidden></em></a>
-      <a href="#login" data-route="login"><span class="ico" data-icon="phone"></span><b>手机远程</b></a>
+      <a href="#plugins" data-route="plugins"><span class="ico" data-icon="puzzle"></span><b>插件</b></a>
       <a href="#usage" data-route="usage"><span class="ico" data-icon="chart"></span><b>用量</b></a>
-      <a href="#settings" data-route="settings"><span class="ico" data-icon="gear"></span><b>设置</b><span class="nav-badge" id="approvalBadge" hidden>0</span></a>
+      <a href="#settings" data-route="settings"><span class="ico" data-icon="gear"></span><b>设置</b></a>
     </nav>
-  </div>
 
-  <footer class="foot">
-    <div class="hint" id="hint">把鼠标移到球上</div>
-    <div class="side-ver" id="sideVer"></div>
-  </footer>
-</div>
-
-<div class="panel-back" id="panelBack" hidden>
-  <div class="panel" id="panel" role="dialog" aria-modal="true" aria-labelledby="pageTitle">
-    <header class="page-head">
-      <div class="page-title">
-        <span class="page-ico" id="pageIco"></span>
-        <div><h1 id="pageTitle"></h1><p id="pageSub"></p></div>
+  <div class="desktop-update-banner" id="desktopUpdateBanner" role="status" hidden><div><strong id="desktopUpdateTitle"></strong><p id="desktopUpdateDetail"></p></div><button class="btn sm" id="desktopUpdateOpen" type="button">查看更新</button></div>
+  <main class="main">
+    <div class="stage" id="stage">
+      <div class="home-hero">
+        <div class="orb-zone" id="orbZone">
+          <div class="orb-orbit orbit-outer" aria-hidden="true"></div><div class="orb-orbit orbit-inner" aria-hidden="true"></div>
+          <div class="orb-shadow" aria-hidden="true"></div>
+          <div class="orb" id="orb" aria-hidden="true">
+            <span class="orb-face" id="orbFace"><i class="eye"></i><i class="eye"></i></span>
+          </div>
+          <span class="orb-satellite satellite-code" data-icon="code" aria-hidden="true"></span>
+          <span class="orb-satellite satellite-phone" data-icon="phone" aria-hidden="true"></span>
+          <span class="orb-satellite satellite-key" data-icon="key" aria-hidden="true"></span>
+        </div>
+        <div class="home-copy">
+          <span class="home-eyebrow">本机工作概览</span>
+          <h1 class="home-title" id="homeTitle">工作，从这里开始</h1>
+          <p class="home-sub" id="hint">最近的工作进展和需要你处理的事，都在这里。</p>
+          <div class="home-local-note"><span data-icon="laptop" aria-hidden="true"></span>任务在这台电脑上运行</div>
+        </div>
       </div>
-      <div class="head-actions" id="headActions"></div>
-      <button class="panel-close" id="panelClose" type="button" aria-label="关闭">✕</button>
-    </header>
-    <section id="view" class="view"></section>
-  </div>
+      <div class="home-stats" id="homeStats">
+        <div class="home-stat"><span class="hs-ico" data-icon="plug"></span><span><span class="hs-label">本机 Agent</span><b id="hsAgents"><span class="sk sk-num"></span></b></span></div>
+        <div class="home-stat"><span class="hs-ico" data-icon="key"></span><span><span class="hs-label">API 密钥</span><b id="hsKeys"><span class="sk sk-num"></span></b></span></div>
+        <div class="home-stat"><span class="hs-ico" data-icon="phone"></span><span><span class="hs-label">手机远程</span><b id="hsRemote"><span class="sk sk-num"></span></b></span></div>
+        <div class="home-stat"><span class="hs-ico" data-icon="chart"></span><span><span class="hs-label">今日 Token</span><b id="hsTokens"><span class="sk sk-num"></span></b></span></div>
+      </div>
+      <div class="home-workspace">
+      <section class="home-recent" id="homeRecent" aria-busy="true">
+        <header><h2>最近的对话</h2><a href="#sessions">查看全部<span data-icon="chev" aria-hidden="true"></span></a></header>
+        <div id="homeRecentList"><div class="home-row sk-row-line"><span class="sk" style="width:24px;height:24px"></span><span class="hr-main"><span class="sk" style="width:42%;height:12px"></span><span class="sk" style="width:24%;height:10px;margin-top:5px"></span></span></div><div class="home-row sk-row-line"><span class="sk" style="width:24px;height:24px"></span><span class="hr-main"><span class="sk" style="width:52%;height:12px"></span><span class="sk" style="width:30%;height:10px;margin-top:5px"></span></span></div><div class="home-row sk-row-line"><span class="sk" style="width:24px;height:24px"></span><span class="hr-main"><span class="sk" style="width:36%;height:12px"></span><span class="sk" style="width:20%;height:10px;margin-top:5px"></span></span></div></div>
+      </section>
+      <section class="home-attention" aria-labelledby="homeAttentionTitle">
+        <header><h2 id="homeAttentionTitle">待处理事项</h2><span id="homePendingCount"></span></header>
+        <div id="homePendingList" aria-live="polite"><p class="home-pending-note">正在读取…</p></div>
+      </section>
+      </div>
+    </div>
+
+    <div class="panel-back" id="panelBack" hidden>
+      <div class="panel" id="panel" role="region" aria-labelledby="pageTitle">
+        <header class="page-head">
+          <div class="page-title">
+            <span class="page-ico" id="pageIco"></span>
+            <div><h1 id="pageTitle"></h1><p id="pageSub"></p></div>
+          </div>
+          <div class="head-actions" id="headActions"></div>
+          <button class="panel-close" id="panelClose" type="button" aria-label="回到主页">✕</button>
+        </header>
+        <section id="view" class="view"></section>
+      </div>
+    </div>
+  </main>
+  <footer class="desktop-footer"><span class="footer-device"><span data-icon="laptop" aria-hidden="true"></span><span id="sideDevice">正在读取设备</span></span><span class="footer-note">Salcara · 你的本机 AI 工作台</span><span class="side-ver" id="sideVer"></span></footer>
 </div>
 
 <div id="modalRoot"></div>
 <div id="toastRoot" class="toasts"></div>
 <script src="window-controls.js"></script>
 <script src="app.js"></script>
+<script src="launch-progress.js"></script>
+<script src="codex-accounts.js"></script>
+<script src="account-test.js"></script>
+<script src="api-card-membership.js"></script>
+<script src="api-card-speed.js"></script>
+<script src="account-daily.js"></script>
+<script src="account-health.js"></script>
+<script src="account-model-rules.js"></script>
+<script src="codex-account-name.js"></script>
+<script src="codex-api-readiness.js"></script>
+<script src="codex-api-images.js"></script>
+<script src="codex-api-network.js"></script>
+<script src="codex-api-observation.js"></script>
+<script src="codex-api-profile.js"></script>
 <script src="remote.js"></script>
+<script src="remote-support.js"></script>
 <script src="workbench.js"></script>
 <script src="claude-desktop.js"></script>
 <script src="setup.js"></script>
+<script src="mcp.js"></script>
+<script src="plugins.js"></script>
+<script src="selfhost.js"></script>
 <script src="usage-data.js"></script>
 <script src="usage.js"></script>
+<script src="usage-ledger.js"></script>
+<script src="usage-ledger-query.js"></script>
 <script src="shell.js"></script>
 <script src="select.js"></script>
 <script src="notify.js"></script>

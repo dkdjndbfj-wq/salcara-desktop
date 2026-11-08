@@ -22,13 +22,14 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 	"unicode/utf16"
 
 	"github.com/pelletier/go-toml/v2"
 )
 
 const (
-	Version        = "0.4.1"
+	Version        = "0.4.2"
 	ServerName     = "salcara_desktop_probe"
 	ConnectTool    = "salcara_desktop_connect"
 	maxFileBytes   = 4 << 20
@@ -36,7 +37,20 @@ const (
 	rootOwner      = "salcara-desktop-companion"
 )
 
-type Options struct{ BundleDir, DataDir, CodexHome, NodePath string }
+type Options struct {
+	BundleDir, DataDir, CodexHome, NodePath string
+
+	// NativeSourceIdentity is an opaque, non-secret identity for the source
+	// currently selected by Salcara (for example an account/provider binding).
+	// It is deliberately a callback so the companion never persists API keys or
+	// attempts to infer provenance from a native application's configuration.
+	// A nil callback keeps embedded/test callers backwards compatible.
+	NativeSourceIdentity func() string
+	// RequireManagedLaunch is enabled by the production Bridge. Tests and
+	// embedded callers may omit it, but the shipped app must have started the
+	// native desktop tool in this process before adopting its lease.
+	RequireManagedLaunch bool
+}
 
 type Status struct {
 	Available          bool   `json:"available"`
@@ -51,6 +65,14 @@ type Status struct {
 type Service struct {
 	o  Options
 	mu sync.Mutex
+	// startupAt is captured before any descriptor can be accepted. A retained
+	// active-desktop.json from a previous process therefore cannot be adopted
+	// merely because it is still valid by time/token checks.
+	startupAt           time.Time
+	leaseMu             sync.Mutex
+	boundSourceIdentity string
+	boundToken          string
+	managedLaunchAt     time.Time
 	// Pure test hooks; neither is part of the public installation interface.
 	beforeCommit               func()
 	afterConfigCommit          func() error
@@ -58,7 +80,17 @@ type Service struct {
 	beforeUninstallArchive     func()
 }
 
-func New(o Options) *Service { return &Service{o: o} }
+func New(o Options) *Service { return &Service{o: o, startupAt: time.Now()} }
+
+// MarkManagedLaunch records that the native app was started through Salcara
+// after this Bridge process began. A descriptor created by a pre-existing or
+// separately launched Codex process is not adopted for remote control.
+func (s *Service) MarkManagedLaunch() {
+	s.leaseMu.Lock()
+	s.managedLaunchAt = time.Now()
+	s.boundToken, s.boundSourceIdentity = "", ""
+	s.leaseMu.Unlock()
+}
 
 type paths struct{ bundle, root, payload, config, node, state string }
 type snapshot struct {
@@ -421,7 +453,9 @@ func hookTOMLVersion(p paths, version string) string {
 	return "\n[[hooks.PermissionRequest]]\n\n[[hooks.PermissionRequest.hooks]]\ntype = \"command\"\ncommand = " + string(command) + "\ncommand_windows = " + string(commandWindows) + "\ntimeout = 120\nasync = false\n"
 }
 
-func hasPermissionHook(version string) bool { return version == Version || version == "0.4.0" }
+func hasPermissionHook(version string) bool {
+	return version == Version || version == "0.4.1" || version == "0.4.0"
+}
 
 func installedBlockTOML(p paths, version string) string {
 	return entryTOMLVersion(p, version) + hookTOMLVersion(p, version)

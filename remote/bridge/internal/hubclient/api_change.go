@@ -10,14 +10,26 @@ import (
 )
 
 func (c *Client) checkRemoteAPIChange(ctx context.Context, family, sessionKey string) error {
-	if !config.ValidRemoteFamily(family) {
+	family = config.NormalizeAgentFamily(family)
+	routes := c.routesForFamily(family)
+	if len(routes) == 0 || !config.ValidAgentFamily(family) {
 		return errors.New("不支持的 Agent")
 	}
-	if sessionKey != "" && (!strings.HasPrefix(sessionKey, family+":") || len(sessionKey) <= len(family)+1 || len(sessionKey) > 512) {
-		return errors.New("会话与 Agent 不一致")
+	if sessionKey != "" {
+		validPrefix := strings.HasPrefix(sessionKey, family+":") && len(sessionKey) > len(family)+1
+		for _, route := range routes {
+			validPrefix = validPrefix || (strings.HasPrefix(sessionKey, route.ID+":") && len(sessionKey) > len(route.ID)+1)
+		}
+		if !validPrefix || len(sessionKey) > 512 {
+			return errors.New("会话与 Agent 不一致")
+		}
 	}
 	if manager := c.manager(); manager != nil {
-		if agent := manager.Get(family); agent != nil {
+		for _, route := range routes {
+			agent := manager.Get(route.ID)
+			if agent == nil {
+				continue
+			}
 			if active, ok := agent.(interface{ ActiveRemoteTurns() bool }); ok {
 				if active.ActiveRemoteTurns() {
 					return errors.New("这个 Agent 正在处理任务，请结束或停止后再换 API")
@@ -56,7 +68,7 @@ func remoteModelAccount(cfg config.Config, family string) (config.LocalAccount, 
 	if a, ok := cfg.RemoteToolAccount(family); ok {
 		return a, true
 	}
-	if a, ok := cfg.AppliedToolAccount(family); ok {
+	if a, ok := cfg.AuthorizedAppliedToolAccount(family); ok {
 		return a, true
 	}
 	// A pending card selection is not the worker's API. While the tool still

@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"salcara/bridge/internal/agents"
+	"salcara/bridge/internal/config"
 )
 
 type Tool struct {
@@ -26,7 +27,10 @@ type Tool struct {
 var toolNames = map[string]string{
 	"codex": "Codex CLI", "codex-desktop": "Codex Desktop",
 	"claude": "Claude Code", "claude-desktop": "Claude Desktop",
+	"deepseek-harness": "DeepSeek Harness", "hermes": "Hermes Agent",
 }
+
+var toolOrder = []string{"codex-desktop", "codex", "claude-desktop", "claude", "deepseek-harness", "hermes"}
 
 func ValidTarget(id string) bool { _, ok := toolNames[id]; return ok }
 
@@ -34,11 +38,23 @@ func Discover(ctx context.Context, paths map[string]string) []Tool {
 	packages := platformPackages(ctx)
 	var running map[string]Tool
 	list := []Tool{}
-	for _, id := range []string{"codex-desktop", "codex", "claude-desktop", "claude"} {
-		t := Tool{ID: id, Name: toolNames[id], Kind: strings.Split(id, "-")[0]}
+	for _, id := range toolOrder {
+		t := Tool{ID: id, Name: toolNames[id], Kind: config.ToolKind(id)}
 		t.Custom = paths[id] != ""
 		if !strings.HasSuffix(id, "-desktop") {
-			t.Path, t.Available = agents.LocalExecutable(id, paths[id])
+			command := id
+			if id == "deepseek-harness" {
+				command = "dsh"
+			}
+			t.Path, t.Available = agents.LocalExecutable(command, paths[id])
+			if id == "hermes" && !t.Available && !t.Custom {
+				for _, candidate := range hermesCandidates() {
+					if fileExists(candidate) {
+						t.Path, t.Available = candidate, true
+						break
+					}
+				}
+			}
 		} else if paths[id] != "" {
 			t.Path = desktopExecutable(paths[id], t.Kind)
 			t.Available = fileExists(t.Path)

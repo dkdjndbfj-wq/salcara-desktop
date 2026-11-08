@@ -31,7 +31,7 @@ func TestWindowsInteractiveTerminal(t *testing.T) {
 	dir := t.TempDir()
 	out := filepath.Join(dir, "console-state.json")
 	fixture := filepath.Join(dir, "fixture.ps1")
-	script := "@{ inputRedirected=[Console]::IsInputRedirected; outputRedirected=[Console]::IsOutputRedirected; selectedKey=($env:OPENAI_API_KEY -eq 'local-fixture-key') } | ConvertTo-Json | Set-Content -LiteralPath " + psLiteral(out) + " -Encoding UTF8"
+	script := "$launchParent = Get-CimInstance Win32_Process -Filter ('ProcessId = ' + $PID); @{ terminalPID=[int]$launchParent.ParentProcessId; inputRedirected=[Console]::IsInputRedirected; outputRedirected=[Console]::IsOutputRedirected; selectedKey=($env:OPENAI_API_KEY -eq 'local-fixture-key') } | ConvertTo-Json | Set-Content -LiteralPath " + psLiteral(out) + " -Encoding UTF8"
 	if err := os.WriteFile(fixture, append([]byte{0xef, 0xbb, 0xbf}, []byte(script)...), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -52,12 +52,22 @@ func TestWindowsInteractiveTerminal(t *testing.T) {
 		b, err := os.ReadFile(out)
 		if err == nil {
 			var state struct {
+				TerminalPID      int
 				InputRedirected  bool
 				OutputRedirected bool
 				SelectedKey      bool
 			}
 			if err := json.Unmarshal([]byte(string(b)[3:]), &state); err != nil {
 				t.Fatal(err)
+			}
+			// Launch now returns the actual tool entry PID. This opt-in fixture
+			// also closes only its own PowerShell host when the fixture ends.
+			if state.TerminalPID > 0 && state.TerminalPID != pid {
+				defer func() {
+					if proc, err := os.FindProcess(state.TerminalPID); err == nil {
+						_ = proc.Kill()
+					}
+				}()
 			}
 			if state.InputRedirected || state.OutputRedirected || !state.SelectedKey {
 				t.Fatalf("invalid console handles or environment: %+v", state)

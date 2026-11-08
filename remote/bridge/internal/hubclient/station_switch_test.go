@@ -101,7 +101,7 @@ func stationSwitchFixture(t *testing.T, targetHook func(http.ResponseWriter, *ht
 		}
 		switch r.URL.Path {
 		case "/salcara-hub/v1/ping":
-			_ = json.NewEncoder(w).Encode(map[string]any{"service": "salcara-hub", "protocol": "salcara-remote", "protocolVersion": 1, "authModes": []string{"device-pairing"}, "capabilities": []string{"device.identity.v1", "pair.qr.v1", "session.remote.v1", "pair.revoke.v1"}})
+			_ = json.NewEncoder(w).Encode(map[string]any{"service": "salcara-hub", "protocol": "salcara-remote", "protocolVersion": 1, "authModes": []string{"device-pairing"}, "capabilities": []string{"device.identity.v1", "pair.qr.v1", "session.remote.v1", "pair.revoke.v1", "station.guard.v1"}, "remoteAccess": map[string]any{"mode": "open", "revision": "target-r1", "station": protocol.StationPolicy{Version: 1, APIBases: []string{"http://" + r.Host}}}})
 		case "/salcara-hub/v1/bridge/pair/status":
 			_ = json.NewEncoder(w).Encode(map[string]any{"deviceId": r.URL.Query().Get("deviceId"), "paired": true, "bindingId": strings.Repeat("a", 64), "phoneHash": strings.Repeat("c", 64)})
 		case "/v1/models":
@@ -153,6 +153,74 @@ func TestStationSwitchCommitsAPIAndHubTogetherWithoutReplacingProject(t *testing
 	}
 	if !reflect.DeepEqual(source.Projects, next.Projects) || next.LocalAccounts[0].Key != source.LocalAccounts[0].Key || APIHandle(next, "vault-b") != in.AccountID {
 		t.Fatal("handover changed project/vault/opaque API identity")
+	}
+}
+
+func TestSourceOnlyStationSwitchPreservesSelectionAndModel(t *testing.T) {
+	c, source, target := stationSwitchFixture(t, nil, nil)
+	if err := c.o.Store.Update(func(cfg *config.Config) error {
+		return cfg.SetRemoteAPIForAgent("codex", "vault-b", "original-model-override")
+	}); err != nil {
+		t.Fatal(err)
+	}
+	source = c.o.Store.Get()
+	in := stationSwitchInput(source, target)
+	in.Agent, in.AccountID, in.SourceOnly = "codex", APIHandle(source, "vault-b"), true
+	before := source.Clone()
+	result, err := c.switchStation(context.Background(), in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	after := c.o.Store.Get()
+	if result["apiChanged"] != false || !reflect.DeepEqual(before.RemoteAPI, after.RemoteAPI) || !reflect.DeepEqual(before.ToolAPISelections, after.ToolAPISelections) || after.RemoteAPI["codex"].Model != "original-model-override" {
+		t.Fatal("source-only handover rewrote API or model")
+	}
+	changed := in
+	changed.SourceOnly = false
+	if handoverPayloadHash(in) == handoverPayloadHash(changed) {
+		t.Fatal("source-only is absent from durable hash")
+	}
+	if _, err := c.switchStation(context.Background(), changed); err == nil {
+		t.Fatal("receipt accepted different source-only intent")
+	}
+}
+
+func TestSourceOnlyStationSwitchRejectsSavedButUnselectedSource(t *testing.T) {
+	c, source, target := stationSwitchFixture(t, nil, nil)
+	in := stationSwitchInput(source, target)
+	in.Agent, in.AccountID, in.SourceOnly = "codex", APIHandle(source, "vault-b"), true
+	if _, err := c.switchStation(context.Background(), in); err == nil {
+		t.Fatal("saved but unselected source was treated as current")
+	}
+	if config.RemoteIdentity(c.o.Store.Get()) != config.RemoteIdentity(source) {
+		t.Fatal("rejected handover mutated station")
+	}
+}
+
+func TestSourceOnlyStationSwitchFencesSourceSelectionChangedDuringTargetProbe(t *testing.T) {
+	var change func()
+	c, source, target := stationSwitchFixture(t, func(_ http.ResponseWriter, r *http.Request) bool {
+		if r.URL.Path == "/salcara-hub/v1/bridge/pair/status" && change != nil {
+			change()
+		}
+		return false
+	}, nil)
+	if err := c.o.Store.Update(func(cfg *config.Config) error { return cfg.SetRemoteAPIForAgent("codex", "vault-b", "original") }); err != nil {
+		t.Fatal(err)
+	}
+	source = c.o.Store.Get()
+	change = func() {
+		if err := c.o.Store.Update(func(cfg *config.Config) error { delete(cfg.RemoteAPI, "codex"); return nil }); err != nil {
+			t.Error(err)
+		}
+	}
+	in := stationSwitchInput(source, target)
+	in.Agent, in.AccountID, in.SourceOnly = "codex", APIHandle(source, "vault-b"), true
+	if _, err := c.switchStation(context.Background(), in); err == nil {
+		t.Fatal("stale source-only switch committed")
+	}
+	if config.RemoteIdentity(c.o.Store.Get()) != config.RemoteIdentity(source) {
+		t.Fatal("stale handover changed station")
 	}
 }
 

@@ -5,6 +5,9 @@ on:
       run_id:
         required: true
         description: Successful desktop-release workflow run ID
+      source_check_run_id:
+        required: true
+        description: Successful desktop-check (Linux) workflow run ID for the same commit
       source_sha:
         required: true
         description: Exact tested 40-character source commit
@@ -25,22 +28,25 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-      - name: Require the exact successful native build
+      - name: Require exact successful native and Linux runs from the same source
         env:
           GH_TOKEN: ${{ github.token }}
           BUILD_RUN: ${{ inputs.run_id }}
+          SOURCE_CHECK_RUN_ID: ${{ inputs.source_check_run_id }}
           SOURCE_SHA: ${{ inputs.source_sha }}
         shell: pwsh
         run: |
-          if ($env:GITHUB_REPOSITORY -ne 'dkdjndbfj-wq/salcara-desktop' -or $env:BUILD_RUN -notmatch '^\d+$' -or $env:SOURCE_SHA -notmatch '^[a-f0-9]{40}$') { throw 'Unexpected publishing identity' }
-          $run = gh api "repos/$env:GITHUB_REPOSITORY/actions/runs/$env:BUILD_RUN" | ConvertFrom-Json
-          if ($LASTEXITCODE -ne 0 -or $run.conclusion -ne 'success' -or $run.status -ne 'completed' -or $run.head_sha -ne $env:SOURCE_SHA -or $run.path -ne '.github/workflows/desktop-release.yml' -or $run.event -ne 'workflow_dispatch') { throw 'Exact successful desktop build required' }
+          node remote/bridge/desktop/scripts/verify-release-runs.cjs
+          if ($LASTEXITCODE -ne 0) { throw 'Same-source native and Linux checks required' }
           $artifacts = gh api "repos/$env:GITHUB_REPOSITORY/actions/runs/$env:BUILD_RUN/artifacts" | ConvertFrom-Json
           $asset = @($artifacts.artifacts | Where-Object { $_.name -eq 'salcara-desktop-windows-signed' -and -not $_.expired })
           if ($LASTEXITCODE -ne 0 -or $asset.Count -ne 1 -or $asset[0].digest -notmatch '^sha256:[a-f0-9]{64}$') { throw 'Exact unexpired artifact required' }
-          gh run download $env:BUILD_RUN --repo $env:GITHUB_REPOSITORY --name salcara-desktop-windows-signed --dir verified-artifact
-          if ($LASTEXITCODE -ne 0) { throw 'Artifact download failed' }
-          Write-Output "Artifact ID=$($asset[0].id) digest=$($asset[0].digest) source=$env:SOURCE_SHA"
+          $env:ARTIFACT_ID = [string]$asset[0].id
+          $env:ARTIFACT_DIGEST = [string]$asset[0].digest
+          node remote/bridge/desktop/scripts/download-release-artifact.cjs
+          if ($LASTEXITCODE -ne 0) { throw 'Pinned artifact download or digest verification failed' }
+          if (Test-Path -LiteralPath verified-artifact) { throw 'Artifact extraction directory must be new' }
+          Expand-Archive -LiteralPath verified-artifact-download/artifact.zip -DestinationPath verified-artifact
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.source_sha }}
@@ -54,7 +60,7 @@ jobs:
           Expand-Archive -LiteralPath $zip[0].FullName -DestinationPath verified-portable
           node tested-source/remote/bridge/desktop/scripts/verify-release-artifact.cjs verified-artifact verified-portable
           if ($LASTEXITCODE -ne 0) { throw 'Artifact verification failed' }
-      - name: Upload verified assets to a draft (root task publishes after review)
+      - name: Upload verified assets to an unpublished draft for release review
         env:
           GH_TOKEN: ${{ github.token }}
           SOURCE_SHA: ${{ inputs.source_sha }}
@@ -62,5 +68,9 @@ jobs:
         run: |
           $version = (Get-Content tested-source/remote/bridge/desktop/package.json -Raw | ConvertFrom-Json).version
           $files = @(Get-ChildItem -LiteralPath verified-artifact -File | ForEach-Object FullName)
-          gh release create "v$version" @files --repo $env:GITHUB_REPOSITORY --target $env:SOURCE_SHA --title "Salcara Desktop v$version" --notes-file "tested-source/docs/RELEASE-$version.md" --draft
+          if (-not (Test-Path -LiteralPath "tested-source/docs/RELEASE-$version.md" -PathType Leaf)) { throw 'Exact release notes required before tag reservation' }
+          $env:RELEASE_VERSION = $version
+          node remote/bridge/desktop/scripts/verify-release-runs.cjs reserve-tag
+          if ($LASTEXITCODE -ne 0) { throw 'New release tag reservation failed; existing tags are not reused or overwritten' }
+          gh release create "v$version" @files --repo $env:GITHUB_REPOSITORY --verify-tag --title "Salcara Desktop v$version" --notes-file "tested-source/docs/RELEASE-$version.md" --draft
           if ($LASTEXITCODE -ne 0) { throw 'Draft release staging failed' }

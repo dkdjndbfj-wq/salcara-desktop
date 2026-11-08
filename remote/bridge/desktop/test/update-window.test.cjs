@@ -14,8 +14,15 @@ function fixture() {
   const updater = Object.fromEntries(['state','download','cancel','install','skip','openPage'].map(name=>[name,()=>{calls.push(name);return Promise.resolve();}]));
   updater.state = () => null;
   const api = registerUpdateIpc({ ipcMain, getWindow:()=>win, updateURL:frame.url, getUpdater:()=>updater, checkForUpdate:()=>calls.push('check') });
-  return { handlers, calls, win, event, ipcMain, api };
+  return { handlers, calls, win, event, ipcMain, api, updater };
 }
+
+test('a required update cannot be skipped through IPC and closing keeps the policy intact', () => {
+  const f = fixture(); f.updater.state = () => ({ required: true });
+  f.handlers.get('upd:skip')(f.event); assert.deepEqual(f.calls, []);
+  f.handlers.get('upd:later')(f.event); assert.deepEqual(f.calls, ['popup closed']);
+  assert.equal(f.updater.state().required, true);
+});
 
 test('popup close and later do not quit, cancel or install anything', () => {
   const f = fixture(); f.handlers.get('upd:later')(f.event);

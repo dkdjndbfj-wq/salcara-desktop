@@ -182,6 +182,118 @@ func TestClaudeDesktop3POptionalModelAndDiscovery(t *testing.T) {
 	}
 }
 
+func TestClaudeDesktop3PCatalogOffRestoresOriginalPickerOnly(t *testing.T) {
+	s, root, a, _, _ := fixtureClaude3P(t, true)
+	profilePath := filepath.Join(root, "configLibrary", cd3PID+".json")
+	fixtureFile(t, root, "configLibrary/"+cd3PID+".json", `{"inferenceProvider":"gateway","inferenceGatewayBaseUrl":"https://old.test","inferenceGatewayApiKey":"old-fixture-key","inferenceModels":[{"name":"claude-original","supports1m":true,"labelOverride":"Original"}],"modelDiscoveryEnabled":false,"lastSelectedModel":"claude-original","userField":{"keep":true}}`)
+	readProfile := func() map[string]any {
+		t.Helper()
+		data, err := os.ReadFile(profilePath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var profile map[string]any
+		if err := json.Unmarshal(data, &profile); err != nil {
+			t.Fatal(err)
+		}
+		return profile
+	}
+	original := readProfile()
+	if _, err := s.Switch(context.Background(), a, nil, false); err != nil {
+		t.Fatal(err)
+	}
+	applied := readProfile()
+	a.CatalogOverride, a.BaseURL, a.Key = false, "https://next.test", "next-fixture-key"
+	if _, err := s.Switch(context.Background(), a, nil, false); err != nil {
+		t.Fatal(err)
+	}
+	got := readProfile()
+	for _, field := range []string{"inferenceModels", "modelDiscoveryEnabled", "lastSelectedModel", "userField"} {
+		if !reflect.DeepEqual(got[field], original[field]) {
+			t.Fatalf("original picker/user field %s was not restored or preserved", field)
+		}
+	}
+	if got["inferenceGatewayBaseUrl"] != a.BaseURL || got["inferenceGatewayApiKey"] != a.Key || got["deploymentOrganizationUuid"] != applied["deploymentOrganizationUuid"] {
+		t.Fatal("turning off the menu reverted new credentials or chat identity")
+	}
+	// The saved applied snapshot must track the restored menu for future switches.
+	a.CatalogOverride = true
+	if _, err := s.Switch(context.Background(), a, nil, false); err != nil {
+		t.Fatal("subsequent override failed", err)
+	}
+	a.CatalogOverride = false
+	if _, err := s.Switch(context.Background(), a, nil, false); err != nil {
+		t.Fatal("subsequent disable failed", err)
+	}
+	if !reflect.DeepEqual(readProfile()["inferenceModels"], original["inferenceModels"]) {
+		t.Fatal("original picker was lost after repeated toggles")
+	}
+}
+
+func TestClaudeDesktop3PCatalogOffAfterFreshSetupUsesDiscovery(t *testing.T) {
+	s, root, a, _, _ := fixtureClaude3P(t, false)
+	if _, err := s.Switch(context.Background(), a, nil, true); err != nil {
+		t.Fatal(err)
+	}
+	before, err := toolcfg.InspectClaude3P(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.CatalogOverride = false
+	if _, err := s.Switch(context.Background(), a, nil, false); err != nil {
+		t.Fatal(err)
+	}
+	got, err := toolcfg.InspectClaude3P(root)
+	if err != nil || got.CatalogOverride || !got.ModelDiscovery || got.ProfileID != before.ProfileID {
+		t.Fatal("fresh profile did not return to native discovery with its original chat identity", err)
+	}
+}
+
+func TestClaudeDesktop3PCatalogOffProtectsEditsDuringQuit(t *testing.T) {
+	s, root, a, starts, _ := fixtureClaude3P(t, true)
+	if _, err := s.Switch(context.Background(), a, nil, false); err != nil {
+		t.Fatal(err)
+	}
+	profilePath := filepath.Join(root, "configLibrary", cd3PID+".json")
+	data, err := os.ReadFile(profilePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var profile map[string]any
+	if err := json.Unmarshal(data, &profile); err != nil {
+		t.Fatal(err)
+	}
+	profile["inferenceModels"] = []string{"external-user-model"}
+	external, _ := json.Marshal(profile)
+	s.Local.Stop = func(context.Context, Plan) error {
+		return os.WriteFile(profilePath, external, 0o600)
+	}
+	a.CatalogOverride = false
+	if _, err := s.Switch(context.Background(), a, nil, false); err == nil {
+		t.Fatal("concurrent external menu edit was overwritten")
+	}
+	got, _ := os.ReadFile(profilePath)
+	if !reflect.DeepEqual(got, external) || *starts != 1 {
+		t.Fatal("external menu changed or new process started after conflict")
+	}
+}
+
+func TestClaudeDesktop3PCatalogOffLaunchFailureRollsBackCurrentMenu(t *testing.T) {
+	s, root, a, _, _ := fixtureClaude3P(t, true)
+	if _, err := s.Switch(context.Background(), a, nil, false); err != nil {
+		t.Fatal(err)
+	}
+	before := fixtureTree(t, root)
+	a.CatalogOverride = false
+	s.Local.Start = func(context.Context, Plan) (int, error) { return 0, errors.New("fixture failure") }
+	if _, err := s.Switch(context.Background(), a, nil, false); err == nil {
+		t.Fatal("start failure was ignored")
+	}
+	if !reflect.DeepEqual(before, fixtureTree(t, root)) {
+		t.Fatal("failed disable did not restore the prior applied menu/profile")
+	}
+}
+
 func TestClaudeDesktop3PLoopbackGatewayCatalogAliases(t *testing.T) {
 	s, root, a, _, _ := fixtureClaude3P(t, true)
 	a.Wire, a.Protocol = "chat", "chat"

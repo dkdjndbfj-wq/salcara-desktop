@@ -44,7 +44,7 @@ func TestSubagentCodexStatesArePerChild(t *testing.T) {
 	}
 	th := cxThread{ID: "parent", Turns: []cxTurn{{Status: "completed", Items: []json.RawMessage{json.RawMessage(`{"type":"collabAgentToolCall","id":"spawn1","tool":"spawnAgent","status":"completed","receiverThreadIds":["a"],"agentsStates":{"a":{"status":"pendingInit","message":null}}}`)}}}}
 	evs := codexHistory("codex:parent", th)
-	if len(evs) != 2 || evs[1].Status != "running" || evs[1].Output != "正在启动" {
+	if len(evs) != 3 || evs[1].Status != "running" || evs[1].Output != "正在启动" || evs[2].Type != "turn" || evs[2].Status != "completed" {
 		t.Fatalf("%+v", evs)
 	}
 }
@@ -197,6 +197,7 @@ func TestSubagentClaudeChildResultDoesNotFinishParentTurn(t *testing.T) {
 	a := newClaudeAgent(r.sink, func() Settings { return Settings{} }, "", t.TempDir())
 	defer a.thr.Close()
 	p := &claudeProc{id: "p", turns: 1, mapper: newClaudeMapper("claude:p", "")}
+	a.procs[p.id] = p // live reader events must belong to the owned generation
 	a.handleLine(p, []byte(`{"type":"result","parent_tool_use_id":"task1","subtype":"success","result":"子任务完成"}`))
 	if p.turns != 1 {
 		t.Fatal("child result consumed main turn")
@@ -226,14 +227,23 @@ func TestSubagentClaudeBackgroundLifecycleIsAuthoritative(t *testing.T) {
 		t.Fatalf("%+v", evs)
 	}
 	l = fixtureClaudeLine(t, `{"type":"system","subtype":"task_updated","task_id":"native-task","patch":{"status":"killed"}}`)
-	if evs = m.entry(&l); evs[0].Status != "failed" || evs[0].ID != "task1" {
+	if evs = m.entry(&l); evs[0].Status != "interrupted" || evs[0].ID != "task1" {
 		t.Fatalf("%+v", evs)
 	}
 	l = fixtureClaudeLine(t, `{"type":"system","subtype":"task_notification","task_id":"native-task","tool_use_id":"task1","status":"completed","summary":"真实结果"}`)
-	m.entry(&l)
+	if evs = m.entry(&l); evs[0].Status != "interrupted" {
+		t.Fatalf("late completion resurrected an interrupted task: %+v", evs)
+	}
 	l = fixtureClaudeLine(t, `{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"task1","content":"迟到的启动确认"}]}}`)
-	if evs = m.entry(&l); evs[0].Status != "done" || evs[0].Output != "真实结果" {
+	if evs = m.entry(&l); evs[0].Status != "interrupted" || !strings.Contains(evs[0].Output, "被中断") {
 		t.Fatalf("late launch overwrote result: %+v", evs)
+	}
+}
+
+func TestSubagentCodexExplicitInterruptionState(t *testing.T) {
+	state, output := codexAgentStatus("interrupted", "停止原因")
+	if state != "interrupted" || !strings.Contains(output, "被中断") || !strings.Contains(output, "停止原因") {
+		t.Fatalf("interruption was not preserved: state=%q output=%q", state, output)
 	}
 }
 
@@ -266,9 +276,9 @@ func TestSubagentClaudeWorkerSettingsSigTracksCredentialsAndDoesNotExposeThem(t 
 }
 
 func TestSubagentClaudeBusyCredentialChangeDoesNotWriteOrKill(t *testing.T) {
-	a := newClaudeAgent(func(protocol.Event) {}, func() Settings { return Settings{ClaudeKey: "new"} }, "", t.TempDir())
+	a := newClaudeAgent(func(protocol.Event) {}, func() Settings { return Settings{ClaudeRoot: "http://127.0.0.1:1", ClaudeKey: "new"} }, "", t.TempDir())
 	defer a.thr.Close()
-	p := &claudeProc{id: "p", turns: 1, done: make(chan struct{}), workerSettingsSig: claudeSettingsSig(Settings{ClaudeKey: "old"}, "")}
+	p := &claudeProc{id: "p", turns: 1, done: make(chan struct{}), workerSettingsSig: claudeSettingsSig(Settings{ClaudeRoot: "http://127.0.0.1:1", ClaudeKey: "old"}, "")}
 	a.procs["p"] = p
 	if err := a.SendWithOptions(context.Background(), "p", "不该发送", TurnOptions{}); err == nil || !strings.Contains(err.Error(), "结束后") {
 		t.Fatalf("%v", err)
@@ -286,14 +296,33 @@ func TestSubagentClaudeIdleAPIChangeResumesSameSession(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	firstApproval := f.rec.wait(t, "initial native Claude approval", func(e protocol.Event) bool {
+		return e.Type == "approval.request" && e.SessionKey == "claude:"+id
+	})
+	if !cl.Respond(firstApproval.ApprovalID, "allow", "") {
+		t.Fatal("initial native Claude approval rejected")
+	}
 	f.rec.wait(t, "initial completed turn", func(e protocol.Event) bool {
 		return e.Type == "turn" && e.Status == "completed" && e.SessionKey == "claude:"+id
 	})
+	leaseDir := filepath.Join(f.home, "projects", "fixture")
+	if err := os.MkdirAll(leaseDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(leaseDir, id+".jsonl"), []byte(`{"type":"user","message":{"role":"user","content":"fixture first turn"}}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	f.mu.Lock()
 	f.s.ClaudeKey, f.s.ClaudeAuthMode = "new-fixture-key", "api-key"
 	f.mu.Unlock()
 	if err = cl.Send(ctx, id, "fixture second turn"); err != nil {
 		t.Fatal(err)
+	}
+	resumedApproval := f.rec.wait(t, "resumed native Claude approval", func(e protocol.Event) bool {
+		return e.Type == "approval.request" && e.SessionKey == "claude:"+id && e.ApprovalID != firstApproval.ApprovalID
+	})
+	if !cl.Respond(resumedApproval.ApprovalID, "allow", "") {
+		t.Fatal("resumed native Claude approval rejected")
 	}
 	f.rec.wait(t, "resumed completed turn", func(e protocol.Event) bool { return countTurns(f.rec) >= 2 })
 	args := readLog(t, f.logDir, "claude-args.jsonl")
@@ -316,9 +345,9 @@ func TestSubagentClaudeIdleAPIChangeResumesSameSession(t *testing.T) {
 }
 
 func TestSubagentClaudeBackgroundWorkBlocksCredentialRestart(t *testing.T) {
-	a := newClaudeAgent(func(protocol.Event) {}, func() Settings { return Settings{ClaudeKey: "new"} }, "", t.TempDir())
+	a := newClaudeAgent(func(protocol.Event) {}, func() Settings { return Settings{ClaudeRoot: "http://127.0.0.1:1", ClaudeKey: "new"} }, "", t.TempDir())
 	defer a.thr.Close()
-	p := &claudeProc{id: "p", done: make(chan struct{}), workerSettingsSig: claudeSettingsSig(Settings{ClaudeKey: "old"}, "")}
+	p := &claudeProc{id: "p", done: make(chan struct{}), workerSettingsSig: claudeSettingsSig(Settings{ClaudeRoot: "http://127.0.0.1:1", ClaudeKey: "old"}, "")}
 	p.activeSubtasks.Store(true)
 	a.procs["p"] = p
 	if err := a.SendWithOptions(context.Background(), "p", "不要发送", TurnOptions{}); err == nil {

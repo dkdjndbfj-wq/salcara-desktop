@@ -2,6 +2,7 @@ package config
 
 import (
 	"errors"
+	"regexp"
 	"strings"
 )
 
@@ -17,6 +18,31 @@ type RemoteAPI struct {
 var RemoteFamilies = []string{"codex", "claude"}
 
 func ValidRemoteFamily(f string) bool { return f == "codex" || f == "claude" }
+
+var agentFamilyID = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
+
+// NormalizeAgentFamily maps a control-surface id to the one API-selection
+// namespace used by the Bridge. Only the reserved built-in desktop cards are
+// aliases. Extension families retain their exact id, including a -desktop
+// suffix, unless their descriptor explicitly names a shared APIFamily.
+func NormalizeAgentFamily(agent string) string {
+	f := strings.TrimSpace(agent)
+	switch f {
+	case "codex-desktop":
+		return "codex"
+	case "claude-desktop":
+		return "claude"
+	}
+	return f
+}
+
+// ValidAgentFamily is intentionally broader than ValidRemoteFamily. The
+// latter remains the legacy built-in allow-list; this function validates a
+// descriptor-provided extension family without allowing path/query syntax.
+func ValidAgentFamily(f string) bool {
+	f = NormalizeAgentFamily(f)
+	return agentFamilyID.MatchString(f) && !strings.EqualFold(f, "remote")
+}
 
 // RemoteGatewayTarget is the loopback gateway route for a phone-selected API
 // that needs protocol conversion. It never collides with applied tool routes.
@@ -53,6 +79,22 @@ func (c *Config) SetRemoteAPI(family, accountID, model string) error {
 	if !ValidRemoteFamily(family) {
 		return errors.New("不支持的 Agent")
 	}
+	return c.setRemoteAPI(family, accountID, model)
+}
+
+// SetRemoteAPIForAgent is the aggregation-layer entry point. Built-ins keep
+// their historical validation, while a registered adapter can use a stable
+// descriptor family (for example Hermes) without adding another config field
+// or duplicating API-account logic.
+func (c *Config) SetRemoteAPIForAgent(agent, accountID, model string) error {
+	family := NormalizeAgentFamily(agent)
+	if !ValidAgentFamily(family) {
+		return errors.New("不支持的 Agent")
+	}
+	return c.setRemoteAPI(family, accountID, model)
+}
+
+func (c *Config) setRemoteAPI(family, accountID, model string) error {
 	model = strings.TrimSpace(model)
 	if len(model) > 200 || strings.ContainsAny(model, "\r\n\x00") {
 		return errors.New("模型名称无效")

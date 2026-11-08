@@ -29,6 +29,7 @@ type stationSwitchCommand struct {
 	Model            string
 	SessionKey       string
 	OperationID      string
+	SourceOnly       bool // agent/account attest the existing source, not an API change.
 }
 
 func handoverPayloadHash(in stationSwitchCommand) string {
@@ -36,6 +37,9 @@ func handoverPayloadHash(in stationSwitchCommand) string {
 	// a digest input. These values are handles/metadata only; no API key enters
 	// the hash or the persisted config.
 	data := strings.Join([]string{in.TargetHubURL, in.TargetDeviceID, in.TargetComputerID, in.Agent, in.AccountID, in.Model, in.SessionKey}, "\x00")
+	if in.SourceOnly {
+		data += "\x00source-only-v1"
+	}
 	sum := sha256.Sum256([]byte(data))
 	return hex.EncodeToString(sum[:])
 }
@@ -53,6 +57,19 @@ func (c *Client) stationSwitchBusy() bool {
 	return len(c.queue) > 0 || c.inFlight > 0 || len(c.recovery) > 0
 }
 
+// Scoped queues and their image directories belong to one authenticated Hub
+// generation. Until handover can atomically verify the destination generation
+// and migrate its files, preserve this queue at its source instead of allowing
+// the destination handshake to discard it as another phone's history.
+func (c *Client) scopedTransferPendingLocked() bool {
+	// recoveryAll alone is a permanent, identity-free overflow epoch, not an
+	// unsent private payload. Blocking on it would prevent handover forever.
+	return c.queueEventScope != "" && (len(c.queue) > 0 || c.inFlight > 0 || c.inFlightBatchID != "" ||
+		len(c.recovery) > 0 || len(c.inFlightRecovery) > 0)
+}
+
+const scopedTransferPendingMessage = "当前站点仍有待同步的会话或图片，请先恢复原站连接并完成同步后再切换"
+
 // beginStationSwitch closes the queue/flush admission window for the whole
 // validation phase.  It must acquire qmu together with flushLoop: if an upload
 // already owns an in-flight prefix, the switch is rejected; if the switch wins
@@ -65,6 +82,9 @@ func (c *Client) beginStationSwitch() error {
 func (c *Client) beginStationSwitchMode(transfer bool) error {
 	c.qmu.Lock()
 	defer c.qmu.Unlock()
+	if transfer && c.scopedTransferPendingLocked() {
+		return errors.New(scopedTransferPendingMessage)
+	}
 	if !transfer && (len(c.queue) > 0 || c.inFlight > 0 || len(c.recovery) > 0) {
 		return errors.New("当前站点还有未同步的会话进度，请稍后再切换")
 	}
@@ -95,6 +115,11 @@ func (c *Client) commitStationSwitch(update func(*config.Config) error) error {
 func (c *Client) commitStationSwitchMode(update func(*config.Config) error, transfer bool) error {
 	c.qmu.Lock()
 	defer c.qmu.Unlock()
+	// Push may accept progress while target validation is doing network I/O.
+	// Recheck under the same lock as the config commit, not only at admission.
+	if transfer && c.scopedTransferPendingLocked() {
+		return errors.New(scopedTransferPendingMessage)
+	}
 	if transfer && len(c.queue) > 0 && eventIdentity(c.queueConfig) != eventIdentity(c.o.Store.Get()) {
 		return errors.New("旧绑定的同步队列不能迁移，请刷新后重试")
 	}
@@ -129,6 +154,10 @@ func activeStationConfig(base config.Config, station config.RemoteConnection) co
 	next.RemoteDeviceOnly = true
 	next.DeviceID = station.DeviceID
 	next.DeviceSecret = station.DeviceSecret
+	if config.RemoteIdentity(base) != config.RemoteIdentity(next) {
+		next.RemoteStationAuthorization = nil
+		next.RemoteStationObservation = config.CloneStationObservation(station.RemoteSupport)
+	}
 	return next
 }
 
@@ -150,6 +179,12 @@ func (c *Client) verifyStationSwitch(ctx context.Context, target config.RemoteCo
 	}
 	base := c.o.Store.Get()
 	next := activeStationConfig(base, target)
+	if base.RemoteExecutionArmed {
+		if !discovery.RemoteAccess.Available() {
+			return config.Config{}, errors.New("目标站点暂不支持安全远程，请更新站点或检查远程设置")
+		}
+		next.RemoteStationObservation = config.CloneStationObservation(discovery.RemoteAccess)
+	}
 	req, err := c.requestFor(probeCtx, next, http.MethodGet, "/bridge/pair/status?deviceId="+url.QueryEscape(target.DeviceID), nil, false)
 	if err != nil {
 		return config.Config{}, err
@@ -192,6 +227,9 @@ func (c *Client) switchStationMode(ctx context.Context, in stationSwitchCommand,
 		return nil, errors.New("程序还在启动，请稍后再试")
 	}
 	current := c.o.Store.Get()
+	if !current.HubRemoteEnabled() || current.EffectiveRemoteMode() == "bot" {
+		return nil, errors.New("当前远程方式不支持切换中转站，请在电脑端选择远程方式")
+	}
 	sameStation := config.NormalizeHubURL(in.TargetHubURL) == config.NormalizeHubURL(current.EffectiveHubURL()) && in.TargetDeviceID == current.DeviceID
 	if in.OperationID != "" && current.RemoteHandoverOperation == in.OperationID && !sameStation {
 		return nil, errors.New("切换请求已提交到另一个中转站，请重新选择")
@@ -202,6 +240,9 @@ func (c *Client) switchStationMode(ctx context.Context, in stationSwitchCommand,
 	target, ok := current.SavedRemoteConnection(in.TargetHubURL, in.TargetDeviceID)
 	if !ok {
 		return nil, errors.New("电脑上没有目标中转站的连接记录，请先在电脑端添加并连接")
+	}
+	if target.BotGroupID != "" {
+		return nil, errors.New("Bot 绑定需在电脑端启用，不能作为手机中转站切换")
 	}
 	if current.ComputerID == "" || in.TargetComputerID == "" || in.TargetComputerID != current.ComputerID {
 		return nil, errors.New("目标中转站不是这台电脑的已配对连接")
@@ -234,22 +275,40 @@ func (c *Client) switchStationMode(ctx context.Context, in stationSwitchCommand,
 	if current.ComputerID != "" && target.DeviceID == current.DeviceID && config.NormalizeHubURL(target.HubURL) == config.NormalizeHubURL(current.EffectiveHubURL()) {
 		return nil, errors.New("目标电脑身份与当前连接重复")
 	}
-	if in.Agent != "" && !config.ValidRemoteFamily(strings.TrimSuffix(in.Agent, "-desktop")) {
-		return nil, errors.New("不支持的 Agent")
+	family := ""
+	if in.Agent != "" {
+		route, routeErr := c.routeForAgent(in.Agent)
+		if routeErr != nil {
+			return nil, routeErr
+		}
+		family = route.Family
 	}
-	family := strings.TrimSuffix(in.Agent, "-desktop")
+	if err := c.requireExplicitModelCapability(in.Agent, in.Model); err != nil {
+		return nil, err
+	}
+	if in.SourceOnly {
+		if in.Model != "" || in.SessionKey != "" || family == "" || in.AccountID == "" || !stationSourceMatches(current, family, in.AccountID) {
+			return nil, errors.New("当前 API 来源已变化，请刷新后重试中转站切换")
+		}
+	}
 	// A station switch changes the event transport for the whole computer, not
 	// only the card selected on the phone. Check every worker family so an
 	// unrelated running Claude/Codex turn cannot leave a tail on A. The
 	// selected session key is still checked against its exact native lease.
-	for _, candidate := range config.RemoteFamilies {
-		sessionKey := ""
-		if candidate == family && in.Agent != "" {
-			sessionKey = in.SessionKey
+	checkWorkersIdle := func() error {
+		for _, candidate := range c.remoteAPIFamilies() {
+			sessionKey := ""
+			if candidate == family && in.Agent != "" {
+				sessionKey = in.SessionKey
+			}
+			if err := c.checkRemoteAPIChange(ctx, candidate, sessionKey); err != nil {
+				return err
+			}
 		}
-		if err := c.checkRemoteAPIChange(ctx, candidate, sessionKey); err != nil {
-			return nil, err
-		}
+		return nil
+	}
+	if err := checkWorkersIdle(); err != nil {
+		return nil, err
 	}
 	if err := c.checkNativeStationIdle(ctx); err != nil {
 		return nil, err
@@ -278,20 +337,55 @@ func (c *Client) switchStationMode(ctx context.Context, in stationSwitchCommand,
 			}
 			selected, _ := next.LocalAccount(selectedID)
 			selectedSnapshot = selected
+			if !next.RemoteHubAllowsAccount(in.TargetHubURL, selected) {
+				return nil, errors.New("这个 API 尚未加入目标中转站，请在电脑端 API 设置中开启")
+			}
+			if next.RemoteExecutionArmed && !in.SourceOnly && (next.RemoteStationObservation == nil || !config.StationAllowsAccount(next.RemoteStationObservation.Station, selected)) {
+				return nil, errors.New("目标中转站不支持这个 API 或账号，请重新选择")
+			}
 			if strings.TrimSpace(in.Model) != "" {
-				models, modelErr := c.verifiedAPIModels(ctx, selected, false)
-				if modelErr != nil {
-					return nil, modelErr
-				}
-				if !containsKey(models, strings.TrimSpace(in.Model)) {
-					return nil, errors.New("目标 API 不支持该模型，请刷新后重选")
+				if next.RemoteExecutionArmed {
+					// Handover must not spend/query B through A. The target station
+					// will authorize a real catalogue request after the commit.
+					if !config.ModelAllowed(selected, strings.TrimSpace(in.Model)) {
+						return nil, errors.New("目标账号不允许该模型")
+					}
+				} else if isOfficialModelAccount(selected) {
+					if err := validateOfficialModel(selected, in.Model); err != nil {
+						return nil, err
+					}
+				} else {
+					models, modelErr := c.verifiedAPIModels(ctx, selected, false)
+					if modelErr != nil {
+						return nil, modelErr
+					}
+					if !containsKey(models, strings.TrimSpace(in.Model)) {
+						return nil, errors.New("目标 API 不支持该模型，请刷新后重选")
+					}
 				}
 			}
 		}
 	}
+	// Probes/catalogue reads do not hold vendor state locks. A worker can
+	// become active without publishing its first progress event, so checking
+	// only the upload queue would still allow a partial transport handover.
+	if err := checkWorkersIdle(); err != nil {
+		return nil, err
+	}
+	if err := c.checkNativeStationIdle(ctx); err != nil {
+		return nil, err
+	}
+	if err := c.requireExplicitModelCapability(in.Agent, in.Model); err != nil {
+		return nil, err
+	}
 	identity := config.RemoteIdentity(current)
 	expectedBinding, expectedPhone := current.PhoneBindingID, current.PhoneHash
 	if err := c.commitStationSwitchMode(func(cfg *config.Config) error {
+		if env, ok := executionSourceFromContext(ctx); ok {
+			if err := c.validateExecutionSourceFor(env, *cfg); err != nil {
+				return err
+			}
+		}
 		if config.RemoteIdentity(*cfg) != identity {
 			return errors.New("连接已变化，请刷新后重试")
 		}
@@ -308,17 +402,27 @@ func (c *Client) switchStationMode(ctx context.Context, in stationSwitchCommand,
 				return errors.New("API 已更换，请刷新后重选")
 			}
 		}
+		if in.SourceOnly && !stationSourceMatches(*cfg, family, in.AccountID) {
+			return errors.New("当前 API 来源已变化，请刷新后重试中转站切换")
+		}
 		apply := activeStationConfig(*cfg, station)
 		// Preserve the vault, physical phone binding, projects and sessions; only
 		// the active station identity changes.
 		cfg.RelayRoot, cfg.HubURL, cfg.RemoteDeviceOnly = apply.RelayRoot, apply.HubURL, apply.RemoteDeviceOnly
 		cfg.DeviceID, cfg.DeviceSecret = apply.DeviceID, apply.DeviceSecret
+		cfg.RemoteStationAuthorization = nil
+		cfg.RemoteStationObservation = config.CloneStationObservation(next.RemoteStationObservation)
+		for i := range cfg.RemoteConnections {
+			if cfg.RemoteConnections[i].DeviceID == station.DeviceID && config.NormalizeHubURL(cfg.RemoteConnections[i].HubURL) == config.NormalizeHubURL(station.HubURL) {
+				cfg.RemoteConnections[i].RemoteSupport = config.CloneStationObservation(next.RemoteStationObservation)
+			}
+		}
 		cfg.RemoteHandoverOperation = in.OperationID
 		cfg.RemoteHandoverFrom = identity
 		cfg.RemoteHandoverAt = time.Now().UnixMilli()
 		cfg.RemoteHandoverPayloadHash = handoverPayloadHash(in)
-		if in.Agent != "" {
-			if err := cfg.SetRemoteAPI(family, selectedID, in.Model); err != nil {
+		if in.Agent != "" && !in.SourceOnly {
+			if err := cfg.SetRemoteAPIForAgent(family, selectedID, in.Model); err != nil {
 				return err
 			}
 			if selectedID != "" {
@@ -329,14 +433,24 @@ func (c *Client) switchStationMode(ctx context.Context, in stationSwitchCommand,
 	}, transfer); err != nil {
 		return nil, err
 	}
-	if selectedID != "" && strings.TrimSpace(in.Model) == "" {
+	if selectedID != "" && !in.SourceOnly && strings.TrimSpace(in.Model) == "" {
 		// Stored Models are picker hints. A handover must not leave the old
 		// provider's verified catalog attached to the newly selected key.
 		c.invalidateAPIModels(selectedID)
 	}
 	return map[string]any{"switched": true, "alreadyCommitted": false, "operationId": in.OperationID,
 		"payloadHash": handoverPayloadHash(in), "hubUrl": config.NormalizeHubURL(target.HubURL), "deviceId": target.DeviceID,
-		"agent": in.Agent, "apiChanged": in.Agent != ""}, nil
+		"agent": in.Agent, "apiChanged": in.Agent != "" && !in.SourceOnly}, nil
+}
+
+// A source-only switch preserves the exact remote/applied selection, including
+// model overrides. A merely saved card must not be substituted for that source.
+func stationSourceMatches(cfg config.Config, family, handle string) bool {
+	a, ok := cfg.RemoteToolAccount(family)
+	if !ok {
+		a, ok = cfg.AuthorizedAppliedToolAccount(family)
+	}
+	return ok && APIHandle(cfg, a.ID) == handle
 }
 
 func (c *Client) checkNativeStationIdle(ctx context.Context) error {

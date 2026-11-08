@@ -2,6 +2,7 @@ package mcpapproval
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -42,8 +43,11 @@ func TestServe(t *testing.T) {
 		`{"jsonrpc":"2.0","id":5,"method":"resources/list"}`,
 	}, "\n") + "\n"
 	pr, pw := io.Pipe()
+	input, inputWriter := io.Pipe()
+	defer inputWriter.Close()
+	go func() { _, _ = io.WriteString(inputWriter, in) }()
 	go func() {
-		Serve(strings.NewReader(in), pw, srv.URL+"/perm", "tok", "sess-1")
+		Serve(input, pw, srv.URL+"/perm", "tok", "sess-1")
 		pw.Close()
 	}()
 	res := map[int]map[string]any{}
@@ -52,6 +56,9 @@ func TestServe(t *testing.T) {
 		var m map[string]any
 		json.Unmarshal(sc.Bytes(), &m)
 		res[int(m["id"].(float64))] = m
+		if len(res) == 5 {
+			inputWriter.Close()
+		}
 	}
 	init := res[1]["result"].(map[string]any)
 	if init["protocolVersion"] != "2025-03-26" || init["capabilities"].(map[string]any)["tools"] == nil {
@@ -81,10 +88,9 @@ func TestServe(t *testing.T) {
 }
 
 func TestServeBridgeDown(t *testing.T) {
-	in := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"approve","arguments":{"tool_name":"Bash","input":{}}}}` + "\n"
-	var sb strings.Builder
-	Serve(strings.NewReader(in), &sb, "http://127.0.0.1:1/x", "tok", "s")
-	if !strings.Contains(sb.String(), `\"behavior\":\"deny\"`) {
-		t.Fatalf("%s", sb.String())
+	result := callApprove(context.Background(), &http.Client{}, "http://127.0.0.1:1/x", "tok", "s", json.RawMessage(`{"name":"approve","arguments":{"tool_name":"Bash","input":{}}}`))
+	b, _ := json.Marshal(result)
+	if !strings.Contains(string(b), `\"behavior\":\"deny\"`) {
+		t.Fatalf("%s", b)
 	}
 }

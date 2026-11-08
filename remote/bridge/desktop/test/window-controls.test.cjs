@@ -28,6 +28,7 @@ test('controls and directory picker reject other windows, frames, ports and path
   for (const ev of [{ ...f.event, sender: {} }, { ...f.event, senderFrame: { url: f.event.senderFrame.url } }]) {
     f.handlers.get('win:minimize')(ev); f.handlers.get('win:close')(ev);
     await assert.rejects(f.handlers.get('win:choose-directory')(ev, 'C:\\safe'));
+    await assert.rejects(f.handlers.get('win:choose-plugin-directory')(ev));
   }
   assert.equal(f.calls.length, 0);
 });
@@ -37,6 +38,11 @@ test('Windows chooser selects directories only, honors safe absolute default and
   assert.deepEqual(f.calls[0].properties, ['openDirectory']); assert.equal(f.calls[0].defaultPath, 'C:\\fixture');
   f.dialog.showOpenDialog = async (_win, options) => { assert.equal(options.defaultPath, undefined); return { canceled: true, filePaths: [] }; };
   assert.equal(await f.handlers.get('win:choose-directory')(f.event, 'relative/path'), null);
+});
+test('plugin chooser is scoped to the main window and opens a directory-only dialog', async () => {
+  const f = fixture();
+  assert.equal(await f.handlers.get('win:choose-plugin-directory')(f.event), 'C:\\fixture\\project');
+  assert.deepEqual(f.calls[0], { title: '选择插件文件夹', properties: ['openDirectory'] });
 });
 test('double click shares one native chooser instead of opening two dialogs', async () => {
   const f = fixture(); let resolve, count = 0;

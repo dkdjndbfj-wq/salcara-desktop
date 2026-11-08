@@ -31,7 +31,28 @@ func eventIdentity(cfg config.Config) string {
 	return config.RemoteIdentity(cfg) + ":" + cfg.PhoneBindingID + ":" + cfg.PhoneHash
 }
 
+// Bot commands are bound to the authenticated group event generation, rather
+// than the independent QR pairing saved for Hub mode. Both the frozen command
+// scope and the live handshake must match; a saved Bot entry alone is no proof.
+func (c *Client) commandPhoneMatches(cfg config.Config, binding, phone, scope string) bool {
+	if cfg.EffectiveRemoteMode() == "bot" && botEventScopeRequired(cfg) {
+		return scope != "" && c.commandEventScopeValid(cfg, scope)
+	}
+	return phoneMatches(cfg, binding, phone)
+}
+
 func (c *Client) canUpload(cfg config.Config) bool {
+	if !cfg.HubRemoteEnabled() {
+		return false
+	}
+	if cfg.EffectiveRemoteMode() == "bot" && botEventScopeRequired(cfg) {
+		if c.eventScopeFor(cfg) == "" {
+			return false
+		}
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		return c.status.State == StateConnected
+	}
 	if cfg.PhoneBindingID == "" {
 		return !cfg.RemoteDeviceOnly
 	}
@@ -52,9 +73,19 @@ func (c *Client) currentUploadAuthorization() string {
 // observation and must not release the queue retention gate before B has
 // authenticated.
 func (c *Client) publishPairState(pair PairStatus, authorized string, clearAwaiting bool) {
+	if clearAwaiting && authorized == "" {
+		c.featureCatalog.clear()
+	}
 	c.mu.Lock()
 	changed := c.status.Pairing == nil || *c.status.Pairing != pair
 	c.status.Pairing, c.uploadAuthorization = &pair, authorized
+	for pending := range c.nativeAdmissions {
+		if pending.identity != authorized {
+			// Withdraw only requests still in preflight/HTTP delivery. The native
+			// app owns already-accepted turns; never stop those tasks on revoke.
+			pending.cancel()
+		}
+	}
 	c.mu.Unlock()
 	// A successful B authorization releases the queue retention gate. A
 	// confirmed local/phone revoke also clears it; an unpaired snapshot whose
@@ -84,8 +115,11 @@ func (c *Client) acceptPairState(station config.Config, data string) {
 		return
 	}
 	cfg := c.o.Store.Get()
-	if config.RemoteIdentity(cfg) != config.RemoteIdentity(station) {
+	if !cfg.HubRemoteEnabled() || cfg.EffectiveRemoteMode() != station.EffectiveRemoteMode() || config.RemoteIdentity(cfg) != config.RemoteIdentity(station) {
 		return
+	}
+	if cfg.EffectiveRemoteMode() == "bot" && botEventScopeRequired(cfg) {
+		return // Bot phone lifecycle is scoped by hello/heartbeat, never QR state.
 	}
 	// Pair revisions are scoped to the authenticated station stream. Ignore
 	// delayed snapshots from before a newer claim/revoke; reset the baseline
@@ -110,14 +144,22 @@ func (c *Client) acceptPairState(station config.Config, data string) {
 	legacyAttempt := wire.AttemptID == ""
 	if wire.Paired && cfg.PhonePairPending == config.RemoteIdentity(station) && cfg.PhonePairExpires > nowMS() && cfg.PhonePairAttempt != "" && (legacyAttempt || wire.AttemptID == cfg.PhonePairAttempt) && wire.BindingID == cfg.PhoneBindingID && validPhoneHash(wire.PhoneHash) && (cfg.PhoneHash == "" || cfg.PhoneHash == wire.PhoneHash) {
 		if err := c.o.Store.Update(func(next *config.Config) error {
-			if next.PhoneBindingID != cfg.PhoneBindingID || config.RemoteIdentity(*next) != config.RemoteIdentity(station) {
+			if !next.HubRemoteEnabled() || next.EffectiveRemoteMode() != station.EffectiveRemoteMode() || next.PhoneBindingID != cfg.PhoneBindingID || config.RemoteIdentity(*next) != config.RemoteIdentity(station) {
 				return errors.New("配对已更换")
 			}
 			next.PhoneHash, next.PhonePairPending = wire.PhoneHash, ""
 			next.PhonePairAttempt, next.PhonePairExpires = "", 0
 			return nil
 		}); err != nil {
+			// A failed local acceptance is not a phone-side revoke. In particular,
+			// a new station may be claiming the already-bound physical phone;
+			// do not erase that binding or enqueue revokes for the other stations.
+			c.log.Printf("hub: cannot persist phone pairing")
 			wire.Paired = false
+			if config.RemoteIdentity(c.o.Store.Get()) == config.RemoteIdentity(station) {
+				c.publishPairState(wire.PairStatus, "", false)
+			}
+			return
 		} else {
 			cfg = c.o.Store.Get()
 		}
@@ -126,24 +168,27 @@ func (c *Client) acceptPairState(station config.Config, data string) {
 	// authorization. Keep the old hash on the Hub's unpaired snapshot so that
 	// an unused/new station cannot accidentally revoke another station's pair.
 	if !wire.Paired && phoneMatches(cfg, wire.BindingID, wire.PhoneHash) {
-		if err := c.o.Store.Update(func(next *config.Config) error {
-			if next.PhoneBindingID == cfg.PhoneBindingID {
-				addPhoneRevokes(next, cfg)
-				next.PhoneHash, next.PhonePairPending, next.PhoneBindingID = "", "", config.RandomToken(32)
-				next.PhonePairAttempt, next.PhonePairExpires = "", 0
-			}
-			return nil
-		}); err != nil {
+		matched, err := c.o.Store.RevokePhoneBinding(cfg.PhoneBindingID, cfg.PhoneHash)
+		if err != nil {
 			c.log.Printf("hub: cannot persist phone revocation")
 		}
-		// Even if persistence failed, do not continue uploading this connection.
-		c.publishPairState(wire.PairStatus, "", true)
-		c.wakePhoneRevoke()
+		if matched {
+			// Both gateway execution and uploads stay revoked on a failed save.
+			c.publishPairState(wire.PairStatus, "", true)
+			c.wakePhoneRevoke()
+		}
 		return
 	}
 	authorized := ""
 	if wire.Paired && phoneMatches(cfg, wire.BindingID, wire.PhoneHash) {
 		authorized = eventIdentity(cfg)
+		if eventIdentity(station) != authorized {
+			// The stream was opened before this phone identity was established.
+			// Obtain its scope and pair snapshot together on a fresh stream before
+			// exposing paired=true or admitting the phone's first command.
+			c.Kick()
+			return
+		}
 	} else {
 		if wire.Paired && wire.PendingExpiresAt == 0 && validPhoneHash(wire.BindingID) && validPhoneHash(wire.PhoneHash) {
 			// An old offline station is reconciled on reconnect. Conditional
@@ -160,6 +205,7 @@ func (c *Client) acceptPairState(station config.Config, data string) {
 }
 
 func (c *Client) revokePhone(ctx context.Context) error {
+	c.featureCatalog.clear()
 	c.phoneMu.Lock()
 	cfg := c.o.Store.Get()
 	// Keep the binding that the user explicitly revoked. Network cleanup may
@@ -168,18 +214,17 @@ func (c *Client) revokePhone(ctx context.Context) error {
 	oldBindingID, oldPhoneHash := cfg.PhoneBindingID, cfg.PhoneHash
 	// Close local access before any network request; an offline old station
 	// must not retain execution/read access on this computer.
-	if err := c.o.Store.Update(func(next *config.Config) error {
-		addPhoneRevokes(next, cfg)
-		next.PhoneHash, next.PhonePairPending, next.PhoneBindingID = "", "", config.RandomToken(32)
-		next.PhonePairAttempt, next.PhonePairExpires = "", 0
-		return nil
-	}); err != nil {
+	matched, persistErr := c.o.Store.RevokePhoneBinding(cfg.PhoneBindingID, cfg.PhoneHash)
+	if !matched {
 		c.phoneMu.Unlock()
-		return errors.New("无法保存解除绑定，请重试")
+		return errors.New("手机绑定已变化")
 	}
 	c.publishPairState(PairStatus{DeviceID: cfg.DeviceID}, "", true)
 	c.phoneMu.Unlock()
 	c.wakePhoneRevoke()
+	if persistErr != nil {
+		return errors.New("手机访问已关闭，但解除绑定尚未保存")
+	}
 	if validPhoneHash(oldBindingID) && validPhoneHash(oldPhoneHash) {
 		// A bounded best-effort pass gives an online Hub immediate feedback.
 		// Remaining offline stations are durable and retried without holding

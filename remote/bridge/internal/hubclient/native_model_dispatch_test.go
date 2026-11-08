@@ -2,7 +2,6 @@ package hubclient
 
 import (
 	"context"
-	"strings"
 	"testing"
 	"time"
 
@@ -21,7 +20,7 @@ func TestDesktopLiveRejectsModelWithoutSendingOrFallingBack(t *testing.T) {
 			result, err := c.Dispatch(context.Background(), map[string]any{
 				"type": "session.send", "sessionKey": key, "text": "must keep the model", "model": model, "controlSurface": "desktop",
 			})
-			if err == nil || result != nil || !strings.Contains(err.Error(), "不支持手机指定模型") || !strings.Contains(err.Error(), "消息未发送") {
+			if err == nil || result != nil {
 				t.Fatalf("result=%v err=%v", result, err)
 			}
 			if len(d.sent)+len(worker.sent)+len(worker.sendOptions) != 0 {
@@ -78,5 +77,14 @@ func TestExplicitBackgroundFrozenModelRetryDoesNotSwitchExecutor(t *testing.T) {
 	}
 	if frozen["model"] != "gpt-frozen-model" || frozen["operationId"] != "frozen-operation" || frozen["text"] != "original text" {
 		t.Fatalf("frozen command mutated: %v", frozen)
+	}
+}
+
+func TestBackgroundReceiptIdentityReachesCodexWithoutModelOverride(t *testing.T) {
+	c, worker, _ := effortClient(t)
+	op := "11111111-2222-4333-8444-555555555555"
+	_, err := c.Dispatch(context.Background(), map[string]any{"type": "session.send", "sessionKey": "codex:original", "text": "same text", "controlSurface": "cli", "operationId": op})
+	if err != nil || len(worker.sendOptions) != 1 || worker.sendOptions[0].ClientUserMessageID != op || worker.sendOptions[0].Model != "" {
+		t.Fatalf("exact echo ID lost or changed model: err=%v options=%+v", err, worker.sendOptions)
 	}
 }

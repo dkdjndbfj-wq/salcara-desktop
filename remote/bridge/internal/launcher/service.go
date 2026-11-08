@@ -24,6 +24,7 @@ type Plan struct {
 	Shared                         bool
 	Environment                    []string
 	Args                           []string
+	ClaudeSettingsPin              string // private per-launch API settings; terminal supervisor owns cleanup after start
 }
 
 type Result struct {
@@ -69,7 +70,7 @@ func (s *Service) Tools(ctx context.Context, paths map[string]string) []Tool {
 	return tools
 }
 
-func (s *Service) Prepare(a config.LocalAccount, t Tool, workspace string) (Plan, error) {
+func (s *Service) Prepare(a config.LocalAccount, t Tool, workspace string) (p Plan, err error) {
 	if t.ID == "claude-desktop" {
 		return Plan{}, toolcfg.ErrClaudeDesktopAutomaticAPIUnavailable
 	}
@@ -84,6 +85,9 @@ func (s *Service) Prepare(a config.LocalAccount, t Tool, workspace string) (Plan
 	}
 	if a.Model == "" {
 		return Plan{}, errors.New("请先为这个账号选择或填写默认模型")
+	}
+	if !config.ModelAllowed(a, a.Model) {
+		return Plan{}, errors.New("当前 API 的模型规则拒绝了默认模型，请重新选择模型")
 	}
 	if workspace == "" {
 		workspace = a.Workspace
@@ -102,12 +106,41 @@ func (s *Service) Prepare(a config.LocalAccount, t Tool, workspace string) (Plan
 	if err != nil {
 		return Plan{}, err
 	}
-	p := Plan{Tool: t, Workspace: filepath.Clean(workspace), ProfileDir: filepath.Join(root, a.Kind), AppData: filepath.Join(root, t.ID+"-app")}
+	p = Plan{Tool: t, Workspace: filepath.Clean(workspace), ProfileDir: filepath.Join(root, a.Kind), AppData: filepath.Join(root, t.ID+"-app")}
+	// Both Codex and Claude preparations can fail after writing credentials
+	// (for example while resolving an npm shim). Restore the exact previous
+	// Bridge-owned files, including their absence, on every failed preparation.
+	before, err := captureFiles(isolatedProfileFiles(p.ProfileDir, a.Kind))
+	if err != nil {
+		return Plan{}, err
+	}
+	defer func() {
+		if err != nil {
+			if restoreErr := restoreFiles(before); restoreErr != nil {
+				err = fmt.Errorf("工具配置准备失败且回滚失败：%w（原错误：%v）", restoreErr, err)
+			}
+		}
+	}()
 	_, v1, _ := config.APIBase(a.BaseURL)
 	env := map[string]string{}
 	drop := []string{"OPENAI_API_KEY", "OPENAI_BASE_URL", "SUB2API_API_KEY", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "ANTHROPIC_MODEL", "CLAUDE_CODE_OAUTH_TOKEN", "ELECTRON_RUN_AS_NODE"}
 	if a.Kind == "codex" {
+		if a.CatalogOverride {
+			if _, err := toolcfg.CodexCatalogJSON(p.ProfileDir, catalogModels(a), a.Name); err != nil {
+				return Plan{}, err
+			}
+		}
 		if err := toolcfg.ApplyLocalCodex(p.ProfileDir, v1, a.Key, a.Model); err != nil {
+			return Plan{}, err
+		}
+		// An isolated launch has its own CODEX_HOME, so the system Codex
+		// catalogue cannot be relied on here.  When the user enabled the
+		// per-card picker override, publish the verified upstream catalogue
+		// into this instance as well. ApplyCodexCatalog only removes the
+		// Bridge-owned pointer when the option is off; the snapshot above
+		// protects the previous catalogue if preparation fails. An empty opted-in catalogue fails closed
+		// instead of opening a picker that advertises no usable models.
+		if err := toolcfg.ApplyCodexCatalog(p.ProfileDir, a.CatalogOverride, catalogModels(a), a.Name); err != nil {
 			return Plan{}, err
 		}
 		env["CODEX_HOME"], env["OPENAI_API_KEY"] = p.ProfileDir, a.Key
@@ -115,16 +148,17 @@ func (s *Service) Prepare(a config.LocalAccount, t Tool, workspace string) (Plan
 			env["CODEX_ELECTRON_USER_DATA_PATH"] = p.AppData
 			p.Args = []string{"--user-data-dir=" + p.AppData}
 		}
+	} else if config.IsAdditionalTool(a.Kind) {
+		if err := applyAdditional(p, a); err != nil {
+			return Plan{}, err
+		}
+		additionalPlan(&p, a, env)
 	} else {
 		if err := toolcfg.ApplyLocalClaude(filepath.Join(p.ProfileDir, "settings.json"), a.BaseURL, a.Key, a.Model, a.AuthMode); err != nil {
 			return Plan{}, err
 		}
-		env["CLAUDE_CONFIG_DIR"], env["ANTHROPIC_BASE_URL"], env["ANTHROPIC_MODEL"] = p.ProfileDir, a.BaseURL, a.Model
-		if a.AuthMode == "api-key" {
-			env["ANTHROPIC_API_KEY"] = a.Key
-		} else {
-			env["ANTHROPIC_AUTH_TOKEN"] = a.Key
-		}
+		env = toolcfg.ClaudeAPIEnvironment(a.BaseURL, a.Key, a.AuthMode)
+		env["CLAUDE_CONFIG_DIR"], env["ANTHROPIC_MODEL"] = p.ProfileDir, a.Model
 		p.Args = []string{"--model", a.Model, "--settings", filepath.Join(p.ProfileDir, "settings.json")}
 	}
 	if err := os.MkdirAll(p.AppData, 0o700); err != nil {
@@ -137,6 +171,22 @@ func (s *Service) Prepare(a config.LocalAccount, t Tool, workspace string) (Plan
 	return p, nil
 }
 
+func isolatedProfileFiles(dir, kind string) []string {
+	paths := []string{filepath.Join(dir, "settings.json")}
+	if config.IsAdditionalTool(kind) {
+		paths = toolcfg.AdditionalPaths(kind, dir)
+	}
+	if kind == "codex" {
+		paths = []string{filepath.Join(dir, "config.toml"), filepath.Join(dir, "auth.json"), toolcfg.CodexCatalogPath(dir)}
+	}
+	// Tool writers may create one-time backups while preparing an existing
+	// profile. Those sidecars belong to the same transaction as their files.
+	for _, path := range append([]string(nil), paths...) {
+		paths = append(paths, path+toolcfg.BackupSuffix)
+	}
+	return paths
+}
+
 func normalizeCLI(p *Plan) error {
 	if isDesktop(p.Tool.ID) {
 		return nil
@@ -145,11 +195,21 @@ func normalizeCLI(p *Plan) error {
 	if ext != ".cmd" && ext != ".bat" {
 		return nil
 	}
+	if p.Tool.Kind == "claude" {
+		if native, ok := agents.LocalExecutable("claude", p.Tool.Path); ok && native != p.Tool.Path {
+			p.Tool.Path = native
+			return nil
+		}
+	}
 	// npm shims feed arguments back through cmd.exe. Run their JS entry directly
 	// so model identifiers are never interpreted as shell commands.
 	pkg := "@anthropic-ai/claude-code/cli.js"
 	if p.Tool.Kind == "codex" {
 		pkg = "@openai/codex/bin/codex.js"
+	} else if p.Tool.Kind == "deepseek-harness" {
+		pkg = "@deepseek-ai/dsh/lib/bin.js"
+	} else if p.Tool.Kind == "hermes" {
+		return errors.New("请设置 Hermes 原生可执行文件路径（venv/Scripts/hermes.exe），不支持 CMD/BAT 包装脚本")
 	}
 	dir := filepath.Dir(p.Tool.Path)
 	for _, root := range []string{filepath.Join(dir, "node_modules"), filepath.Dir(dir)} {
@@ -157,7 +217,7 @@ func normalizeCLI(p *Plan) error {
 		if fileExists(entry) {
 			node, ok := agents.LocalExecutable("node", "")
 			if !ok {
-				return errors.New("这个 npm 工具需要 Node.js，请先安装 Node.js 或使用官方原生 CLI")
+				return errors.New("这个 npm 工具需要 Node.js，请先安装 Node.js（https://nodejs.org）或改用官方原生 CLI 可执行文件")
 			}
 			p.Tool.Path = node
 			p.Args = append([]string{entry}, p.Args...)
@@ -168,11 +228,32 @@ func normalizeCLI(p *Plan) error {
 }
 
 func (s *Service) Launch(ctx context.Context, a config.LocalAccount, target, workspace string, paths map[string]string) (Result, error) {
+	return s.LaunchAuthorized(ctx, a, target, workspace, paths, nil)
+}
+
+// LaunchAuthorized checks a caller-owned account/binding snapshot immediately
+// before starting. The hook runs after waiting for the launch lock and tool
+// discovery, so a queued launch cannot use an already superseded account. The
+// hook is a final validation boundary, not an atomic lock on the caller's store.
+func (s *Service) LaunchAuthorized(ctx context.Context, a config.LocalAccount, target, workspace string, paths map[string]string, beforeStart func() error) (result Result, err error) {
+	defer func() { err = RedactLaunchError(err, a.Key) }()
 	if target == "claude-desktop" {
 		return Result{}, toolcfg.ErrClaudeDesktopAutomaticAPIUnavailable
 	}
-	s.mu.Lock()
+	if err := ctx.Err(); err != nil {
+		return Result{}, err
+	}
+	if err := lockLaunch(ctx, &s.mu); err != nil {
+		return Result{}, err
+	}
 	defer s.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return Result{}, err
+	}
+	if err := config.ValidateLocalAccount(&a); err != nil {
+		return Result{}, err
+	}
+	LaunchPhase(ctx, "tool", "检查程序与项目目录")
 	var t Tool
 	for _, x := range s.Tools(ctx, paths) {
 		if x.ID == target {
@@ -180,10 +261,42 @@ func (s *Service) Launch(ctx context.Context, a config.LocalAccount, target, wor
 			break
 		}
 	}
+	if err := ctx.Err(); err != nil {
+		return Result{}, err
+	}
+	profileDir, err := filepath.Abs(filepath.Join(s.Dir, "instances", a.ID, a.Kind))
+	if err != nil {
+		return Result{}, err
+	}
+	before, err := captureFiles(isolatedProfileFiles(profileDir, a.Kind))
+	if err != nil {
+		return Result{}, err
+	}
+	LaunchPhase(ctx, "profile", "写入 API 与模型配置")
 	p, err := s.Prepare(a, t, workspace)
 	if err != nil {
 		return Result{}, err
 	}
+	defer func() {
+		if err != nil {
+			if restoreErr := restoreFiles(before); restoreErr != nil {
+				err = fmt.Errorf("启动工具失败且配置回滚失败：%w（原错误：%v）", restoreErr, err)
+			}
+		}
+	}()
+	if err := ctx.Err(); err != nil {
+		return Result{}, err
+	}
+	LaunchPhase(ctx, "authorize", "核对并保存连接授权")
+	if beforeStart != nil {
+		if err := beforeStart(); err != nil {
+			return Result{}, err
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return Result{}, err
+	}
+	LaunchPhase(ctx, "start", "创建工具进程")
 	pid, err := s.Start(ctx, p)
 	if err != nil {
 		return Result{}, err
@@ -193,18 +306,26 @@ func (s *Service) Launch(ctx context.Context, a config.LocalAccount, target, wor
 
 // A successful spawn is not proof that an upstream model can answer a request.
 func startDirect(p Plan, terminal bool) (int, error) {
+	return startDirectContext(context.Background(), p, terminal)
+}
+
+func startDirectContext(ctx context.Context, p Plan, terminal bool) (int, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
 	cmd := exec.Command(p.Tool.Path, p.Args...)
 	cmd.Dir, cmd.Env = p.Workspace, p.Environment
 	configureProcess(cmd, terminal)
 	if err := cmd.Start(); err != nil {
-		return 0, fmt.Errorf("启动 %s 失败，请检查程序路径和权限", p.Tool.Name)
+		return 0, fmt.Errorf("启动 %s 失败：%w", p.Tool.Name, err)
 	}
+	LaunchPhase(ctx, "confirm", "等待进程启动确认", "检查进程是否立即退出")
 	done := make(chan error, 1)
 	go func() { done <- cmd.Wait() }()
 	select {
 	case err := <-done:
 		if err != nil {
-			return 0, fmt.Errorf("%s 启动后立即退出，请检查版本、路径或查看工具自己的日志", p.Tool.Name)
+			return 0, fmt.Errorf("%s 启动后立即退出：%w", p.Tool.Name, err)
 		}
 	case <-time.After(800 * time.Millisecond):
 	}

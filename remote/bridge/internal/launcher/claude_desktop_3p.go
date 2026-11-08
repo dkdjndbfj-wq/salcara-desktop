@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/url"
 	"os"
@@ -40,7 +41,12 @@ type ClaudeDesktop3PStatus struct {
 	CatalogOverride    bool   `json:"catalogOverride"`
 	ModelDiscovery     bool   `json:"modelDiscoveryEnabled"`
 	Recoverable        bool   `json:"recoverable"`
-	Message            string `json:"message"`
+	// UpstreamVerified is intentionally false until a real Claude request is
+	// observed through the configured provider. Profile inspection and a
+	// successful process restart prove only local configuration.
+	UpstreamVerified bool   `json:"upstreamVerified"`
+	SourceEvidence   string `json:"sourceEvidence"`
+	Message          string `json:"message"`
 }
 type claude3PBackup struct {
 	Root      string      `json:"root"`
@@ -56,7 +62,7 @@ func (s *ClaudeDesktop3PService) backupPath() string {
 	return filepath.Join(s.Local.Dir, "default-backups", "claude-desktop-3p.json")
 }
 func (s *ClaudeDesktop3PService) inspect(ctx context.Context, paths map[string]string) (Tool, Claude3PPlatform, toolcfg.Claude3PState, ClaudeDesktop3PStatus, error) {
-	status := ClaudeDesktop3PStatus{Mode: "unknown", Message: "尚未配置 Claude Desktop"}
+	status := ClaudeDesktop3PStatus{Mode: "unknown", SourceEvidence: "none", Message: "尚未配置 Claude Desktop"}
 	var tool Tool
 	if s == nil || s.Local == nil || s.Platform == nil {
 		return tool, Claude3PPlatform{}, toolcfg.Claude3PState{}, status, errors.New("Claude Desktop 配置服务不可用")
@@ -96,10 +102,11 @@ func (s *ClaudeDesktop3PService) inspect(ctx context.Context, paths map[string]s
 		return tool, platform, state, status, err
 	}
 	status.Supported = true
+	status.SourceEvidence = "local_profile_only"
 	if _, err := s.readBackup(platform.Root); err == nil {
 		status.Recoverable = true
 	}
-	status.Message = "沿用同一个 Claude-3p 本地聊天库；换 API 不创建独立实例，模型在 Claude 内选择。"
+	status.Message = "沿用同一个 Claude-3p 本地聊天库；换 API 不创建独立实例，模型在 Claude 内选择。尚未验证上游推理。"
 	if state.RequiresModeChange {
 		status.Message = "将开启官方第三方模式，聊天保存在原 Claude-3p 本地库；标准账号聊天未删除，恢复原模式后查看。"
 	}
@@ -116,8 +123,18 @@ func (s *ClaudeDesktop3PService) Status(ctx context.Context, paths map[string]st
 }
 
 func (s *ClaudeDesktop3PService) Switch(ctx context.Context, a config.LocalAccount, paths map[string]string, allowModeChange bool) (Result, error) {
-	s.Local.mu.Lock()
+	return s.SwitchAuthorized(ctx, a, paths, allowModeChange, nil)
+}
+
+// SwitchAuthorized saves authorization before starting the configured app.
+// The caller retires a published lease on any returned error.
+func (s *ClaudeDesktop3PService) SwitchAuthorized(ctx context.Context, a config.LocalAccount, paths map[string]string, allowModeChange bool, authorize func() error) (result Result, launchErr error) {
+	defer func() { launchErr = RedactLaunchError(launchErr, a.Key) }()
+	if err := lockLaunch(ctx, &s.Local.mu); err != nil {
+		return Result{}, err
+	}
 	defer s.Local.mu.Unlock()
+	LaunchPhase(ctx, "tool", "检查程序与项目目录")
 	a.Kind, a.Target = "claude", "claude-desktop"
 	if err := config.ValidateLocalAccount(&a); err != nil {
 		return Result{}, err
@@ -149,6 +166,7 @@ func (s *ClaudeDesktop3PService) Switch(ctx context.Context, a config.LocalAccou
 	if err != nil {
 		return Result{}, err
 	}
+	LaunchPhase(ctx, "backup", "备份原工具配置")
 	previous, err := captureClaude3P(write.Paths())
 	if err != nil {
 		return Result{}, err
@@ -167,6 +185,11 @@ func (s *ClaudeDesktop3PService) Switch(ctx context.Context, a config.LocalAccou
 		if err := matchingClaude3P(previous, backup.Applied); err != nil {
 			return Result{}, err
 		}
+		if !gateway.CatalogOverride {
+			if err := restoreClaude3PCatalog(&write, backup.Original[2]); err != nil {
+				return Result{}, err
+			}
+		}
 	}
 	p := s.plan(tool, platform.Root)
 	if s.Local.Stop == nil || s.Local.Start == nil {
@@ -181,14 +204,19 @@ func (s *ClaudeDesktop3PService) Switch(ctx context.Context, a config.LocalAccou
 			return Result{}, err
 		}
 	}
+	LaunchPhase(ctx, "stop", "等待原工具退出")
 	if err := s.Local.Stop(ctx, p); err != nil {
 		if first {
 			_ = os.Remove(s.backupPath())
 		}
-		return Result{}, errors.New("Claude 尚未正常退出，未替换 API；请保存任务并从原应用退出后重试")
+		return Result{}, fmt.Errorf("Claude 未正常退出：%w", err)
 	}
 	// The app may flush settings during graceful quit. Re-read, revalidate policy,
 	// then prepare again from that exact state before writing anything.
+	if err := ctx.Err(); err != nil {
+		return Result{}, err
+	}
+	LaunchPhase(ctx, "profile", "写入 API 与模型配置", "核对退出后的配置")
 	_, again, state, _, err := s.inspect(ctx, paths)
 	if err != nil {
 		return Result{}, err
@@ -208,6 +236,11 @@ func (s *ClaudeDesktop3PService) Switch(ctx context.Context, a config.LocalAccou
 		if err := matchingClaude3P(previous, backup.Applied); err != nil {
 			return Result{}, err
 		}
+		if !gateway.CatalogOverride {
+			if err := restoreClaude3PCatalog(&write, backup.Original[2]); err != nil {
+				return Result{}, err
+			}
+		}
 	} else {
 		backup.Original = previous
 		backup.Applied = previous
@@ -215,29 +248,84 @@ func (s *ClaudeDesktop3PService) Switch(ctx context.Context, a config.LocalAccou
 			return Result{}, err
 		}
 	}
-	rollback := func() (Result, error) {
+	rollback := func(cause error) (Result, error) {
 		if err := restoreClaude3P(previous); err != nil {
-			return Result{}, errors.New("Claude 配置失败且回滚未完成；配置备份仍在本机，会话未删除")
+			return Result{}, fmt.Errorf("%w；还原 Claude 配置失败：%w", cause, err)
 		}
 		backup.Applied = previous
-		_ = s.saveBackup(backup)
-		return Result{}, errors.New("Claude 配置或启动未完成，原配置已回滚；请手动重开原应用")
+		if err := s.saveBackup(backup); err != nil {
+			return Result{}, fmt.Errorf("%w；原配置已还原，但备份状态保存失败：%w", cause, err)
+		}
+		return Result{}, fmt.Errorf("%w（原配置已回滚）", cause)
 	}
+	if err := ctx.Err(); err != nil {
+		return Result{}, err
+	}
+	LaunchPhase(ctx, "profile", "写入 API 与模型配置", "写入连接与模型配置")
 	if err := write.Apply(); err != nil {
-		return rollback()
+		return rollback(err)
 	}
 	backup.Applied, err = captureClaude3P(write.Paths())
 	if err != nil {
-		return rollback()
+		return rollback(err)
 	}
 	if err := s.saveBackup(backup); err != nil {
-		return rollback()
+		return rollback(err)
 	}
+	LaunchPhase(ctx, "authorize", "核对并保存连接授权")
+	if err := ctx.Err(); err != nil {
+		return rollback(err)
+	}
+	if authorize != nil {
+		if err := authorize(); err != nil {
+			return rollback(err)
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return rollback(err)
+	}
+	LaunchPhase(ctx, "start", "创建工具进程")
 	pid, err := s.Local.Start(ctx, p)
 	if err != nil {
-		return rollback()
+		return rollback(err)
 	}
 	return Result{Target: "claude-desktop", PID: pid, ProfileDir: platform.Root, Workspace: p.Workspace, Message: "已配置并打开 Claude Desktop，沿用同一个 Claude-3p 本地库；模型在原应用内选择。标准账号聊天保留在原模式。启动成功不代表上游推理已验证。"}, nil
+}
+
+// Disabling a Bridge-owned override restores only the original picker fields.
+// The caller must first match the current files against backup.Applied; an
+// externally changed profile is never overwritten to recover the old menu.
+// Credentials, chat scope and unrelated fields stay in the newly prepared plan.
+func restoreClaude3PCatalog(write *toolcfg.Claude3PWritePlan, original savedFile) error {
+	if original.Path != write.ProfilePath {
+		return errors.New("Claude 模型目录备份路径不匹配")
+	}
+	var profile map[string]json.RawMessage
+	if json.Unmarshal(write.ProfileData, &profile) != nil || profile == nil {
+		return errors.New("Claude 模型目录恢复计划无效")
+	}
+	baseline := map[string]json.RawMessage{}
+	if original.Existed {
+		if json.Unmarshal(original.Data, &baseline) != nil || baseline == nil {
+			return errors.New("Claude 原模型目录备份无法安全识别")
+		}
+	}
+	for _, field := range []string{"inferenceModels", "modelDiscoveryEnabled"} {
+		if raw, present := baseline[field]; present {
+			profile[field] = append(json.RawMessage{}, raw...)
+		} else {
+			delete(profile, field)
+		}
+	}
+	if !original.Existed {
+		profile["modelDiscoveryEnabled"] = json.RawMessage("true")
+	}
+	data, err := json.MarshalIndent(profile, "", "  ")
+	if err != nil {
+		return errors.New("Claude 原模型目录无法准备恢复")
+	}
+	write.ProfileData = append(data, '\n')
+	return nil
 }
 
 // Only this application's dedicated loopback route may substitute its native
@@ -253,6 +341,13 @@ func claudeDesktopLoopbackGateway(a config.LocalAccount) bool {
 }
 
 func (s *ClaudeDesktop3PService) Restore(ctx context.Context, paths map[string]string) (Result, error) {
+	return s.RestoreAuthorized(ctx, paths, nil)
+}
+
+// RestoreAuthorized invokes beforeRestore under the shared launch mutex, after
+// the graceful quit and all profile checks, before restoring any file or
+// restarting Claude. Rollback restores profile bytes, never authorization.
+func (s *ClaudeDesktop3PService) RestoreAuthorized(ctx context.Context, paths map[string]string, beforeRestore func() error) (Result, error) {
 	s.Local.mu.Lock()
 	defer s.Local.mu.Unlock()
 	tool, platform, _, _, err := s.inspect(ctx, paths)
@@ -287,6 +382,11 @@ func (s *ClaudeDesktop3PService) Restore(ctx context.Context, paths map[string]s
 	}
 	if err := matchingClaude3P(current, backup.Applied); err != nil {
 		return Result{}, err
+	}
+	if beforeRestore != nil {
+		if err := beforeRestore(); err != nil {
+			return Result{}, err
+		}
 	}
 	if err := restoreClaude3P(backup.Original); err != nil {
 		_ = restoreClaude3P(current)

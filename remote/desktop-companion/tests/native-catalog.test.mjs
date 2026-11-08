@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { createNativeCatalog, MAX_CATALOG_FRAME_BYTES, MAX_CATALOG_TOOLS, CATALOG_TIMEOUT_MS } from "../src/native-catalog.mjs";
+import { createNativeCatalog, nativeSendOptions, MAX_CATALOG_FRAME_BYTES, MAX_CATALOG_TOOLS, CATALOG_TIMEOUT_MS } from "../src/native-catalog.mjs";
 
 const pipe = String.raw`\\.\pipe\codex-browser-use-a1a1a1a1-2222-4333-8444-555555555555`;
 
@@ -38,6 +38,38 @@ const response = { jsonrpc: "2.0", id: 1, result: { tools: [
   { name: "private_unknown_tool", namespace: "codex_app" },
   { name: "read_thread", namespace: "some_other_namespace" },
 ] } };
+
+const sendSchema = () => ({ type: "object", required: ["threadId", "prompt"], properties: {
+  threadId: { type: "string" }, prompt: { type: "string" }, model: { type: "string", description: "PRIVATE MODEL DESCRIPTOR" },
+  thinking: { type: "string", enum: ["low", "medium", "high", "xhigh"] },
+} });
+
+test("model override requires exact simple send schema; thinking is independently enumerated", () => {
+  assert.deepEqual(nativeSendOptions({ inputSchema: sendSchema() }), { model: true, thinking: ["low", "medium", "high", "xhigh"] });
+  assert.deepEqual(nativeSendOptions({ parameters: sendSchema() }), { model: true, thinking: ["low", "medium", "high", "xhigh"] });
+  for (const mutate of [s => delete s.properties.model, s => s.required.push("hostId"), s => s.properties.model = { anyOf: [{ type: "string" }] },
+    s => s.properties.model.enum = ["gpt-fixed"], s => s.properties.model.maxLength = 20, s => s.anyOf = [{}], s => s.properties.prompt.type = ["string", "null"]]) {
+    const schema = sendSchema(); mutate(schema); assert.equal(nativeSendOptions({ inputSchema: schema }), undefined);
+  }
+  for (const thinking of [undefined, { type: "string" }, { type: "string", enum: ["high", "unknown"] }, { type: "string", enum: ["high", "high"] }, { type: "string", anyOf: [{}] }]) {
+    const schema = sendSchema(); schema.properties.thinking = thinking;
+    assert.deepEqual(nativeSendOptions({ inputSchema: schema }), { model: true, thinking: [] });
+  }
+  assert.equal(nativeSendOptions({ inputSchema: sendSchema(), parameters: {} }), undefined);
+});
+
+test("detailed catalog projects safe send options only and duplicate contracts fail closed", async () => {
+  for (const duplicate of [false, true]) {
+    const f = fixture(); const pending = f.catalog({ pipePath: pipe, includeSendOptions: true });
+    f.socket.emit("connect");
+    const tool = { namespace: "codex_app", name: "send_message_to_thread", inputSchema: sendSchema() };
+    f.socket.emit("data", frame({ jsonrpc: "2.0", id: 1, result: { tools: duplicate ? [tool, tool] : [tool] } }));
+    const result = await pending;
+    assert.deepEqual(result.names, ["send_message_to_thread"]);
+    assert.equal(result.sendOptions?.model, duplicate ? undefined : true);
+    assert.ok(!JSON.stringify(result).includes("PRIVATE"));
+  }
+});
 
 test("native probe writes one tools/list request only, and sanitizes catalog", async () => {
   const f = fixture();

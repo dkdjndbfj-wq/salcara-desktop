@@ -1,0 +1,40 @@
+.account-test-overlay { z-index: 1250; }
+body:has(.account-test-overlay) > .cs-menu { z-index: 1260; }
+.modal.account-test-modal { width: min(760px,calc(100vw - 32px)); height: min(720px,calc(100vh - 48px)); display: flex; flex-direction: column; overflow: hidden; }
+.account-test-modal .modal-head { padding: 20px 24px 16px; align-items: flex-start; flex: none; }
+.account-test-modal h3 { display: flex; align-items: center; gap: 9px; }
+.account-test-modal h3 svg { width: 19px; height: 19px; color: var(--primary); }
+.account-test-modal .modal-head p { margin: 7px 0 0; font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
+.account-test-tools { display: flex; gap: 12px; align-items: start; padding: 14px 24px; border-top: 1px solid var(--border); flex: none; }
+.account-test-model { display: flex; flex: 1; flex-wrap: wrap; align-items: center; gap: 8px; min-width: 0; font-size: 12px; }
+.account-test-model > .input, .account-test-model > .cs-btn { flex: 1; min-width: 0; width: 0; }
+.account-test-model #accountTestCustomModel { flex-basis: 100%; width: 100%; }
+.account-test-tools > .btn { flex: none; min-height: 35px; }
+.account-test-conversation { flex: 1; min-height: 120px; overflow: auto; overscroll-behavior: contain; margin: 0 24px 16px; padding: 16px; border: 1px solid var(--border); border-radius: 14px; background: var(--surface-2); }
+.account-test-empty { display: flex; min-height: 100%; flex-direction: column; justify-content: center; align-items: center; gap: 10px; text-align: center; color: var(--muted); font-size: 12px; }
+.account-test-empty svg { width: 30px; height: 30px; color: var(--primary); opacity: .65; margin-bottom: 3px; }
+.account-test-empty b { font-size: 14px; color: var(--text-2); font-weight: 600; }
+.account-test-turn + .account-test-turn { margin-top: 20px; }
+.account-test-message { display: flex; flex-direction: column; align-items: flex-start; gap: 5px; font-size: 13px; }
+.account-test-message > span { font-size: 10px; color: var(--muted); }
+.account-test-message p { white-space: pre-wrap; overflow-wrap: anywhere; margin: 0; line-height: 1.7; max-width: 100%; }
+.account-test-message.user { align-items: flex-end; margin-bottom: 15px; }
+.account-test-message.user p { padding: 9px 12px; border-radius: 12px 12px 3px 12px; background: var(--primary-soft); color: var(--text-2); }
+.account-test-message.assistant p { padding: 9px 12px; background: var(--surface); border: 1px solid var(--border); border-radius: 3px 12px 12px 12px; }
+.account-test-result { color: var(--muted); font-size: 10px; line-height: 1.6; overflow-wrap: anywhere; }
+.account-test-result.ok { color: var(--success,#16876c); }
+.account-test-result.failed, #accountTestStatus { color: var(--danger,#c44767); }
+.account-test-footer { flex: none; border-top: 1px solid var(--border); background: var(--surface-2); padding: 12px 24px 16px; }
+.account-test-note { margin: 0 0 9px; font-size: 10px; color: var(--muted); }
+.account-test-compose { display: flex; gap: 10px; align-items: flex-end; }
+.account-test-compose textarea { flex: 1; min-width: 0; max-height: 128px; resize: vertical; line-height: 1.6; font-size: 13px; }
+.account-test-compose .btn { min-height: 40px; flex: none; }
+#accountTestStatus { margin-top: 6px; font-size: 11px; overflow-wrap: anywhere; }
+#accountTestStatus:empty { display: none; }
+@media(max-width:600px) {
+  .modal.account-test-modal { height: calc(100vh - 24px); width: calc(100vw - 24px); }
+  .account-test-modal .modal-head, .account-test-tools, .account-test-footer { padding-left: 14px; padding-right: 14px; }
+  .account-test-conversation { margin-left: 14px; margin-right: 14px; padding: 12px; }
+  .account-test-tools { flex-wrap: wrap; gap: 8px; }
+  .account-test-model { flex-basis: 100%; }
+}

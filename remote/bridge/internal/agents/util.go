@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -27,6 +28,10 @@ const (
 	approvalTimeout  = 10 * time.Minute
 	externalActive   = 30 * time.Second
 	streamInterval   = 300 * time.Millisecond
+	// A vendor stream that dies before sending a terminal record must not
+	// retain an unbounded entry forever. This hard ceiling bounds memory during
+	// a buggy or hostile stream while leaving ample room for normal sessions.
+	maxThrottlePending = 4096
 )
 
 const errExternalRunning = "这个会话正在电脑上运行，结束后才能继续"
@@ -171,7 +176,11 @@ type throttle struct {
 	mu      sync.Mutex
 	emit    func(protocol.Event)
 	pending map[string]*throttleEntry
-	closed  bool
+	// Fixed stripes keep the same event identity serialized even across Drop,
+	// capacity refusal and Final. They require no lifetime map or eviction and
+	// let unrelated streams emit concurrently in the common case.
+	emission [64]sync.Mutex
+	closed   bool
 }
 
 type throttleEntry struct {
@@ -186,6 +195,31 @@ func newThrottle(emit func(protocol.Event)) *throttle {
 
 func (t *throttle) key(e protocol.Event) string { return e.SessionKey + "|" + e.Type + "|" + e.ID }
 
+func (t *throttle) emissionLock(k string) *sync.Mutex {
+	// FNV-1a is used only for bounded lock striping, not identity or security.
+	var hash uint64 = 14695981039346656037
+	for i := 0; i < len(k); i++ {
+		hash = (hash ^ uint64(k[i])) * 1099511628211
+	}
+	return &t.emission[hash%uint64(len(t.emission))]
+}
+
+// emitPartial and Final serialize the complete sink call for the same key.
+// A timer that has already copied an old snapshot must recheck its entry only
+// after acquiring that lock; Final/Drop remove the entry before it can emit.
+// No sink runs with t.mu held; sinks must not re-enter this throttle's emitters.
+func (t *throttle) emitPartial(k string, ent *throttleEntry, ev protocol.Event) {
+	lock := t.emissionLock(k)
+	lock.Lock()
+	defer lock.Unlock()
+	t.mu.Lock()
+	valid := !t.closed && t.pending[k] == ent
+	t.mu.Unlock()
+	if valid {
+		t.emit(ev)
+	}
+}
+
 // Update records a partial event; it is emitted now if the id was quiet long enough, otherwise later.
 func (t *throttle) Update(e protocol.Event) {
 	t.mu.Lock()
@@ -196,6 +230,13 @@ func (t *throttle) Update(e protocol.Event) {
 	k := t.key(e)
 	ent := t.pending[k]
 	if ent == nil {
+		// Partial snapshots are optional; terminal snapshots never pass through
+		// this admission limit. Keep established streams rather than evicting
+		// an entry whose sink may still be in flight.
+		if len(t.pending) >= maxThrottlePending {
+			t.mu.Unlock()
+			return
+		}
 		ent = &throttleEntry{}
 		t.pending[k] = ent
 	}
@@ -208,7 +249,7 @@ func (t *throttle) Update(e protocol.Event) {
 	if wait <= 0 {
 		ent.last = time.Now()
 		t.mu.Unlock()
-		t.emit(e)
+		t.emitPartial(k, ent, e)
 		return
 	}
 	ent.timer = time.AfterFunc(wait, func() {
@@ -222,26 +263,30 @@ func (t *throttle) Update(e protocol.Event) {
 		ent.last = time.Now()
 		ev := ent.ev
 		t.mu.Unlock()
-		t.emit(ev)
+		t.emitPartial(k, ent, ev)
 	})
 	t.mu.Unlock()
 }
 
 // Final emits e immediately and drops any pending partial for the same id.
 func (t *throttle) Final(e protocol.Event) {
-	t.mu.Lock()
 	k := t.key(e)
+	lock := t.emissionLock(k)
+	lock.Lock()
+	defer lock.Unlock()
+	t.mu.Lock()
+	if t.closed {
+		t.mu.Unlock()
+		return
+	}
 	if ent := t.pending[k]; ent != nil {
 		if ent.timer != nil {
 			ent.timer.Stop()
 		}
 		delete(t.pending, k)
 	}
-	closed := t.closed
 	t.mu.Unlock()
-	if !closed {
-		t.emit(e)
-	}
+	t.emit(e)
 }
 
 // Drop forgets a pending partial without emitting it.
@@ -267,23 +312,30 @@ func (t *throttle) Close() {
 		delete(t.pending, k)
 	}
 	t.mu.Unlock()
+	// Do not wait on an in-flight sink here: agent shutdown deliberately stays
+	// bounded even when an external event consumer is non-cooperative. A timer
+	// that has not acquired its stripe observes closed; one already inside the
+	// sink is already committed and is drained by the outer event fan-out.
 }
 
 // approvals is a small registry of approvals waiting for the phone.
 type approvals struct {
-	mu      sync.Mutex
-	waiting map[string]*pendingApproval
+	mu       sync.Mutex
+	waiting  map[string]*pendingApproval
+	revision atomic.Uint64 // read-only status CAS; never grants or resolves a request
 }
 
 type pendingApproval struct {
-	id         string
-	sessionKey string
-	tool       string
-	ref        string // agent-specific reference (Codex: JSON-RPC request id)
-	ch         chan approvalAnswer
-	expiresAt  time.Time
-	request    *protocol.Event // current registry state, not a replay cache
-	validate   func(map[string][]string) error
+	id            string
+	sessionKey    string
+	tool          string
+	ref           string // agent-specific reference (Codex: JSON-RPC request id)
+	ch            chan approvalAnswer
+	expiresAt     time.Time
+	request       *protocol.Event // current registry state, not a replay cache
+	validate      func(map[string][]string) error
+	sourceClosed  <-chan struct{} // immutable process/connection ownership, never persisted
+	requestClosed <-chan struct{} // one native request may be cancelled without closing its worker
 }
 
 type approvalAnswer struct {
@@ -300,6 +352,7 @@ func (a *approvals) add(sessionKey, tool string) *pendingApproval {
 	p := &pendingApproval{id: newID("ap_"), sessionKey: sessionKey, tool: tool, ch: make(chan approvalAnswer, 1), expiresAt: time.Now().Add(approvalTimeout)}
 	a.mu.Lock()
 	a.waiting[p.id] = p
+	a.revision.Add(1)
 	a.mu.Unlock()
 	return p
 }
@@ -311,8 +364,70 @@ func (a *approvals) addRequest(sessionKey, tool, ref string, ev protocol.Event) 
 }
 
 func (a *approvals) addValidatedRequest(sessionKey, tool, ref string, ev protocol.Event, validate func(map[string][]string) error) (*pendingApproval, protocol.Event) {
+	return a.addValidatedRequestForSource(sessionKey, tool, ref, ev, validate, nil)
+}
+
+// A source-scoped request belongs to exactly one process/connection lifetime.
+// Checking its channel never takes an agent mutex or runs vendor callbacks.
+func approvalSourceOpen(sourceClosed <-chan struct{}) bool {
+	if sourceClosed == nil {
+		return true
+	}
+	select {
+	case <-sourceClosed:
+		return false
+	default:
+		return true
+	}
+}
+
+func (a *approvals) addValidatedRequestForSource(sessionKey, tool, ref string, ev protocol.Event, validate func(map[string][]string) error, sourceClosed <-chan struct{}) (*pendingApproval, protocol.Event) {
+	return a.addValidatedRequestForLifetimes(sessionKey, tool, ref, ev, validate, sourceClosed, nil)
+}
+
+func cloneApprovalOptions(options *protocol.ApprovalOptions) *protocol.ApprovalOptions {
+	if options == nil {
+		return nil
+	}
+	out := &protocol.ApprovalOptions{Version: options.Version, Decisions: []string{}}
+	if options.Version != 1 {
+		return out
+	}
+	if options.DenyEffect == "cancel_turn" {
+		out.DenyEffect = options.DenyEffect
+	}
+	for _, decision := range []string{"allow", "allow_session", "deny"} {
+		for _, value := range options.Decisions {
+			if value == decision {
+				out.Decisions = append(out.Decisions, decision)
+				break
+			}
+		}
+	}
+	return out
+}
+
+func approvalDecisionAllowed(options *protocol.ApprovalOptions, decision string) bool {
+	if decision != "allow" && decision != "allow_session" && decision != "deny" {
+		return false
+	}
+	if options == nil {
+		return true
+	} // legacy internal callers; phone uses conservative fallback
+	if options.Version != 1 {
+		return false
+	}
+	for _, value := range options.Decisions {
+		if value == decision {
+			return true
+		}
+	}
+	return false
+}
+
+func (a *approvals) addValidatedRequestForLifetimes(sessionKey, tool, ref string, ev protocol.Event, validate func(map[string][]string) error, sourceClosed, requestClosed <-chan struct{}) (*pendingApproval, protocol.Event) {
 	p := &pendingApproval{id: newID("ap_"), sessionKey: sessionKey, tool: tool, ref: ref,
-		ch: make(chan approvalAnswer, 1), expiresAt: time.Now().Add(approvalTimeout), validate: validate}
+		ch: make(chan approvalAnswer, 1), expiresAt: time.Now().Add(approvalTimeout), validate: validate, sourceClosed: sourceClosed, requestClosed: requestClosed}
 	if ev.ExpiresAt != 0 {
 		deadline := time.UnixMilli(ev.ExpiresAt)
 		if deadline.Before(p.expiresAt) {
@@ -321,13 +436,20 @@ func (a *approvals) addValidatedRequest(sessionKey, tool, ref string, ev protoco
 	}
 	ev = protocol.Event{SessionKey: sessionKey, Tool: tool, TS: nowMs(), Type: "approval.request", ApprovalID: p.id,
 		Kind: ev.Kind, Title: truncHead(ev.Title, maxTitleChars), Detail: truncHead(ev.Detail, maxDetailChars),
-		Diff: truncHead(ev.Diff, maxDiffChars), Cwd: truncHead(ev.Cwd, 4096),
-		Questions: cloneQuestions(ev.Questions), QuestionMode: ev.QuestionMode, ExpiresAt: p.expiresAt.UnixMilli()}
+		Diff: truncHead(ev.Diff, maxDiffChars), Cwd: truncHead(ev.Cwd, 4096), TurnID: truncHead(ev.TurnID, 512), ParentID: truncHead(ev.ParentID, 512),
+		ApprovalOptions: cloneApprovalOptions(ev.ApprovalOptions),
+		Questions:       cloneQuestions(ev.Questions), QuestionMode: ev.QuestionMode, ExpiresAt: p.expiresAt.UnixMilli()}
 	stored := ev
 	stored.Questions = cloneQuestions(ev.Questions)
+	stored.ApprovalOptions = cloneApprovalOptions(ev.ApprovalOptions)
 	p.request = &stored
 	a.mu.Lock()
+	if !approvalSourceOpen(sourceClosed) || !approvalSourceOpen(requestClosed) {
+		a.mu.Unlock()
+		return nil, protocol.Event{}
+	}
 	a.waiting[p.id] = p
+	a.revision.Add(1)
 	a.mu.Unlock()
 	return p, ev
 }
@@ -341,9 +463,10 @@ func (a *approvals) snapshot(sessionKey string) []protocol.Event {
 	now := time.Now()
 	out := make([]protocol.Event, 0, maxHistoryEvents)
 	for _, pending := range a.waiting {
-		if pending.sessionKey == sessionKey && pending.request != nil && now.Before(pending.expiresAt) {
+		if pending.sessionKey == sessionKey && pending.request != nil && now.Before(pending.expiresAt) && approvalSourceOpen(pending.sourceClosed) && approvalSourceOpen(pending.requestClosed) {
 			ev := *pending.request
 			ev.Questions = cloneQuestions(ev.Questions)
+			ev.ApprovalOptions = cloneApprovalOptions(ev.ApprovalOptions)
 			i := sort.Search(len(out), func(i int) bool {
 				return out[i].TS > ev.TS || out[i].TS == ev.TS && out[i].ApprovalID >= ev.ApprovalID
 			})
@@ -376,9 +499,10 @@ func (a *approvals) resolveByRef(ref string) {
 	a.mu.Lock()
 	var p *pendingApproval
 	for id, x := range a.waiting {
-		if x.ref != "" && x.ref == ref {
+		if x.ref != "" && x.ref == ref && approvalSourceOpen(x.sourceClosed) {
 			p = x
 			delete(a.waiting, id)
+			a.revision.Add(1)
 			break
 		}
 	}
@@ -406,27 +530,60 @@ func (a *approvals) wait(p *pendingApproval, stop <-chan struct{}) approvalAnswe
 	case <-stop:
 		a.remove(p.id)
 		return approvalAnswer{decision: "deny", message: "桥接程序已退出", by: "desktop"}
+	case <-p.requestClosed:
+		a.remove(p.id)
+		return approvalAnswer{decision: "deny", message: "审批请求已取消", by: "desktop", noReply: true}
 	}
 }
 
 func (a *approvals) remove(id string) {
 	a.mu.Lock()
-	delete(a.waiting, id)
+	if _, exists := a.waiting[id]; exists {
+		delete(a.waiting, id)
+		a.revision.Add(1)
+	}
 	a.mu.Unlock()
 }
 
 // answer delivers a decision; false if the id is unknown (or already answered).
 func (a *approvals) answer(id string, ans approvalAnswer) bool {
+	return a.answerForSession("", id, ans)
+}
+
+// answerForSession checks ownership and consumes the request under one lock.
+// A pre-check followed by answer() would permit withdrawal/replacement races.
+func (a *approvals) answerForSession(sessionKey, id string, ans approvalAnswer) bool {
+	return a.answerForSessionSource(sessionKey, id, ans, nil)
+}
+
+// expectedSource, when supplied, must be the currently executing connection.
+// A new process resuming the same session cannot answer an older process's
+// request, even before its cancellation goroutine has drained the registry.
+func (a *approvals) answerForSessionSource(sessionKey, id string, ans approvalAnswer, expectedSource <-chan struct{}) bool {
 	a.mu.Lock()
 	p := a.waiting[id]
-	if p == nil {
+	if p == nil || sessionKey != "" && p.sessionKey != sessionKey || expectedSource != nil && p.sourceClosed != expectedSource {
 		a.mu.Unlock()
+		return false
+	}
+	if !approvalSourceOpen(p.sourceClosed) || !approvalSourceOpen(p.requestClosed) {
+		delete(a.waiting, id)
+		a.revision.Add(1)
+		a.mu.Unlock()
+		p.ch <- approvalAnswer{decision: "deny", by: "desktop", noReply: true}
 		return false
 	}
 	if !time.Now().Before(p.expiresAt) {
 		delete(a.waiting, id)
+		a.revision.Add(1)
 		a.mu.Unlock()
 		p.ch <- approvalAnswer{decision: "deny", message: "审批已过期，未执行操作", by: "timeout"}
+		return false
+	}
+	// Internal timeout/cancellation is never a grant. Phone actions must be
+	// explicitly offered by the native request, including session-wide choices.
+	if p.request != nil && ans.by != "timeout" && !approvalDecisionAllowed(p.request.ApprovalOptions, ans.decision) {
+		a.mu.Unlock()
 		return false
 	}
 	if p.request != nil && p.request.Kind == "question" && ans.decision != "deny" {
@@ -440,7 +597,17 @@ func (a *approvals) answer(id string, ans approvalAnswer) bool {
 		a.mu.Unlock()
 		return false
 	}
+	// Form validation may take time. A source that closed during it must not
+	// receive an accepted answer or be consumed as the current connection.
+	if !approvalSourceOpen(p.sourceClosed) || !approvalSourceOpen(p.requestClosed) {
+		delete(a.waiting, id)
+		a.revision.Add(1)
+		a.mu.Unlock()
+		p.ch <- approvalAnswer{decision: "deny", by: "desktop", noReply: true}
+		return false
+	}
 	delete(a.waiting, id)
+	a.revision.Add(1)
 	ans.answers = cloneAnswers(ans.answers)
 	a.mu.Unlock()
 	p.ch <- ans
@@ -453,7 +620,47 @@ func (a *approvals) countFor(sessionKey string) int {
 	defer a.mu.Unlock()
 	n := 0
 	for _, p := range a.waiting {
-		if p.sessionKey == sessionKey && time.Now().Before(p.expiresAt) {
+		if p.sessionKey == sessionKey && time.Now().Before(p.expiresAt) && approvalSourceOpen(p.sourceClosed) && approvalSourceOpen(p.requestClosed) {
+			n++
+		}
+	}
+	return n
+}
+
+type approvalStatusLifetime struct {
+	expiresAt                   time.Time
+	sourceClosed, requestClosed <-chan struct{}
+}
+
+type approvalStatusSnapshot struct {
+	revision uint64
+	entries  []approvalStatusLifetime
+}
+
+// Captures only immutable lifetime data. Native status commit may inspect this
+// without acquiring the registry mutex or invoking a form-validation callback.
+func (a *approvals) statusSnapshot(sessionKey string, sources ...<-chan struct{}) approvalStatusSnapshot {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	out := approvalStatusSnapshot{revision: a.revision.Load()}
+	for _, p := range a.waiting {
+		if p.sessionKey != sessionKey {
+			continue
+		}
+		for _, source := range sources {
+			if source != nil && p.sourceClosed == source {
+				out.entries = append(out.entries, approvalStatusLifetime{p.expiresAt, p.sourceClosed, p.requestClosed})
+				break
+			}
+		}
+	}
+	return out
+}
+
+func (s approvalStatusSnapshot) pending(now time.Time) int {
+	n := 0
+	for _, p := range s.entries {
+		if now.Before(p.expiresAt) && approvalSourceOpen(p.sourceClosed) && approvalSourceOpen(p.requestClosed) {
 			n++
 		}
 	}
@@ -468,6 +675,7 @@ func (a *approvals) cancelSession(sessionKey string) {
 		if p.sessionKey == sessionKey {
 			list = append(list, p)
 			delete(a.waiting, id)
+			a.revision.Add(1)
 		}
 	}
 	a.mu.Unlock()
@@ -482,6 +690,7 @@ func (a *approvals) cancelAll() {
 	for id, p := range a.waiting {
 		list = append(list, p)
 		delete(a.waiting, id)
+		a.revision.Add(1)
 	}
 	a.mu.Unlock()
 	for _, p := range list {

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"weak"
 
 	"salcara/bridge/internal/config"
 	"salcara/bridge/internal/localusage"
@@ -40,27 +41,57 @@ func localUsageSource(r *http.Request, days int) (usageSource, bool) {
 // usageSource is one place usage can be read from: the signed-in relay account
 // or an API saved in the local vault. Keys never leave the Bridge.
 type usageSource struct {
-	ID    string         `json:"id"`
-	Name  string         `json:"name"`
-	Host  string         `json:"host"`
-	Kind  string         `json:"kind"` // relay | api | local
-	OK    bool           `json:"ok"`
-	Error string         `json:"error,omitempty"`
-	Usage map[string]any `json:"usage,omitempty"`
+	ID              string                  `json:"id"`
+	Name            string                  `json:"name"`
+	Host            string                  `json:"host"`
+	Kind            string                  `json:"kind"` // relay | api | local | official
+	OK              bool                    `json:"ok"`
+	Error           string                  `json:"error,omitempty"`
+	Usage           map[string]any          `json:"usage,omitempty"`
+	LocalUsage      *usageAccountLocalUsage `json:"localUsage,omitempty"`
+	LocalUsageError string                  `json:"localUsageError,omitempty"`
 }
 
-var usageOverview struct {
-	mu   sync.Mutex
-	key  string
-	at   time.Time
-	data []usageSource
+type usageOverviewCache struct {
+	mu       sync.Mutex
+	key      string
+	at       time.Time
+	data     []usageSource
+	sequence uint64
 }
 
-func hostOf(root string) string {
-	if u, err := url.Parse(root); err == nil && u.Host != "" {
-		return u.Host
+type usageOverviewTarget struct {
+	src       usageSource
+	root, key string
+}
+
+// Each console owns one bounded cache. Store's lock-bound source revision is
+// the safety fence; OnChange only clears old storage. The weak callback does
+// not keep a discarded console or its cache alive in Store.
+func newUsageOverviewCache(store *config.Store) *usageOverviewCache {
+	cache := &usageOverviewCache{}
+	if store != nil {
+		ref := weak.Make(cache)
+		store.OnChange(func(old, next config.Config) {
+			if old.UsageSourceRevision == next.UsageSourceRevision {
+				return
+			}
+			if current := ref.Value(); current != nil {
+				current.mu.Lock()
+				current.key, current.at, current.data = "", time.Time{}, nil
+				current.mu.Unlock()
+			}
+		})
 	}
-	return root
+	return cache
+}
+
+func usageOverviewTargets(c config.Config) []usageOverviewTarget {
+	var targets []usageOverviewTarget
+	for _, target := range c.UsageSourceTargets() {
+		targets = append(targets, usageOverviewTarget{src: usageSource{ID: target.ID, Name: target.Name, Host: target.Host, Kind: target.Kind}, root: target.Root, key: target.Key})
+	}
+	return targets
 }
 
 func (s *Server) handleUsageOverview(w http.ResponseWriter, r *http.Request) {
@@ -71,47 +102,37 @@ func (s *Server) handleUsageOverview(w http.ResponseWriter, r *http.Request) {
 	if days > 90 {
 		days = 90
 	}
-	c := s.d.Store.Get()
-
-	type target struct {
-		src       usageSource
-		root, key string
-	}
-	var targets []target
-	seen := map[string]bool{}
-	add := func(t target) {
-		if t.root == "" || t.key == "" || seen[t.root+"|"+t.key] {
-			return
-		}
-		seen[t.root+"|"+t.key] = true
-		targets = append(targets, t)
-	}
-	if c.LoggedIn() && !c.RemoteDeviceOnly {
-		add(target{src: usageSource{ID: "relay", Name: "中转站", Host: hostOf(c.RelayRoot), Kind: "relay"}, root: c.RelayRoot, key: c.AccountKey})
-	}
-	for _, a := range c.LocalAccounts {
-		root := config.NormalizeRelayRoot(a.BaseURL)
-		name := strings.TrimSpace(a.Name)
-		if name == "" {
-			name = hostOf(root)
-		}
-		add(target{src: usageSource{ID: a.ID, Name: name, Host: hostOf(root), Kind: "api"}, root: root, key: strings.TrimSpace(a.Key)})
-	}
-
-	cacheKey := strconv.Itoa(days)
-	for _, t := range targets {
-		cacheKey += "|" + t.src.ID + "@" + t.root
-	}
-	force := r.URL.Query().Get("refresh") == "1"
-	usageOverview.mu.Lock()
-	if !force && usageOverview.key == cacheKey && time.Since(usageOverview.at) < 60*time.Second {
-		data := usageOverview.data
-		at := usageOverview.at
-		usageOverview.mu.Unlock()
-		writeJSON(w, map[string]any{"days": days, "sources": data, "updatedAt": at.UnixMilli()})
+	cache := s.usageOverview
+	if s.d.Store == nil || cache == nil {
+		s.writeUsageOverviewError(w, http.StatusServiceUnavailable, days, "", "用量来源暂不可用", time.Now())
 		return
 	}
-	usageOverview.mu.Unlock()
+	query, queryErr := url.ParseQuery(r.URL.RawQuery)
+	selected := query.Get("source")
+	if queryErr != nil || len(query["source"]) > 1 || selected != "" && !config.ValidAccountID(selected) {
+		s.writeUsageOverviewError(w, http.StatusBadRequest, days, selected, "用量来源参数无效", time.Now())
+		return
+	}
+	if selected != "" {
+		s.handleSelectedUsageOverview(w, r, days, selected)
+		return
+	}
+	force := r.URL.Query().Get("refresh") == "1"
+	rangeEnd := time.Now().Format("2006-01-02")
+	cache.mu.Lock()
+	captured := s.d.Store.Get()
+	targets := usageOverviewTargets(captured)
+	fingerprint := captured.UsageSourceFingerprint()
+	cacheKey := strconv.Itoa(days) + ":" + rangeEnd + ":" + captured.UsageSourceRevision + ":" + fingerprint
+	if !force && cache.key == cacheKey && time.Since(cache.at) < 60*time.Second {
+		data, at := cache.data, cache.at
+		cache.mu.Unlock()
+		writeJSON(w, usageOverviewResponse{Days: days, Sources: data, Options: usageOverviewOptions(s.usageOverviewSelections(captured)), RangeEnd: rangeEnd, UpdatedAt: at.UnixMilli()})
+		return
+	}
+	cache.sequence++
+	sequence := cache.sequence
+	cache.mu.Unlock()
 
 	ctx, cancel := ctxTimeout(r, 20*time.Second)
 	defer cancel()
@@ -119,7 +140,7 @@ func (s *Server) handleUsageOverview(w http.ResponseWriter, r *http.Request) {
 	var wg sync.WaitGroup
 	for i, t := range targets {
 		wg.Add(1)
-		go func(i int, t target) {
+		go func(i int, t usageOverviewTarget) {
 			defer wg.Done()
 			src := t.src
 			u, err := relay.UsageDays(ctx, t.root, t.key, days)
@@ -137,8 +158,14 @@ func (s *Server) handleUsageOverview(w http.ResponseWriter, r *http.Request) {
 	}
 
 	now := time.Now()
-	usageOverview.mu.Lock()
-	usageOverview.key, usageOverview.at, usageOverview.data = cacheKey, now, out
-	usageOverview.mu.Unlock()
-	writeJSON(w, map[string]any{"days": days, "sources": out, "updatedAt": now.UnixMilli()})
+	cache.mu.Lock()
+	current := s.d.Store.Get()
+	if current.UsageSourceRevision != captured.UsageSourceRevision || fingerprint != current.UsageSourceFingerprint() || cache.sequence != sequence || now.Format("2006-01-02") != rangeEnd {
+		cache.mu.Unlock()
+		s.writeUsageOverviewError(w, http.StatusConflict, days, "", "用量来源或日期已变更，或已有更新查询，请重新读取", now)
+		return
+	}
+	cache.key, cache.at, cache.data = cacheKey, now, out
+	cache.mu.Unlock()
+	writeJSON(w, usageOverviewResponse{Days: days, Sources: out, Options: usageOverviewOptions(s.usageOverviewSelections(current)), RangeEnd: rangeEnd, UpdatedAt: now.UnixMilli()})
 }

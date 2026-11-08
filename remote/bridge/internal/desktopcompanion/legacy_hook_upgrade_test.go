@@ -9,6 +9,13 @@ import (
 )
 
 func TestPreviousHookVersionCanBeSafelyUninstalledAndNewVersionInstalled(t *testing.T) {
+	for _, version := range []string{"0.4.0", "0.4.1"} {
+		t.Run(version, func(t *testing.T) { testPreviousHookVersionUpgrade(t, version) })
+	}
+}
+
+func testPreviousHookVersionUpgrade(t *testing.T, version string) {
+	t.Helper()
 	s, o := fixture(t, "model = \"original\"\n")
 	if _, err := s.Install(context.Background()); err != nil {
 		t.Fatal(err)
@@ -25,12 +32,12 @@ func TestPreviousHookVersionCanBeSafelyUninstalledAndNewVersionInstalled(t *test
 	if json.Unmarshal(raw, &own) != nil {
 		t.Fatal("invalid ownership")
 	}
-	oldPayload := filepath.Join(p.root, "v0.4.0")
+	oldPayload := filepath.Join(p.root, "v"+version)
 	if err := os.Rename(p.payload, oldPayload); err != nil {
 		t.Fatal(err)
 	}
 	p.payload = oldPayload
-	own.Version = "0.4.0"
+	own.Version = version
 	own.EntryHash, own.HookHash = entryHash(expectedEntryVersion(p, own.Version)), entryHash(expectedPermissionHook(p))
 	current := []byte("model = \"original\"\n\n# Salcara desktop companion installer: " + own.ID + "\n" + installedBlockTOML(p, own.Version) + "\n[ui]\nfixture = true\n")
 	if err := atomicWrite(p.config, current); err != nil {

@@ -2,6 +2,8 @@ package agents
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"slices"
 
@@ -50,6 +52,7 @@ func readCodexTurns(ctx context.Context, connection *rpcConn, id, cursor string,
 }
 
 func (a *codexAgent) openCodexMessagesPage(ctx context.Context, id, cursor string, limit int) (protocol.SessionInfo, []protocol.Event, string, error) {
+	a.reconcileTurnReverts(ctx, id)
 	key := "codex:" + id
 	position := codexMessageCursor{Version: 1, Session: key, Window: 1}
 	if cursor != "" {
@@ -67,7 +70,7 @@ func (a *codexAgent) openCodexMessagesPage(ctx context.Context, id, cursor strin
 		position.Inside = inside
 		return info, page, cursorValue(position), nil
 	}
-	connection, err := a.ensure(ctx)
+	connection, err := a.ensureRead(ctx)
 	if err != nil {
 		return protocol.SessionInfo{}, nil, "", err
 	}
@@ -107,6 +110,8 @@ func (a *codexAgent) openCodexMessagesPage(ctx context.Context, id, cursor strin
 	if cursor == "" {
 		item.seen = map[string]bool{}
 		item.tailHistory, item.tailBaselineTurn = true, newest
+		item.historyReadVersion++
+		item.historyItemDigests, item.historyTurnDigests, _ = codexHistoryDigests(metadata.Thread.Turns)
 	}
 	if item.seen == nil {
 		item.seen = map[string]bool{}
@@ -116,7 +121,7 @@ func (a *codexAgent) openCodexMessagesPage(ctx context.Context, id, cursor strin
 	}
 	info := item.info
 	a.mu.Unlock()
-	page, inside, err := paginateMessageHistory(key, codexHistory(key, metadata.Thread), position.Inside, limit)
+	page, inside, err := paginateMessageHistory(key, a.historyEvents(key, metadata.Thread), position.Inside, limit)
 	if err != nil {
 		return info, nil, "", err
 	}
@@ -126,6 +131,7 @@ func (a *codexAgent) openCodexMessagesPage(ctx context.Context, id, cursor strin
 			info.Status = "waiting_approval"
 		}
 		page = append(page, pending...)
+		page = append(page, a.revertedHistoryEvents(id)...)
 	}
 	if inside == "" && hostNext == "" {
 		return info, page, "", nil
@@ -141,12 +147,102 @@ func (a *codexAgent) openCodexMessagesPage(ctx context.Context, id, cursor strin
 	return info, page, next, nil
 }
 
+const codexTailItemLimit = 4096
+const codexTailByteLimit = 16 << 20
+
+// thread/read's legacy fallback is oldest first and may contain the full
+// transcript. Never retain/replay its entire digest index in the background.
+func codexHistoryWindow(turns []cxTurn) []cxTurn {
+	if len(turns) > 100 {
+		return turns[len(turns)-100:]
+	}
+	return turns
+}
+
+// Fingerprints are local-only and never contain raw private tool payloads.
+// Stable item IDs survive a host inserting/reordering an earlier item. Older
+// malformed items without a usable ID fall back to their bounded turn index.
+func codexHistoryItemDigest(turn string, index int, raw json.RawMessage) (string, [32]byte) {
+	var identity struct {
+		ID string `json:"id"`
+	}
+	_ = json.Unmarshal(raw, &identity)
+	key := turn + ":index:" + itoa(index)
+	if validChildID(identity.ID) {
+		key = turn + ":id:" + identity.ID
+	}
+	return key, sha256.Sum256(raw)
+}
+
+func codexHistoryTurnDigest(turn cxTurn) [32]byte {
+	state := turn
+	state.Items = nil
+	raw, _ := json.Marshal(state)
+	return sha256.Sum256(raw)
+}
+
+func codexHistoryDigests(turns []cxTurn) (map[string][32]byte, map[string][32]byte, bool) {
+	items, states := map[string][32]byte{}, map[string][32]byte{}
+	bytes := 0
+	for _, turn := range turns {
+		if len(states) >= 100 {
+			return items, states, false
+		}
+		states[turn.ID] = codexHistoryTurnDigest(turn)
+		for index, raw := range turn.Items {
+			bytes += len(raw)
+			if len(items) >= codexTailItemLimit || bytes > codexTailByteLimit {
+				return items, states, false
+			}
+			key, digest := codexHistoryItemDigest(turn.ID, index, raw)
+			if previous, exists := items[key]; exists && previous != digest {
+				return items, states, false
+			}
+			items[key] = digest
+		}
+	}
+	return items, states, true
+}
+
+func codexChangedHistory(thread cxThread, previousItems, previousTurns, nextTurns map[string][32]byte) cxThread {
+	changed := thread
+	changed.Turns = nil
+	for _, turn := range thread.Turns {
+		fresh := turn
+		fresh.Items = nil
+		for i, raw := range turn.Items {
+			key, digest := codexHistoryItemDigest(turn.ID, i, raw)
+			if previous, exists := previousItems[key]; !exists || previous != digest {
+				fresh.Items = append(fresh.Items, raw)
+			}
+		}
+		// Initial reads seed known historical states. Only an actually changed
+		// state can update the stable turn, not invent a fresh task completion.
+		if previous, exists := previousTurns[turn.ID]; exists && previous == nextTurns[turn.ID] {
+			fresh.Status = ""
+		}
+		changed.Turns = append(changed.Turns, fresh)
+	}
+	return changed
+}
+
 // The external-thread watcher starts at the opening's newest turn. It must not
 // replay all old turns merely because the phone intentionally fetched only two
 // messages. Its bounded read walks back to that known turn, retaining its new
-// items. A compacted/missing boundary asks for a fresh authoritative snapshot.
+// or changed items and actual turn-state transitions. A compacted/missing or
+// over-budget boundary asks for a fresh authoritative snapshot, never a silent
+// loss or an unbounded background full-history read.
 func (a *codexAgent) streamTailItems(ctx context.Context, id, baseline string) {
-	connection, err := a.ensure(ctx)
+	a.mu.Lock()
+	current := a.threads[id]
+	if current == nil || !current.tailHistory || current.tailBaselineTurn != baseline {
+		a.mu.Unlock()
+		return
+	}
+	current.historyReadVersion++
+	version := current.historyReadVersion
+	a.mu.Unlock()
+	connection, err := a.ensureRead(ctx)
 	if err != nil {
 		return
 	}
@@ -173,43 +269,26 @@ func (a *codexAgent) streamTailItems(ctx context.Context, id, baseline string) {
 		}
 		cursor = next
 	}
+	itemDigests, turnDigests, bounded := codexHistoryDigests(turns)
 	a.mu.Lock()
 	t := a.threadLocked(id)
-	if !t.tailHistory || t.tailBaselineTurn != baseline {
+	if !t.tailHistory || t.tailBaselineTurn != baseline || t.historyReadVersion != version {
 		a.mu.Unlock()
 		return
 	}
-	if !complete {
+	if !complete || !bounded {
 		t.tailBaselineTurn = newest
-		for _, turn := range turns {
-			for i := range turn.Items {
-				t.seen[turn.ID+":"+itoa(i)] = true
-			}
-		}
+		t.historyItemDigests, t.historyTurnDigests = itemDigests, turnDigests
 		a.mu.Unlock()
 		a.emit(protocol.Event{SessionKey: "codex:" + id, Type: "notice", ID: "history-gap:codex:" + newest, TS: nowMs(), Level: "warn", Text: "[salcara:history-gap:v1] 正在重新读取电脑上的原会话。"})
 		return
 	}
 	slices.Reverse(turns)
-	thread := cxThread{ID: id, Cwd: t.info.Cwd, UpdatedAt: t.info.UpdatedAt / 1000}
-	for _, turn := range turns {
-		fresh := turn
-		fresh.Items = nil
-		for i, raw := range turn.Items {
-			itemKey := turn.ID + ":" + itoa(i)
-			if !t.seen[itemKey] {
-				t.seen[itemKey] = true
-				fresh.Items = append(fresh.Items, raw)
-			}
-		}
-		// This watcher emits newly observed items only; normal status refresh
-		// owns completion status, avoiding historical completion notifications.
-		fresh.Status = ""
-		thread.Turns = append(thread.Turns, fresh)
-	}
+	thread := codexChangedHistory(cxThread{ID: id, Cwd: t.info.Cwd, UpdatedAt: t.info.UpdatedAt / 1000, Turns: turns}, t.historyItemDigests, t.historyTurnDigests, turnDigests)
 	t.tailBaselineTurn = newest
+	t.historyItemDigests, t.historyTurnDigests = itemDigests, turnDigests
 	a.mu.Unlock()
-	for _, event := range codexHistory("codex:"+id, thread) {
+	for _, event := range a.historyEvents("codex:"+id, thread) {
 		a.emit(event)
 	}
 }

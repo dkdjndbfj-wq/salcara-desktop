@@ -9,6 +9,7 @@ import (
 
 	"salcara/bridge/internal/agents"
 	"salcara/bridge/internal/config"
+	"salcara/bridge/internal/desktopcompanion"
 	"salcara/bridge/internal/protocol"
 )
 
@@ -29,7 +30,7 @@ func TestDesktopControlRequestsNeverFallBackToCLI(t *testing.T) {
 		t.Run(typ, func(t *testing.T) {
 			c, a := surfaceClient(t)
 			cmd := map[string]any{"type": typ, "tool": "codex", "sessionKey": "codex:1", "text": "must not send", "prompt": "must not start", "controlSurface": "desktop"}
-			if result, err := c.Dispatch(context.Background(), cmd); err == nil || result != nil || !(strings.Contains(err.Error(), "不会自动改用 CLI") || strings.Contains(err.Error(), "不会改用 CLI")) {
+			if result, err := c.Dispatch(context.Background(), cmd); err == nil || result != nil || !(strings.Contains(err.Error(), "不会自动改用 CLI") || strings.Contains(err.Error(), "不会改用 CLI") || typ == "models.list" && errors.Is(err, desktopcompanion.ErrDesktopScope)) {
 				t.Fatalf("result=%v err=%v", result, err)
 			}
 			if len(a.opened)+len(a.started)+len(a.sent)+len(a.stopped) != 0 {

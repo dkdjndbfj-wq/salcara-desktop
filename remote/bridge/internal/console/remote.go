@@ -1,7 +1,9 @@
 package console
 
 import (
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 	"time"
@@ -14,31 +16,129 @@ import (
 
 func (s *Server) handleRemoteDiscover(w http.ResponseWriter, r *http.Request) {
 	var in struct {
-		URL     string `json:"url"`
-		HubURL  string `json:"hubUrl"`
-		Connect bool   `json:"connect"`
+		URL             string `json:"url"`
+		HubURL          string `json:"hubUrl"`
+		EnrollmentClaim string `json:"enrollmentClaim"`
+		Connect         bool   `json:"connect"`
+		RequireOfficial bool   `json:"requireOfficial,omitempty"`
 	}
 	if err := readJSON(r, &in); err != nil {
 		writeErr(w, 400, err.Error())
 		return
 	}
-	ctx, cancel := ctxTimeout(r, 10*time.Second)
-	defer cancel()
-	info, err := hubclient.Discover(ctx, in.URL, in.HubURL)
-	if err != nil {
-		writeErr(w, 400, err.Error())
+	target, targetErr := remoteDiscoveryTarget(in.URL, in.HubURL)
+	if targetErr != nil {
+		writeErr(w, http.StatusBadRequest, targetErr.Error())
 		return
 	}
-	if in.Connect {
-		err = s.d.Store.Update(func(c *config.Config) error { c.ConnectRemote(info.Root, info.HubURL); return nil })
-		if err != nil {
-			writeErr(w, 500, "保存设备连接失败")
+	claim := strings.TrimSpace(in.EnrollmentClaim)
+	if in.Connect && claim != "" && len(claim) != 64 {
+		writeErr(w, http.StatusBadRequest, "登记码格式无效，请复制完整的一次性设备登记码")
+		return
+	}
+	if in.Connect && claim != "" {
+		if _, err := hex.DecodeString(claim); err != nil {
+			writeErr(w, http.StatusBadRequest, "登记码格式无效，请复制完整的一次性设备登记码")
 			return
 		}
-		s.clearQR()
-		if s.d.Hub != nil {
-			s.d.Hub.Kick()
+	}
+	s.remoteDiscoveryMu.Lock()
+	s.remoteDiscoverySeq++
+	sequence := s.remoteDiscoverySeq
+	if s.remoteDiscoveryLatest == nil {
+		s.remoteDiscoveryLatest = map[string]uint64{}
+	}
+	s.remoteDiscoveryLatest[target] = sequence
+	s.remoteDiscoveryMu.Unlock()
+	startedAt, runtimeKey := time.Now().UnixMilli(), s.d.Store.Get().GatewayRuntimeKey
+	s.remoteModeMu.Lock()
+	modeSequence := s.remoteModeSeq
+	s.remoteModeMu.Unlock()
+	ctx, cancel := ctxTimeout(r, 10*time.Second)
+	defer cancel()
+	deviceID, deviceSecret := "", ""
+	for _, saved := range s.d.Store.Get().RemoteConnections {
+		if config.NormalizeHubURL(saved.HubURL) == target {
+			deviceID, deviceSecret = saved.DeviceID, saved.DeviceSecret
+			break
 		}
+	}
+	// Only an explicit connect operation may use the freshly supplied claim.
+	discoveryClaim := ""
+	if in.Connect {
+		discoveryClaim = claim
+	}
+	info, err := hubclient.DiscoverForDevice(ctx, in.URL, in.HubURL, deviceID, deviceSecret, discoveryClaim)
+	detectErr := err
+	observation := config.CloneStationObservation(info.RemoteAccess)
+	if observation == nil || detectErr != nil {
+		observation = &config.StationObservation{Mode: "unknown"}
+	}
+	observation.CheckedAt = startedAt
+	officialUnavailable := false
+	if in.Connect {
+		s.remoteModeMu.Lock()
+		defer s.remoteModeMu.Unlock()
+		if modeSequence != s.remoteModeSeq {
+			writeErr(w, http.StatusConflict, "远程方式已变化，请重新确认连接")
+			return
+		}
+	}
+	s.remoteDiscoveryMu.Lock()
+	if s.remoteDiscoveryLatest[target] != sequence {
+		s.remoteDiscoveryMu.Unlock()
+		writeErr(w, http.StatusConflict, "检测结果已更新，请重试")
+		return
+	}
+	err = s.d.Store.Update(func(c *config.Config) error {
+		if c.GatewayRuntimeKey != runtimeKey {
+			return errors.New("设备状态已更新，请重新检测")
+		}
+		effective := observation
+		for _, connection := range c.RemoteConnections {
+			if config.NormalizeHubURL(connection.HubURL) == target && connection.RemoteSupport != nil && connection.RemoteSupport.CheckedAt > startedAt {
+				effective = connection.RemoteSupport
+			}
+		}
+		if detectErr == nil && in.Connect {
+			if in.RequireOfficial && (!effective.Available() || !effective.Station.AllowOfficialAccounts) {
+				officialUnavailable = true
+			} else {
+				if claim != "" {
+					c.ConnectRemoteWithEnrollmentClaim(info.Root, info.HubURL, claim)
+				} else {
+					c.ConnectRemote(info.Root, info.HubURL)
+				}
+			}
+		}
+		for i := range c.RemoteConnections {
+			if config.NormalizeHubURL(c.RemoteConnections[i].HubURL) == target {
+				c.RemoteConnections[i].RemoteSupport = config.CloneStationObservation(effective)
+			}
+		}
+		if target == config.NormalizeHubURL(c.EffectiveHubURL()) && (c.RemoteStationObservation == nil || effective.CheckedAt >= c.RemoteStationObservation.CheckedAt) {
+			c.RecordRemoteStationObservation(effective)
+		}
+		observation = config.CloneStationObservation(effective)
+		return nil
+	})
+	delete(s.remoteDiscoveryLatest, target)
+	s.remoteDiscoveryMu.Unlock()
+	if err != nil {
+		writeErr(w, http.StatusConflict, err.Error())
+		return
+	}
+	if detectErr != nil {
+		writeErr(w, http.StatusBadRequest, detectErr.Error())
+		return
+	}
+	if officialUnavailable {
+		writeErr(w, http.StatusConflict, "本站暂不支持账号远程，请重新选择")
+		return
+	}
+	info.RemoteAccess = observation
+	if in.Connect {
+		s.finishRemoteModeSwitch()
 	}
 	writeJSON(w, map[string]any{"ok": true, "plugin": info, "connected": in.Connect, "message": "插件兼容，设备连接不需要模型 API Key；电脑在线后生成二维码"})
 }
@@ -92,10 +192,20 @@ func (s *Server) handlePairRevoke(w http.ResponseWriter, r *http.Request) {
 }
 
 // Expose endpoints only, never saved per-origin device secrets.
-func remoteConnectionChoices(c config.Config) []map[string]string {
-	out := []map[string]string{}
+func remoteConnectionChoices(c config.Config) []map[string]any {
+	out := []map[string]any{}
 	for _, p := range c.RemoteConnections {
-		out = append(out, map[string]string{"hubUrl": p.HubURL, "name": strings.TrimPrefix(strings.TrimPrefix(p.HubURL, "https://"), "http://")})
+		entry := map[string]any{"hubUrl": p.HubURL, "name": strings.TrimPrefix(strings.TrimPrefix(p.HubURL, "https://"), "http://"), "support": stationRemoteSupport(p.RemoteSupport, nil, p.HubURL)}
+		// Group identity is display metadata only. Never expose the invite or
+		// signature used to register this computer with a Bot relay.
+		if p.BotGroupID != "" {
+			entry["mode"] = "bot"
+			entry["groupId"] = p.BotGroupID
+		}
+		if p.RemoteSupport != nil && config.ValidStationPolicy(p.RemoteSupport.Station) {
+			entry["remoteSupport"] = config.CloneStationObservation(p.RemoteSupport)
+		}
+		out = append(out, entry)
 	}
 	return out
 }

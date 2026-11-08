@@ -5,6 +5,33 @@ import { WINDOWS_PIPE_PATTERN } from "./host-policy.mjs";
 export const CATALOG_TIMEOUT_MS = 3000;
 export const MAX_CATALOG_FRAME_BYTES = 1024 * 1024;
 export const MAX_CATALOG_TOOLS = 256;
+export const MODEL_OVERRIDE_TRANSPORT = "codex-tool-schema-v1";
+const THINKING = new Set(["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"]);
+
+// Retain only a bounded capability projection, never schema descriptions or
+// arbitrary host fields. Complex/ref schemas are unknown, not guessed support.
+export function nativeSendOptions(tool) {
+  if (!isRecord(tool)) return undefined;
+  const schema = tool.inputSchema ?? tool.parameters;
+  if (tool.inputSchema && tool.parameters && JSON.stringify(tool.inputSchema) !== JSON.stringify(tool.parameters)) return undefined;
+  if (!isRecord(schema) || schema.type !== "object" || !isRecord(schema.properties) ||
+      Object.keys(schema).some(key => !["type", "properties", "required", "description", "title", "$schema", "additionalProperties"].includes(key)) ||
+      (Object.hasOwn(schema, "additionalProperties") && typeof schema.additionalProperties !== "boolean") ||
+      ["anyOf", "oneOf", "allOf", "$ref", "not", "if"].some(key => Object.hasOwn(schema, key)) ||
+      !Array.isArray(schema.required) || !schema.required.includes("threadId") || !schema.required.includes("prompt") ||
+      schema.required.some(key => !["threadId", "prompt"].includes(key))) return undefined;
+  const simpleString = value => isRecord(value) && value.type === "string" &&
+    Object.keys(value).every(key => ["type", "description", "title", "enum"].includes(key)) &&
+    (!Object.hasOwn(value, "enum") || Array.isArray(value.enum) && value.enum.length > 0 && value.enum.length <= 256 &&
+      value.enum.every(item => typeof item === "string" && item.length <= 200) && new Set(value.enum).size === value.enum.length);
+  if (!simpleString(schema.properties.threadId) || !simpleString(schema.properties.prompt) || !simpleString(schema.properties.model)) return undefined;
+  // A constrained model list needs a separate value contract. Do not advertise
+  // arbitrary model IDs on an enum-only or constrained host implementation.
+  if (["threadId", "prompt", "model"].some(key => Object.hasOwn(schema.properties[key], "enum"))) return undefined;
+  const thinking = schema.properties.thinking;
+  return { model: true, thinking: simpleString(thinking) && Array.isArray(thinking.enum) && thinking.enum.length > 0 && thinking.enum.length <= THINKING.size &&
+    thinking.enum.every(value => typeof value === "string" && THINKING.has(value)) && new Set(thinking.enum).size === thinking.enum.length ? [...thinking.enum] : [] };
+}
 
 const REQUEST = Buffer.from(JSON.stringify({
   jsonrpc: "2.0",
@@ -16,7 +43,7 @@ const HEADER = Buffer.alloc(4);
 HEADER.writeUInt32LE(REQUEST.length);
 const REQUEST_FRAME = Buffer.concat([HEADER, REQUEST]);
 
-function decodeCatalog(body) {
+function decodeCatalog(body, includeSendOptions) {
   let message;
   try {
     message = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(body));
@@ -29,14 +56,19 @@ function decodeCatalog(body) {
     throw new ProbeError("CATALOG_RESPONSE_INVALID");
   }
   const names = [];
+  let sendTool; let sendCount = 0;
   for (const tool of message.result.tools) {
     if (!isRecord(tool) || typeof tool.name !== "string" || tool.name.length > 128 ||
         typeof tool.namespace !== "string" || tool.namespace.length > 128) {
       throw new ProbeError("CATALOG_RESPONSE_INVALID");
     }
-    if (tool.namespace === "codex_app") names.push(tool.name);
+    if (tool.namespace === "codex_app") {
+      names.push(tool.name);
+      if (tool.name === "send_message_to_thread") { sendTool = tool; sendCount++; }
+    }
   }
-  return sanitizeToolNames(names);
+  const safeNames = sanitizeToolNames(names);
+  return includeSendOptions ? { names: safeNames, sendOptions: sendCount === 1 ? nativeSendOptions(sendTool) : undefined } : safeNames;
 }
 
 // This client can send exactly one catalog request. It has no initialization,
@@ -46,7 +78,7 @@ export function createNativeCatalog({
   setTimer = setTimeout,
   clearTimer = clearTimeout,
 } = {}) {
-  return ({ pipePath }) => new Promise((resolve, reject) => {
+  return ({ pipePath, includeSendOptions = false }) => new Promise((resolve, reject) => {
     let socket;
     let timer;
     let finished = false;
@@ -104,7 +136,7 @@ export function createNativeCatalog({
             finish(new ProbeError("CATALOG_FRAME_INVALID"));
             return;
           }
-          try { finish(undefined, decodeCatalog(buffer.subarray(4))); }
+          try { finish(undefined, decodeCatalog(buffer.subarray(4), includeSendOptions)); }
           catch (error) { finish(error instanceof ProbeError ? error : new ProbeError("CATALOG_FAILED")); }
         }
       });

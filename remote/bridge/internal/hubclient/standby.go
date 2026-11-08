@@ -18,11 +18,11 @@ func (c *Client) standbyLoop(ctx context.Context) {
 	defer tick.Stop()
 	for ctx.Err() == nil {
 		cfg := c.o.Store.Get()
-		if cfg.RemoteDeviceOnly && validPhoneHash(cfg.PhoneHash) && validPhoneHash(cfg.PhoneBindingID) {
+		if cfg.HubRemoteEnabled() && cfg.EffectiveRemoteMode() == "hub" && cfg.RemoteDeviceOnly && validPhoneHash(cfg.PhoneHash) && validPhoneHash(cfg.PhoneBindingID) {
 			var wg sync.WaitGroup
 			gate := make(chan struct{}, 4)
 			for _, station := range cfg.RemoteConnections {
-				if config.NormalizeHubURL(station.HubURL) == config.NormalizeHubURL(cfg.EffectiveHubURL()) || station.DeviceSecret == "" {
+				if station.BotGroupID != "" || config.NormalizeHubURL(station.HubURL) == config.NormalizeHubURL(cfg.EffectiveHubURL()) || station.DeviceSecret == "" {
 					continue
 				}
 				wg.Add(1)
@@ -51,7 +51,11 @@ func (c *Client) standbyLoop(ctx context.Context) {
 
 // No registration, model request, history, or permanent connection on B.
 func (c *Client) pollStandby(ctx context.Context, base config.Config, station config.RemoteConnection) error {
+	if !base.HubRemoteEnabled() || !c.o.Store.Get().HubRemoteEnabled() || c.o.Store.Get().EffectiveRemoteMode() == "bot" || base.EffectiveRemoteMode() == "bot" || station.BotGroupID != "" {
+		return errors.New("备用中转站未启用")
+	}
 	cfg := activeStationConfig(base, station)
+	c.refreshStationCapabilities(ctx, cfg)
 	req, err := c.requestFor(ctx, cfg, http.MethodGet, "/bridge/standby", nil, false)
 	if err != nil {
 		return err
@@ -62,8 +66,8 @@ func (c *Client) pollStandby(ctx context.Context, base config.Config, station co
 		return err
 	}
 	defer resp.Body.Close()
-	if err := checkResp(resp); err != nil {
-		return err
+	if resp.StatusCode/100 != 2 {
+		return checkResp(resp)
 	}
 	var result struct {
 		Pairing struct {
@@ -72,7 +76,17 @@ func (c *Client) pollStandby(ctx context.Context, base config.Config, station co
 		}
 		Commands []protocol.CommandEnvelope
 	}
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 32<<10)).Decode(&result); err != nil {
+	// checkResp drains successful bodies; this endpoint still needs the JSON.
+	// Decode the complete bounded body so an oversized/trailing envelope cannot
+	// start a handover merely because its first JSON value happened to be valid.
+	body, err := io.ReadAll(io.LimitReader(resp.Body, protocol.MaxSourcePolicyWireBytes+1))
+	if err != nil {
+		return err
+	}
+	if len(body) > protocol.MaxSourcePolicyWireBytes {
+		return errors.New("备用站点响应过大")
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
 		return err
 	}
 	if !result.Pairing.Paired || result.Pairing.DeviceID != station.DeviceID || !phoneMatches(base, result.Pairing.BindingID, result.Pairing.PhoneHash) || len(result.Commands) > 1 {
@@ -89,16 +103,32 @@ func (c *Client) pollStandby(ctx context.Context, base config.Config, station co
 func (c *Client) executeStandby(base, station config.Config, env protocol.CommandEnvelope) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
+	if str(env.Command, "type") == "source.grant.acquire" {
+		// No source envelope is expected for this internal request. The fetched
+		// Hub challenge must independently prove the exact station handover.
+		result, err := c.acquireSourceGrantFor(ctx, str(env.Command, "challengeId"), station, func(current config.Config) bool {
+			return standbyEnvelopeCurrent(base, station, current, env) && len(env.Command) == 2 && env.Source == nil
+		}, true)
+		reply := protocol.Reply{DeviceID: station.DeviceID, CommandID: env.CommandID, OK: err == nil, Result: result}
+		if err != nil {
+			reply.Error = err.Error()
+		}
+		_ = c.postFor(ctx, station, "/bridge/reply", reply)
+		return
+	}
 	c.taskConfigMu.Lock()
 	c.expireUpdateLocked()
 	current := c.o.Store.Get()
 	var result any
 	var err error
-	in := stationSwitchCommand{TargetHubURL: str(env.Command, "targetHubUrl"), TargetDeviceID: str(env.Command, "targetDeviceId"), TargetComputerID: str(env.Command, "targetComputerId"), Agent: str(env.Command, "agent"), AccountID: str(env.Command, "accountId"), Model: str(env.Command, "model"), SessionKey: str(env.Command, "sessionKey"), OperationID: str(env.Command, "operationId")}
-	saved, exists := current.SavedRemoteConnection(station.EffectiveHubURL(), station.DeviceID)
-	if c.updatePrepared || env.CommandID == "" || !env.Phone || env.DeviceID != station.DeviceID || str(env.Command, "type") != "remote.station.switch" || !exists || saved.DeviceSecret != station.DeviceSecret || config.NormalizeHubURL(in.TargetHubURL) != config.NormalizeHubURL(station.EffectiveHubURL()) || in.TargetDeviceID != station.DeviceID || !phoneMatches(current, env.BindingID, env.PhoneHash) || !phoneMatches(current, base.PhoneBindingID, base.PhoneHash) || config.RemoteIdentity(current) != config.RemoteIdentity(base) {
+	sourceOnly, sourceOnlyValid := stationSourceOnly(env.Command)
+	in := stationSwitchCommand{TargetHubURL: str(env.Command, "targetHubUrl"), TargetDeviceID: str(env.Command, "targetDeviceId"), TargetComputerID: str(env.Command, "targetComputerId"), Agent: str(env.Command, "agent"), AccountID: str(env.Command, "accountId"), Model: str(env.Command, "model"), SessionKey: str(env.Command, "sessionKey"), OperationID: str(env.Command, "operationId"), SourceOnly: sourceOnly}
+	if c.updatePrepared || !sourceOnlyValid || !standbyEnvelopeCurrent(base, station, current, env) || str(env.Command, "type") != "remote.station.switch" || config.NormalizeHubURL(in.TargetHubURL) != config.NormalizeHubURL(station.EffectiveHubURL()) || in.TargetDeviceID != station.DeviceID {
 		err = errors.New("备用控制授权或连接已变化，请刷新后重试")
+	} else if err = c.validateExecutionSourceFor(env, current); err != nil {
+		// Alternate polling must enforce the same contract as active SSE.
 	} else {
+		ctx = withExecutionSource(ctx, env)
 		result, err = c.switchStationMode(ctx, in, true)
 	}
 	committed := err == nil
@@ -111,4 +141,9 @@ func (c *Client) executeStandby(base, station config.Config, env protocol.Comman
 	if committed {
 		c.Kick()
 	}
+}
+
+func standbyEnvelopeCurrent(base, station, current config.Config, env protocol.CommandEnvelope) bool {
+	saved, exists := current.SavedRemoteConnection(station.EffectiveHubURL(), station.DeviceID)
+	return current.HubRemoteEnabled() && current.EffectiveRemoteMode() != "bot" && saved.BotGroupID == "" && env.CommandID != "" && env.Phone && env.DeviceID == station.DeviceID && exists && saved.DeviceSecret == station.DeviceSecret && current.ComputerID != "" && current.ComputerID == base.ComputerID && current.ComputerID == station.ComputerID && phoneMatches(current, env.BindingID, env.PhoneHash) && phoneMatches(current, base.PhoneBindingID, base.PhoneHash) && phoneMatches(current, station.PhoneBindingID, station.PhoneHash) && config.RemoteIdentity(current) == config.RemoteIdentity(base)
 }

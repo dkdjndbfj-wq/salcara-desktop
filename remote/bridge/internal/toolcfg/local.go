@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"sort"
 )
 
 // ApplyLocalCodex also writes official API-key authentication so the desktop
@@ -45,17 +46,16 @@ func ApplyLocalClaude(path, base, key, model, authMode string) error {
 	if err != nil {
 		return err
 	}
-	env.set(EnvBaseURL, jsonStr(base))
-	env.set(EnvNoTraffic, jsonStr("1"))
-	env.set("CLAUDE_CODE_OAUTH_TOKEN", jsonStr(""))
-	// Clear the other authentication source so old keys cannot win a switch.
-	if authMode == "api-key" {
-		env.set("ANTHROPIC_API_KEY", jsonStr(key))
-		env.set(EnvAuthToken, jsonStr(""))
-	} else {
-		env.set(EnvAuthToken, jsonStr(key))
-		env.set("ANTHROPIC_API_KEY", jsonStr(""))
+	apiEnv := ClaudeAPIEnvironment(base, key, authMode)
+	keys := make([]string, 0, len(apiEnv))
+	for key := range apiEnv {
+		keys = append(keys, key)
 	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		env.set(key, jsonStr(apiEnv[key]))
+	}
+	env.set(EnvNoTraffic, jsonStr("1"))
 	if model != "" {
 		root.set("model", jsonStr(model))
 		env.set("ANTHROPIC_MODEL", jsonStr(model))

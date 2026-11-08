@@ -1,0 +1,5 @@
+.modal.api-profile-modal { width: min(480px, 100%); }
+.api-profile-modal #officialError:empty { display: none; }
+.api-profile-modal .modal-body { padding-bottom: 12px; }
+.api-profile-modal .modal-foot { padding-top: 10px; padding-bottom: 14px; }
+.api-profile-modal .field { min-width: 0; }

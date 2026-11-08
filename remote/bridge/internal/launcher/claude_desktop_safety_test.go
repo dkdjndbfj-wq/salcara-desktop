@@ -29,6 +29,16 @@ func fixtureTree(t *testing.T, root string) map[string]string {
 			return err
 		}
 		out[rel] = info.Mode().String()
+		if rel == ".salcara-service-profile.lock" {
+			// The profile transaction intentionally holds a Windows byte-range
+			// lock through Start. Snapshot its existence/type/empty size without
+			// reading that locked byte; all actual profile files remain hashed.
+			if !info.Mode().IsRegular() || info.Size() != 0 {
+				return errors.New("unexpected profile lock contents")
+			}
+			out[rel] += ":empty-profile-lock"
+			return nil
+		}
 		if !entry.IsDir() {
 			data, err := os.ReadFile(path)
 			if err != nil {

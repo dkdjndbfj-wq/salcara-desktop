@@ -1,0 +1,22 @@
+.account-daily-toolbar{display:grid;gap:10px;margin-bottom:14px}
+.account-daily-filters{flex-wrap:wrap}
+.account-daily-filters .input,.account-daily-filters .cs-btn{width:auto;min-width:130px;max-width:230px}
+.account-daily-check{display:inline-flex;align-items:center;gap:6px;font-size:12px;white-space:nowrap;cursor:pointer}
+.account-daily-check input{accent-color:var(--accent)}
+.account-daily-selection{flex-wrap:wrap;padding:8px 0}
+.account-daily-meta{display:flex;align-items:center;gap:8px;min-height:28px;margin-bottom:6px}
+.account-daily-tags{display:flex;flex:1;min-width:0;gap:4px;flex-wrap:wrap}
+.account-daily-tags .chip{max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.account-daily-meta>.btn{flex:none;padding:3px 7px;font-size:11px}
+.account-active-status{display:inline-flex;align-items:center;gap:6px;flex:none;max-width:100%;padding:3px 8px;border-radius:999px;background:var(--primary-soft);color:var(--primary-strong);font-size:11px;font-weight:650;line-height:1.5;white-space:nowrap}
+.account-active-status[hidden]{display:none}
+.account-active-status::before{content:"";width:5px;height:5px;flex:none;border-radius:50%;background:currentColor;box-shadow:0 0 7px currentColor}
+#localAccountList>.account-card.account-is-active{border-color:var(--primary)!important;box-shadow:0 0 0 1px color-mix(in srgb,var(--primary) 30%,transparent),0 0 18px -5px color-mix(in srgb,var(--primary) 44%,transparent)!important}
+#localAccountList>.account-card.account-is-active:hover{border-color:var(--primary)!important;box-shadow:0 0 0 1px color-mix(in srgb,var(--primary) 40%,transparent),0 0 22px -5px color-mix(in srgb,var(--primary) 52%,transparent)!important}
+@media(max-width:560px){.account-daily-meta{flex-wrap:wrap}.account-daily-tags{min-width:40px}.account-active-status{font-size:10.5px}}
+@media(prefers-reduced-motion:reduce){#localAccountList>.account-card.account-is-active{transition:none!important;animation:none!important;transform:none!important}.account-active-status::before{animation:none!important}}
+.account-daily-results{max-height:45vh;overflow:auto}
+.account-daily-results .restore-row{gap:12px}
+.account-daily-results .li-main{overflow-wrap:anywhere}
+.account-daily-results .small{max-width:65%;text-align:right;overflow-wrap:anywhere}
+@media(max-width:560px){.account-daily-filters .input,.account-daily-filters .cs-btn{min-width:110px;max-width:100%;flex:1}.account-daily-results .restore-row{align-items:flex-start}}

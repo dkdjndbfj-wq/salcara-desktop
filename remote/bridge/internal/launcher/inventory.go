@@ -3,7 +3,7 @@ package launcher
 import (
 	"context"
 	"encoding/json"
-	"strings"
+	"salcara/bridge/internal/config"
 	"time"
 )
 
@@ -27,8 +27,8 @@ func (s *Service) InventorySnapshot(paths map[string]string) ([]Tool, bool) {
 	if len(out) == 0 {
 		// Persisted installation locations are cheap local metadata. Showing
 		// them does not start a tool or bypass authoritative launch validation.
-		for _, id := range []string{"codex-desktop", "codex", "claude-desktop", "claude"} {
-			t := Tool{ID: id, Name: toolNames[id], Kind: strings.Split(id, "-")[0], Custom: paths[id] != ""}
+		for _, id := range toolOrder {
+			t := Tool{ID: id, Name: toolNames[id], Kind: config.ToolKind(id), Custom: paths[id] != ""}
 			if t.Custom {
 				t.Path = desktopExecutable(paths[id], t.Kind)
 				t.Available = fileExists(t.Path)

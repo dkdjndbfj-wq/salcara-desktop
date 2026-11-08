@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"salcara/bridge/internal/config"
@@ -52,6 +53,50 @@ func TestDiscoveryDoesNotSendCredentialsAndChecksCapabilities(t *testing.T) {
 		if _, err := RemoteURL(url); err == nil {
 			t.Fatalf("unsafe remote address %s", url)
 		}
+	}
+}
+
+func TestDiscoverForDeviceScopesCredentialsAndNeverFollowsRedirects(t *testing.T) {
+	for _, tc := range []struct {
+		name, id, secret, claim string
+	}{
+		{"selected device", "selected-device", "selected-secret", ""},
+		{"explicit invitation", "", "", "selected-claim"},
+		{"invitation takes precedence", "old-device", "old-secret", "selected-claim"},
+		{"incomplete identity stays public", "selected-device", "", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			u := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				wantID, wantSecret := tc.id, tc.secret
+				if tc.claim != "" || tc.secret == "" {
+					wantID, wantSecret = "", ""
+				}
+				if r.Header.Get("X-Salcara-Device-Id") != wantID || r.Header.Get("X-Salcara-Device-Secret") != wantSecret || r.Header.Get("X-Salcara-Enrollment-Claim") != tc.claim || r.Header.Get("Authorization") != "" || r.Header.Get("Cookie") != "" {
+					t.Error("discovery mixed device, invitation or upstream credentials")
+				}
+				_, _ = w.Write([]byte(`{"service":"salcara-hub","protocol":"salcara-remote","protocolVersion":1,"authModes":["device-pairing"],"capabilities":["device.identity.v1","pair.qr.v1","session.remote.v1","pair.revoke.v1"]}`))
+			}))
+			defer u.Close()
+			if _, err := DiscoverForDevice(context.Background(), u.URL, "", tc.id, tc.secret, tc.claim); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+	var targetRequests, originRequests atomic.Int32
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { targetRequests.Add(1) }))
+	defer target.Close()
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		originRequests.Add(1)
+		http.Redirect(w, r, target.URL+"/salcara-hub/v1/ping", http.StatusFound)
+	}))
+	defer origin.Close()
+	for _, override := range []string{"", target.URL + "/salcara-hub"} {
+		if _, err := DiscoverForDevice(context.Background(), origin.URL, override, "selected-device", "selected-secret", ""); err == nil {
+			t.Fatal("accepted a credential redirect or cross-origin override")
+		}
+	}
+	if targetRequests.Load() != 0 || originRequests.Load() != 1 {
+		t.Fatal("discovery credentials left the selected origin")
 	}
 }
 

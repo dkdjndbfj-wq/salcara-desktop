@@ -59,7 +59,7 @@ async function fixture(run) {
       return child;
     },
   };
-  try { await run({ root, appDir, userData, deps, counts: () => ({ quit, prepared, committed, aborted, helpers }) }); }
+  try { await run({ root, appDir, userData, deps, privateKey, assets, counts: () => ({ quit, prepared, committed, aborted, helpers }) }); }
   finally { global.fetch = previousFetch; await fs.promises.rm(root, { recursive: true, force: true, maxRetries:20, retryDelay:100 }); }
 }
 
@@ -94,6 +94,55 @@ test('a spawned helper that never acknowledges readiness cannot shut down the ap
     const saved = JSON.parse(fs.readFileSync(path.join(f.userData, 'update.json')));
     assert.equal(saved.installing, ''); assert.equal(saved.token, '');
     assert.match(fs.readFileSync(path.join(f.userData, 'update.log'), 'utf8'), /installation aborted/);
+  });
+});
+
+test('installation blocked by an active task retries the staged payload without downloading it again', async () => {
+  await fixture(async f => {
+    let attempts = 0;
+    f.deps.beforeInstall = async () => { attempts++; throw new Error('任务尚未结束，请完成后再更新'); };
+    const u = createUpdater(f.deps); await u.check(true); await u.download();
+    await u.install(); assert.equal(u.state().retry, 'install');
+    u.cleanup(); await u.check(false);
+    assert.equal(u.state().retry, 'install', 'periodic checks retain the staged retry');
+    await u.install(); assert.equal(attempts, 2);
+    assert.equal(u.state().retry, 'install'); assert.equal(f.counts().quit, 0);
+  });
+});
+
+test('automatic updating waits for active tasks then installs the verified payload once without another click', async () => {
+  await fixture(async f => {
+    let attempts = 0, downloads = 0; const phases = [];
+    const fetchAsset = global.fetch;
+    global.fetch = (url, options) => { if (url.endsWith('.tar.gz')) downloads++; return fetchAsset(url, options); };
+    f.deps.autoRetryDelay = 10; f.deps.autoInstallDelay = 0;
+    f.deps.onChange = state => phases.push(state.phase);
+    f.deps.beforeInstall = async () => { if (++attempts < 3) { const error = new Error('任务尚未结束'); error.updateBusy = true; throw error; } };
+    f.deps.spawnHelper = () => {
+      const saved = JSON.parse(fs.readFileSync(path.join(f.userData, 'update.json')));
+      fs.writeFileSync(path.join(f.userData, `update-helper-${saved.token}`), saved.token);
+      const child = new EventEmitter(); child.exitCode = null; child.unref = () => {};
+      queueMicrotask(() => child.emit('spawn')); return child;
+    };
+    const u = createUpdater(f.deps); await u.check(true); await u.startAutoUpdate();
+    try {
+      for (let i = 0; i < 100 && !f.counts().quit; i++) await new Promise(resolve => setTimeout(resolve, 10));
+      assert.ok(phases.includes('waiting')); assert.equal(attempts, 3);
+      assert.equal(downloads, 1); assert.equal(f.counts().quit, 1); assert.equal(f.counts().committed, 1);
+    } finally { u.cancel(); }
+  });
+});
+
+test('cancelling automatic installation stops the timer, and non-busy errors never retry themselves', async () => {
+  await fixture(async f => {
+    f.deps.autoInstallDelay = 40; f.deps.autoRetryDelay = 10;
+    const u = createUpdater(f.deps); await u.check(true); await u.startAutoUpdate(); u.cancel();
+    await new Promise(resolve => setTimeout(resolve, 60));
+    assert.equal(f.counts().prepared, 0); assert.equal(f.counts().quit, 0); assert.equal(u.state().autoPaused, true);
+    let attempts = 0;
+    f.deps.beforeInstall = async () => { attempts++; throw new Error('核心身份不匹配'); };
+    await u.startAutoUpdate(); await new Promise(resolve => setTimeout(resolve, 60));
+    assert.equal(attempts, 1); assert.equal(u.state().phase, 'error'); assert.equal(u.state().automatic, false);
   });
 });
 
@@ -212,6 +261,59 @@ async function fullWindowsUpdate(acknowledge) {
     await fs.promises.rm(root,{recursive:true,force:true,maxRetries:30,retryDelay:100});
   }
 }
+
+test('a failed target is quarantined across app restarts and fresh checks until an explicit retry', async () => {
+  await fixture(async f => {
+    const u = createUpdater(f.deps); await u.check(true);
+    const file = path.join(f.userData, 'update.json'), saved = JSON.parse(fs.readFileSync(file));
+    fs.writeFileSync(file, JSON.stringify({ ...saved, installing: '1.6.2' }));
+    assert.deepEqual(u.afterRestart(), { version: '1.6.2', ok: false });
+    const restored = createUpdater(f.deps); await restored.check(false);
+    assert.equal(restored.state().autoBlocked, true);
+    await restored.startAutoUpdate({ manual: false });
+    assert.equal(restored.state().phase, 'available'); assert.equal(f.counts().prepared, 0);
+    f.deps.autoInstallDelay = 60000;
+    await restored.startAutoUpdate({ manual: true });
+    assert.equal(restored.state().phase, 'ready'); assert.equal(restored.state().autoBlocked, false);
+    restored.cancel();
+  });
+});
+
+test('restart keeps the verified archive but re-extracts staging before installation', async () => {
+  await fixture(async f => {
+    const u = createUpdater(f.deps); await u.check(false); await u.download();
+    const staged = path.join(f.root, '.app.update', 'app', 'fixture.exe');
+    fs.writeFileSync(staged, 'changed while closed');
+    const restored = createUpdater(f.deps); restored.cleanup();
+    global.fetch = () => { throw new Error('verified cache must work offline'); };
+    assert.equal((await restored.download()).phase, 'ready');
+    assert.equal(fs.readFileSync(staged, 'utf8'), 'new');
+  });
+});
+
+test('disk preflight fails before any archive download or core shutdown', async () => {
+  await fixture(async f => {
+    f.deps.statfs = () => ({ bavail: 0, bsize: 4096 });
+    const u = createUpdater(f.deps); await u.check(false);
+    let downloads = 0; const fetch = global.fetch;
+    global.fetch = (...args) => { downloads++; return fetch(...args); };
+    const result = await u.download();
+    assert.equal(result.phase, 'error'); assert.match(result.error, /磁盘空间不足/);
+    assert.equal(downloads, 0); assert.equal(f.counts().prepared, 0);
+  });
+});
+
+test('a withdrawn staged release cannot start a helper even via explicit retry', async () => {
+  await fixture(async f => {
+    const u = createUpdater(f.deps); await u.check(false); await u.download();
+    f.deps.controlURL = 'https://example.test/control.json';
+    const body = Buffer.from(JSON.stringify({ schema: 1, product: 'salcara-desktop-control', repo: 'o/r', revision: 1, issuedAt: Date.now(), expiresAt: Date.now() + 60000, paused: false, blockedVersions: ['1.6.2'], reason: '此版本已撤回' }));
+    global.fetch = async url => new Response(url.endsWith('.sig') ? crypto.sign(null, body, f.privateKey).toString('base64') : body);
+    const result = await u.startAutoUpdate({ manual: true });
+    assert.equal(result.automatic, false); assert.match(result.distributionReason, /撤回/);
+    assert.equal(f.counts().prepared, 0); assert.equal(f.counts().helpers, 0);
+  });
+});
 
 test('Windows full updater survives an app-directory cwd, verifies the archive and relaunches', { skip:process.platform !== 'win32', timeout:90000 }, () => fullWindowsUpdate(true));
 test('Windows full updater restores the old payload when the new version fails startup', { skip:process.platform !== 'win32', timeout:90000 }, () => fullWindowsUpdate(false));

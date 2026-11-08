@@ -38,6 +38,8 @@ import (
 	"salcara/bridge/internal/agents"
 	"salcara/bridge/internal/applog"
 	"salcara/bridge/internal/autostart"
+	"salcara/bridge/internal/codexaccounts"
+	"salcara/bridge/internal/codexruntime"
 	"salcara/bridge/internal/config"
 	"salcara/bridge/internal/console"
 	"salcara/bridge/internal/desktopcompanion"
@@ -178,6 +180,10 @@ func run(background bool) error {
 	if err != nil {
 		return err
 	}
+	// Arm a fresh in-memory gateway lease for every Bridge process. A Codex or
+	// Claude process started before Salcara (or holding a previous lease after a
+	// reboot) must not be able to reach the local adapter automatically.
+	store.SetRuntimeGatewayKey("rt-salcara-" + config.RandomToken(32))
 	if r := config.NormalizeRelayRoot(prefillRelay); r != "" && strings.HasPrefix(r, "http") && store.Get().RelayRoot == "" {
 		_ = store.Update(func(c *config.Config) error { c.RelayRoot = r; return nil })
 		logger.Printf("relay address pre-filled: %s", r)
@@ -213,7 +219,19 @@ func run(background bool) error {
 	if _, err := os.Stat(nodePath); err != nil {
 		nodePath, _ = exec.LookPath("node")
 	}
-	companion := desktopcompanion.New(desktopcompanion.Options{BundleDir: bundleDir, DataDir: dir, NodePath: nodePath})
+	companion := desktopcompanion.New(desktopcompanion.Options{
+		BundleDir: bundleDir,
+		DataDir:   dir,
+		NodePath:  nodePath,
+		// Native Codex Desktop control is admitted only while Salcara has an
+		// explicit Codex source selected.  The identity is opaque and contains
+		// no API key; the fingerprint lets the companion reject a lease bound
+		// to a different provider/account after a restart or API switch.
+		NativeSourceIdentity: func() string {
+			return store.Get().NativeDesktopSourceIdentity()
+		},
+		RequireManagedLaunch: true,
+	})
 	localLauncher := launcher.New(dir)
 	claudeDesktop := launcher.NewClaudeDesktop3P(localLauncher)
 	var cons *console.Server
@@ -251,20 +269,63 @@ func run(background bool) error {
 			}
 		},
 	})
-	cons = console.New(console.Deps{
-		Store:         store,
-		Hub:           hub,
-		Version:       version,
-		Port:          LocalPort,
-		LogPath:       logPathOf(lf),
-		Exe:           exe,
-		Dir:           dir,
-		Logger:        logger,
-		Quit:          cancel,
-		Companion:     companion,
-		Local:         localLauncher,
-		ClaudeDesktop: claudeDesktop,
+	accountRuntime := codexruntime.New(dir)
+	defer accountRuntime.Close()
+	var officialLogin codexaccounts.LoginConnector
+	browserLogin, browserLoginErr := codexaccounts.NewBrowserConnector(codexaccounts.BrowserOptions{OpenBrowser: autostart.OpenBrowser})
+	if browserLoginErr != nil {
+		logger.Printf("official account browser login unavailable")
+	} else {
+		officialLogin = browserLogin
+	}
+	var officialDeviceLogin codexaccounts.LoginConnector
+	deviceLogin, deviceLoginErr := codexaccounts.NewLegacyDeviceConnector()
+	if deviceLoginErr != nil {
+		logger.Printf("official account device login unavailable")
+	} else {
+		officialDeviceLogin = deviceLogin
+	}
+	officialAccounts, accountErr := codexaccounts.New(codexaccounts.Options{
+		Path:            filepath.Join(dir, "codex-accounts.v1.protected"),
+		Refresher:       codexaccounts.RefreshFunc(accountRuntime.Refresh),
+		Login:           officialLogin,
+		DeviceLogin:     officialDeviceLogin,
+		ExclusiveWriter: true,
 	})
+	if accountErr != nil {
+		if errors.Is(accountErr, codexaccounts.ErrVaultBusy) {
+			logger.Printf("official account vault is owned by another Bridge process; existing API Key routes remain available")
+		} else {
+			logger.Printf("official account vault unavailable; existing API Key routes remain available")
+		}
+	}
+	if officialAccounts != nil {
+		defer officialAccounts.Close()
+	}
+	officialGateway := (codexruntime.AccountExecutor{Accounts: officialAccounts, Runtime: accountRuntime}).Do
+	cons = console.New(console.Deps{
+		Store:           store,
+		Hub:             hub,
+		Version:         version,
+		Port:            LocalPort,
+		LogPath:         logPathOf(lf),
+		Exe:             exe,
+		Dir:             dir,
+		Logger:          logger,
+		Quit:            cancel,
+		Companion:       companion,
+		Local:           localLauncher,
+		ClaudeDesktop:   claudeDesktop,
+		CodexAccounts:   officialAccounts,
+		OfficialGateway: officialGateway,
+		OfficialImages:  (codexruntime.AccountExecutor{Accounts: officialAccounts, Runtime: accountRuntime}).DoImages,
+	})
+	if err := cons.StartDirectRelay(); err != nil {
+		logger.Printf("direct pairing listener unavailable: %v", err)
+	}
+	defer cons.CloseUsageLedger()
+	defer cons.CloseAPIListeners()
+	defer cons.CloseSelfHostServices()
 
 	settings := func() agents.Settings {
 		c := store.Get()
@@ -276,16 +337,20 @@ func run(background bool) error {
 				c.LocalToolPaths[id] = path
 			}
 		}
-		s := agents.SettingsWithGateway(c, LocalPort)
+		s := agents.LocalSettingsWithGateway(c, LocalPort)
 		s.BridgeExe, s.LocalPort, s.LocalToken = exe, LocalPort, localToken
 		return s
 	}
 	sink := func(ev protocol.Event) {
 		ev = cons.Attribute(ev)
-		hub.Push(ev)
+		// Keep the explicitly selected direct conversation off Hub. If the
+		// direct transport fails, it stays unavailable instead of silently
+		// mirroring its private event stream through a different station.
+		cons.PublishHubEvent(ev)
 		cons.Broadcast(ev)
 	}
 	var agentOpts agents.Options
+	agentOpts.BundledAgents = true
 	if os.Getenv("SALCARA_BRIDGE_CONFIG_DIR") != "" {
 		agentOpts.StateDir = dir
 	}
@@ -293,10 +358,16 @@ func run(background bool) error {
 	defer mgr.Close()
 	hub.SetManager(mgr)
 	cons.SetManager(mgr)
+	// Start the console-owned maintenance loops with the process lifetime.
+	// These are intentionally wired after both dependencies are ready: the
+	// prober needs the API service and account store, while the watchdog needs
+	// the manager.  ctx is cancelled by the signal/server shutdown path.
+	cons.StartProber(ctx)
+	cons.StartWatchdog(ctx)
 
 	// Projects / device name changes → re-register.
 	store.OnChange(func(old, cur config.Config) {
-		if old.DeviceName != cur.DeviceName || len(old.Projects) != len(cur.Projects) || old.LocalToolPaths["codex"] != cur.LocalToolPaths["codex"] || old.LocalToolPaths["claude"] != cur.LocalToolPaths["claude"] {
+		if old.DeviceName != cur.DeviceName || len(old.Projects) != len(cur.Projects) || old.LocalToolPaths["codex"] != cur.LocalToolPaths["codex"] || old.LocalToolPaths["claude"] != cur.LocalToolPaths["claude"] || old.LocalToolPaths["deepseek-harness"] != cur.LocalToolPaths["deepseek-harness"] || old.LocalToolPaths["hermes"] != cur.LocalToolPaths["hermes"] {
 			hub.Reregister()
 		}
 	})

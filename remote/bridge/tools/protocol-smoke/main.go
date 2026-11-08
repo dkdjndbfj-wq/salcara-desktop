@@ -11,6 +11,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"time"
 
 	"salcara/bridge/internal/config"
 	"salcara/bridge/internal/gateway"
@@ -26,6 +27,7 @@ func main() {
 	}
 	var mu sync.Mutex
 	calls, modelOK, patchCalls, historyOK := 0, true, 0, false
+	stopStarted, stopCanceled := false, false
 	var toolNames []string
 	u := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
@@ -39,13 +41,29 @@ func main() {
 		n := calls
 		modelOK = modelOK && in.Model == "non-openai-fixture"
 		historyOK = historyOK || strings.Contains(string(body), "fixture-patch-marker") || strings.Contains(string(body), "protocol-smoke-")
+		stopRequest := !stopStarted && strings.Contains(string(body), "NATIVE_SESSION_STOP_MARKER")
+		if stopRequest {
+			stopStarted = true
+		}
 		mu.Unlock()
+		if stopRequest {
+			select {
+			case <-r.Context().Done():
+				mu.Lock()
+				stopCanceled = true
+				mu.Unlock()
+			case <-time.After(45 * time.Second):
+				w.WriteHeader(http.StatusGatewayTimeout)
+			}
+			return
+		}
 		if r.URL.Path != "/v1/chat/completions" && r.URL.Path != "/v1/messages" {
 			w.WriteHeader(404)
 			return
 		}
 		w.Header().Set("Content-Type", "text/event-stream")
 		toolName := ""
+		phoneApproval := strings.Contains(string(body), "NATIVE_SESSION_PHONE_MARKER")
 		if n == 2 {
 			for _, tool := range in.Tools {
 				name, _ := tool["name"].(string)
@@ -55,6 +73,13 @@ func main() {
 				mu.Lock()
 				toolNames = append(toolNames, name)
 				mu.Unlock()
+				if phoneApproval {
+					if name == "shell_command" || name == "exec_command" {
+						toolName = name
+						break
+					}
+					continue
+				}
 				if strings.HasSuffix(name, "apply_patch") || (toolName == "" && name == "shell_command") {
 					toolName = name
 					if strings.HasSuffix(name, "apply_patch") {
@@ -65,8 +90,15 @@ func main() {
 		}
 		patch := "*** Begin Patch\n*** Add File: fixture-result.txt\n+fixture-patch-marker\n*** End Patch"
 		arguments := map[string]string{"input": patch}
-		if toolName == "shell_command" {
+		if toolName == "shell_command" || toolName == "exec_command" {
 			arguments = map[string]string{"command": "Get-Location"}
+			if toolName == "exec_command" {
+				arguments = map[string]string{"cmd": "Get-Location"}
+			}
+			if phoneApproval {
+				arguments["sandbox_permissions"] = "require_escalated"
+				arguments["justification"] = "Run the fixture-only Get-Location command to verify phone approval."
+			}
 		}
 		if toolName != "" {
 			mu.Lock()
@@ -112,7 +144,7 @@ func main() {
 	mux.HandleFunc("/fixture-stats", func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		defer mu.Unlock()
-		_ = json.NewEncoder(w).Encode(map[string]any{"calls": calls, "modelOK": modelOK, "patchCalls": patchCalls, "historyOK": historyOK, "toolNames": toolNames})
+		_ = json.NewEncoder(w).Encode(map[string]any{"calls": calls, "modelOK": modelOK, "patchCalls": patchCalls, "historyOK": historyOK, "toolNames": toolNames, "stopStarted": stopStarted, "stopCanceled": stopCanceled})
 	})
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

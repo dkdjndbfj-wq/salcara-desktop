@@ -10,14 +10,18 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"salcara/bridge/internal/config"
+	"salcara/bridge/internal/protocol"
 )
 
 type Discovery struct {
-	Root            string   `json:"root"`
-	HubURL          string   `json:"hubUrl"`
-	Version         string   `json:"version"`
-	ProtocolVersion int      `json:"protocolVersion"`
-	Capabilities    []string `json:"capabilities"`
+	RemoteAccess    *config.StationObservation `json:"remoteAccess,omitempty"`
+	Root            string                     `json:"root"`
+	HubURL          string                     `json:"hubUrl"`
+	Version         string                     `json:"version"`
+	ProtocolVersion int                        `json:"protocolVersion"`
+	Capabilities    []string                   `json:"capabilities"`
 }
 
 func RemoteURL(raw string) (*url.URL, error) {
@@ -39,6 +43,16 @@ func RemoteURL(raw string) (*url.URL, error) {
 // Discover sends no model key or device secret. A advertised capability is not
 // proof of ownership; ownership is established later by one-time pairing.
 func Discover(ctx context.Context, raw, override string) (Discovery, error) {
+	return discoverWithIdentity(ctx, raw, override, "", "", "")
+}
+
+// DiscoverForDevice is only for an already selected/saved station. Credential
+// headers are never redirected and the override still must be same-origin.
+func DiscoverForDevice(ctx context.Context, raw, override, deviceID, secret, claim string) (Discovery, error) {
+	return discoverWithIdentity(ctx, raw, override, deviceID, secret, claim)
+}
+
+func discoverWithIdentity(ctx context.Context, raw, override, deviceID, secret, claim string) (Discovery, error) {
 	u, err := RemoteURL(raw)
 	if err != nil {
 		return Discovery{}, err
@@ -56,6 +70,13 @@ func Discover(ctx context.Context, raw, override string) (Discovery, error) {
 		hubURL = strings.TrimSuffix(h.String(), "/v1")
 	}
 	req, _ := http.NewRequestWithContext(ctx, "GET", hubURL+"/v1/ping", nil)
+	if claim != "" {
+		req.Header.Set("X-Salcara-Enrollment-Claim", claim)
+	} else if deviceID != "" && secret != "" {
+		req.Header.Set("X-Salcara-Device-Id", deviceID)
+		req.Header.Set("X-Salcara-Device-Secret", secret)
+	}
+	checkedAt := time.Now().UnixMilli()
 	client := &http.Client{Timeout: 8 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -69,14 +90,16 @@ func Discover(ctx context.Context, raw, override string) (Discovery, error) {
 		return Discovery{}, errors.New("远程插件未就绪，或请求被本站反向代理拦截")
 	}
 	var info struct {
-		Service         string   `json:"service"`
-		Protocol        string   `json:"protocol"`
-		Version         string   `json:"version"`
-		ProtocolVersion int      `json:"protocolVersion"`
-		Capabilities    []string `json:"capabilities"`
-		AuthModes       []string `json:"authModes"`
+		RemoteAccess    *config.StationObservation `json:"remoteAccess"`
+		Service         string                     `json:"service"`
+		Protocol        string                     `json:"protocol"`
+		Version         string                     `json:"version"`
+		ProtocolVersion int                        `json:"protocolVersion"`
+		Capabilities    []string                   `json:"capabilities"`
+		AuthModes       []string                   `json:"authModes"`
 	}
-	if json.NewDecoder(io.LimitReader(resp.Body, 16<<10)).Decode(&info) != nil || info.Service != "salcara-hub" {
+	body, readErr := io.ReadAll(io.LimitReader(resp.Body, protocol.MaxSourcePolicyWireBytes+1))
+	if readErr != nil || len(body) > protocol.MaxSourcePolicyWireBytes || json.Unmarshal(body, &info) != nil || info.Service != "salcara-hub" {
 		return Discovery{}, errors.New("响应不是兼容的远程插件")
 	}
 	if info.Protocol != "salcara-remote" || info.ProtocolVersion != 1 {
@@ -93,5 +116,15 @@ func Discover(ctx context.Context, raw, override string) (Discovery, error) {
 	if !has(info.AuthModes, "device-pairing") || !has(info.Capabilities, "pair.qr.v1") || !has(info.Capabilities, "device.identity.v1") || !has(info.Capabilities, "session.remote.v1") || !has(info.Capabilities, "pair.revoke.v1") {
 		return Discovery{}, errors.New("本站插件未提供完整的设备扫码功能，请更新插件")
 	}
-	return Discovery{Root: root, HubURL: hubURL, Version: info.Version, ProtocolVersion: info.ProtocolVersion, Capabilities: info.Capabilities}, nil
+	if info.RemoteAccess != nil {
+		info.RemoteAccess.CheckedAt = checkedAt
+		guard := "station.guard.v1"
+		if info.RemoteAccess.Station != nil && info.RemoteAccess.Station.Version == 2 {
+			guard = "station.guard.v2"
+		}
+		if !has(info.Capabilities, guard) || !config.ValidStationPolicy(info.RemoteAccess.Station) || info.RemoteAccess.Revision == "" || (info.RemoteAccess.Mode != "open" && info.RemoteAccess.Mode != "restricted" && info.RemoteAccess.Mode != "disabled") {
+			info.RemoteAccess = nil
+		}
+	}
+	return Discovery{Root: root, HubURL: hubURL, Version: info.Version, ProtocolVersion: info.ProtocolVersion, Capabilities: info.Capabilities, RemoteAccess: info.RemoteAccess}, nil
 }

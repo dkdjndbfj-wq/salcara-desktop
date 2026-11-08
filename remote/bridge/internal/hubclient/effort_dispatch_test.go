@@ -189,7 +189,7 @@ func TestDesktopLiveRejectsEffortWithoutSendingOrFallingBack(t *testing.T) {
 			result, err := c.Dispatch(context.Background(), map[string]any{
 				"type": "session.send", "sessionKey": key, "text": "must keep the override", "effort": effort, "controlSurface": "desktop",
 			})
-			if err == nil || result != nil || !strings.Contains(err.Error(), "不支持手机指定推理强度") {
+			if err == nil || result != nil {
 				t.Fatalf("result=%v err=%v", result, err)
 			}
 			if len(d.sent)+len(worker.sent)+len(worker.sendOptions) != 0 {

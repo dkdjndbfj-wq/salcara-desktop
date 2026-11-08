@@ -2,6 +2,7 @@ package console
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"os"
 	"os/exec"
@@ -251,8 +252,16 @@ func TestClaudeDesktopRestoreUsesActuallyAppliedCodeAPI(t *testing.T) {
 	calls := 0
 	s.d.Local.Start = func(_ context.Context, p launcher.Plan) (int, error) {
 		calls++
-		if p.Tool.ID != "claude" || p.Workspace != cwd || p.ProfileDir != root || strings.Join(p.Args, " ") != "--resume 11111111-2222-3333-4444-555555555555 --model code-applied-model" {
+		t.Cleanup(func() { agents.RemoveClaudeRuntimeSettings(p.ClaudeSettingsPin) })
+		if p.Tool.ID != "claude" || p.Workspace != cwd || p.ProfileDir != root || p.ClaudeSettingsPin == "" || strings.Join(p.Args, " ") != "--resume 11111111-2222-3333-4444-555555555555 --model code-applied-model --settings "+p.ClaudeSettingsPin {
 			t.Fatal("desktop restore did not open the exact Code session with its applied model")
+		}
+		var pinned struct {
+			Env map[string]string `json:"env"`
+		}
+		data, err := os.ReadFile(p.ClaudeSettingsPin)
+		if err != nil || json.Unmarshal(data, &pinned) != nil || pinned.Env["ANTHROPIC_AUTH_TOKEN"] != "code-key" || pinned.Env["ANTHROPIC_BASE_URL"] != "https://code.test" || pinned.Env["ANTHROPIC_MODEL"] != "code-applied-model" {
+			t.Fatal("desktop restore did not pin the applied Code connection")
 		}
 		for _, want := range []string{"ANTHROPIC_AUTH_TOKEN=code-key", "ANTHROPIC_BASE_URL=https://code.test", "ANTHROPIC_MODEL=code-applied-model"} {
 			found := false

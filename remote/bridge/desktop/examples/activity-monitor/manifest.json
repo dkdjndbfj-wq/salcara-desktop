@@ -1,0 +1,10 @@
+{
+  "id": "salcara-activity-example",
+  "name": "工作动态示例",
+  "version": "1.0.0",
+  "minBridgeVersion": "1.6.4",
+  "description": "展示插件面板、快捷入口、本地存储和事件订阅，不修改模型请求内容。",
+  "author": "Salcara",
+  "entry": "index.js",
+  "permissions": ["ui.panel", "ui.satellite", "storage", "events", "api.intercept", "notify"]
+}

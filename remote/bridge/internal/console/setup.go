@@ -15,7 +15,6 @@ import (
 	"time"
 
 	"salcara/bridge/internal/agents"
-	"salcara/bridge/internal/config"
 	"salcara/bridge/internal/launcher"
 )
 
@@ -39,19 +38,24 @@ type setupItem struct {
 }
 
 type setupJob struct {
-	ID       string `json:"id"`
-	Tool     string `json:"tool"`
-	State    string `json:"state"` // running | done | failed
-	Log      string `json:"log"`
-	Started  int64  `json:"started"`
-	Finished int64  `json:"finished,omitempty"`
-	Error    string `json:"error,omitempty"`
+	Owner     string `json:"-"` // paired direct identity; never exposed over HTTP
+	RequestID string `json:"-"`
+	ID        string `json:"id"`
+	Tool      string `json:"tool"`
+	State     string `json:"state"` // running | done | failed
+	Log       string `json:"log"`
+	Started   int64  `json:"started"`
+	Finished  int64  `json:"finished,omitempty"`
+	Error     string `json:"error,omitempty"`
 }
 
 type setupRunner struct {
 	mu  sync.Mutex
 	job *setupJob
 	buf bytes.Buffer
+	// Process-bound pairing identities cannot be replayed after restart.
+	// Retain accepted direct requests even after the visible job is replaced.
+	receipts map[string]*setupJob
 }
 
 var setupState = &setupRunner{}
@@ -152,12 +156,25 @@ func (s *Server) setupItems() ([]setupItem, bool) {
 	}
 	claude := byID["claude"]
 	items = append(items, setupItem{ID: "claude", Name: "Claude Code", Role: "手机继续 Claude Code / Claude Desktop 的会话", Installed: claude.Available, Path: claude.Path, Installable: true, Required: true})
+	sdkItem, sdkPending := setupClaudeSDKSnapshot()
+	items, pending = append(items, sdkItem), pending || sdkPending
 	codex := byID["codex"]
 	ci := setupItem{ID: "codex", Name: "Codex CLI", Role: "手机继续 Codex / Codex App 的对话", Installed: codex.Available, Path: codex.Path, Installable: true, Required: true}
 	if codex.Available && bundledCodex(codex.Path) {
 		ci.Source, ci.Note = "codex-app", "正在使用 Codex App 自带的版本，可以直接用；单独安装后更新更及时"
 	}
 	items = append(items, ci)
+	for _, entry := range []struct{ id, name, url string }{
+		{"deepseek-harness", "DeepSeek Harness", "https://github.com/deepseek-ai/deepseek-harness"},
+		{"hermes", "Hermes Agent", "https://hermes-agent.nousresearch.com"},
+	} {
+		t := byID[entry.id]
+		note := ""
+		if entry.id == "deepseek-harness" {
+			note = "官方开发预览版；npm 安装需要 Node.js 24.9 或更高版本"
+		}
+		items = append(items, setupItem{ID: entry.id, Name: entry.name, Role: "可选 Agent · 独立 API 配置", Installed: t.Available, Path: t.Path, Installable: true, Download: entry.url, Note: note})
+	}
 	cd := byID["codex-desktop"]
 	items = append(items, setupItem{ID: "codex-desktop", Name: "Codex App", Role: "桌面应用（可选）", Installed: cd.Available, Path: cd.Path, Download: "https://chatgpt.com/codex"})
 	cl := byID["claude-desktop"]
@@ -175,6 +192,7 @@ func (s *Server) setupItems() ([]setupItem, bool) {
 func (s *Server) handleSetupStatus(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Query().Get("refresh") == "1" {
 		s.d.Local.InvalidateInventory()
+		invalidateSetupClaudeSDK()
 	}
 	setupState.mu.Lock()
 	var job *setupJob
@@ -185,17 +203,29 @@ func (s *Server) handleSetupStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	setupState.mu.Unlock()
 	items, pending := s.setupItems()
+	s.publishPluginTools(items, pending)
 	writeJSON(w, map[string]any{"os": runtime.GOOS, "items": items, "job": job, "discoveryPending": pending})
 }
 
 // installCommand returns the official installer for a tool on this OS.
 func installCommand(tool string) (*exec.Cmd, error) {
+	if tool == "claude-sdk" {
+		return agents.ClaudeSessionSDKInstallCommand()
+	}
 	ps := func(script string) *exec.Cmd {
 		return exec.Command("powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command",
 			"[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; "+script)
 	}
 	sh := func(script string) *exec.Cmd { return exec.Command("/bin/bash", "-lc", script) }
 	switch runtime.GOOS + "/" + tool {
+	case "windows/deepseek-harness":
+		return ps("$ErrorActionPreference = 'Stop'; Get-Command npm -ErrorAction Stop | Out-Null; npm install --global --engine-strict @deepseek-ai/dsh@0.2.2-rc.1; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }"), nil
+	case "darwin/deepseek-harness", "linux/deepseek-harness":
+		return sh("npm install --global --engine-strict @deepseek-ai/dsh@0.2.2-rc.1"), nil
+	case "windows/hermes":
+		return ps("$ErrorActionPreference = 'Stop'; & ([scriptblock]::Create((irm https://hermes-agent.nousresearch.com/install.ps1))) -NonInteractive"), nil
+	case "darwin/hermes", "linux/hermes":
+		return sh("curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash"), nil
 	case "windows/claude":
 		return ps("irm https://claude.ai/install.ps1 | iex"), nil
 	case "windows/codex":
@@ -240,63 +270,13 @@ func (s *Server) handleSetupInstall(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, err.Error())
 		return
 	}
-	if in.Tool != "claude" && in.Tool != "codex" && in.Tool != "git" {
-		writeErr(w, 400, "不支持的工具")
-		return
-	}
-	cmd, err := installCommand(in.Tool)
+	job, status, err := s.startSetupInstall(in.Tool, "", "", r.Context().Err)
 	if err != nil {
-		writeErr(w, 400, err.Error())
+		writeErr(w, status, err.Error())
 		return
 	}
-	setupState.mu.Lock()
-	if setupState.job != nil && setupState.job.State == "running" {
-		setupState.mu.Unlock()
-		writeErr(w, 409, "正在安装其他工具，请等它完成")
-		return
-	}
-	job := &setupJob{ID: config.RandomToken(6), Tool: in.Tool, State: "running", Started: time.Now().UnixMilli()}
-	setupState.job = job
-	setupState.buf.Reset()
-	setupState.mu.Unlock()
-
-	agents.PrepareChild(cmd)
-	cmd.Stdout, cmd.Stderr = jobWriter{setupState}, jobWriter{setupState}
-	cmd.Env = append(os.Environ(), "CI=1", "NO_COLOR=1")
-	if err := cmd.Start(); err != nil {
-		setupState.mu.Lock()
-		job.State, job.Error, job.Finished = "failed", "无法启动安装程序："+err.Error(), time.Now().UnixMilli()
-		setupState.mu.Unlock()
-		writeErr(w, 500, job.Error)
-		return
-	}
-	s.log.Printf("setup: installing %s", in.Tool)
-	go func() {
-		done := make(chan error, 1)
-		go func() { done <- cmd.Wait() }()
-		var err error
-		select {
-		case err = <-done:
-		case <-time.After(15 * time.Minute):
-			_ = cmd.Process.Kill()
-			err = errors.New("安装超时")
-		}
-		setupState.mu.Lock()
-		job.Finished = time.Now().UnixMilli()
-		if err != nil {
-			job.State, job.Error = "failed", err.Error()
-		} else {
-			job.State = "done"
-		}
-		setupState.mu.Unlock()
-		if s.d.Local != nil {
-			s.d.Local.InvalidateInventory()
-		}
-		s.log.Printf("setup: %s finished state=%s", in.Tool, job.State)
-	}()
 	writeJSON(w, map[string]any{"ok": true, "job": job})
 }
-
 func (s *Server) handleSetupJob(w http.ResponseWriter, r *http.Request) {
 	setupState.mu.Lock()
 	defer setupState.mu.Unlock()

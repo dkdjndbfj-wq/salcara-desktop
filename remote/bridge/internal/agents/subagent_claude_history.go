@@ -91,7 +91,7 @@ func (h *claudeHistory) childTranscriptEvents(parentPath string, info protocol.S
 			if partial {
 				evs = append(evs, protocol.Event{SessionKey: info.SessionKey, Tool: "claude", Type: "notice", ParentID: taskID, TS: st.ModTime().UnixMilli(), Level: "info", Text: "仅显示子任务最近的记录"})
 			}
-			readLines(io.LimitReader(f, limit), func(line []byte) bool {
+			readLinesAt(io.LimitReader(f, limit), off, func(line []byte, offset int64) bool {
 				if partial {
 					partial = false
 					return true
@@ -100,6 +100,7 @@ func (h *claudeHistory) childTranscriptEvents(parentPath string, info protocol.S
 				if json.Unmarshal(line, &l) != nil {
 					return true
 				}
+				setClaudePeerHistoryID(&l, info.SessionKey+"\x00"+taskID, path, offset, line)
 				l.IsSidechain = false // this verified file is already scoped to its real parent task
 				evs = append(evs, mapper.entry(&l)...)
 				if len(evs) > 4*maxHistoryEvents {

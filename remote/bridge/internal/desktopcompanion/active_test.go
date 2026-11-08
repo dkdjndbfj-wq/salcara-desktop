@@ -35,8 +35,11 @@ type activeFixture struct {
 	calls             []map[string]any
 	server            *httptest.Server
 	result            func(map[string]any) any
+	statusHook        func()
 	capabilities      *NativeCapabilities
 	approvalTransport string
+	modelTransport    string
+	modelOptions      *NativeModelSupport
 	gatewayFailure    string
 	legacyReadLimit   bool
 }
@@ -66,12 +69,21 @@ func gatewayFixture(t *testing.T) *activeFixture {
 		f.mu.Unlock()
 		var result any
 		if cmd["type"] == "status" {
+			if f.statusHook != nil {
+				f.statusHook()
+			}
 			result = map[string]any{"desktopControl": true, "remoteSend": true, "expiresAt": f.descriptor.ExpiresAt, "controllerThreadId": f.descriptor.ControllerThreadID, "sessionKeys": f.descriptor.SessionKeys}
 			if f.capabilities != nil {
 				result.(map[string]any)["capabilities"] = f.capabilities
 			}
 			if f.approvalTransport != "" {
 				result.(map[string]any)["approvalTransport"] = f.approvalTransport
+			}
+			if f.modelTransport != "" {
+				result.(map[string]any)["modelOverrideTransport"] = f.modelTransport
+			}
+			if f.modelOptions != nil {
+				result.(map[string]any)["modelOptions"] = f.modelOptions
 			}
 		} else if f.gatewayFailure != "" || cmd["type"] == "read" && f.legacyReadLimit && cmd["limit"] != nil {
 			w.WriteHeader(http.StatusBadRequest)
@@ -408,7 +420,7 @@ func TestNativeChildLinksRequireActualIDsWithinApprovedScope(t *testing.T) {
 	for name, value := range map[string]any{"type": "collabAgentToolCall", "id": "spawn", "agentPath": "/root/fake", "receiverThreadIds": []string{otherID, targetID, "not-a-uuid"}, "agentsStates": map[string]any{controllerID: map[string]any{"status": "completed"}, otherID: map[string]any{"status": "running"}}} {
 		item[name], _ = json.Marshal(value)
 	}
-	r := nativeRead{Turns: []nativeTurn{{ID: "t", Items: []map[string]json.RawMessage{item}}}}
+	r := nativeRead{Turns: []nativeTurn{{ID: "t", Status: "completed", Items: []map[string]json.RawMessage{item}}}}
 	events := nativeEvents(key, r, []string{key, "codex:" + otherID})
 	if len(events) != 2 || len(events[0].ChildSessionKeys) != 1 || events[0].ChildSessionKeys[0] != "codex:"+otherID {
 		t.Fatal("invented or unauthorized child links", events)
@@ -416,6 +428,65 @@ func TestNativeChildLinksRequireActualIDsWithinApprovedScope(t *testing.T) {
 	withoutScope := nativeEvents(key, r)
 	if len(withoutScope[0].ChildSessionKeys) != 0 {
 		t.Fatal("expanded authorization from model-supplied child IDs")
+	}
+}
+
+func TestNativeDescriptorFromBeforeCompanionStartIsNotAdopted(t *testing.T) {
+	f := gatewayFixture(t)
+	// The descriptor belongs to the previous companion process. Make the
+	// ordering unambiguous even on filesystems with coarse timestamp precision.
+	if err := os.Chtimes(f.path, time.Now().Add(-time.Second), time.Now().Add(-time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	restarted := New(f.o)
+	if _, err := restarted.NativeStatus(context.Background()); !errors.Is(err, ErrActivationRequired) {
+		t.Fatalf("stale native activation was adopted: %v", err)
+	}
+	if f.count() != 0 {
+		t.Fatal("stale descriptor contacted the gateway")
+	}
+}
+
+func TestNativeActivationBindsToSelectedSourceAndRequiresRenewalOnChange(t *testing.T) {
+	f := gatewayFixture(t)
+	selected := "provider-a/account-a"
+	f.service.o.NativeSourceIdentity = func() string { return selected }
+	if _, err := f.service.NativeStatus(context.Background()); err != nil {
+		t.Fatal("initial source was not accepted", err)
+	}
+	selected = "provider-b/account-b"
+	if _, err := f.service.NativeStatus(context.Background()); !errors.Is(err, ErrActivationRequired) {
+		t.Fatal("source switch reused the old activation", err)
+	}
+
+	// A renewed descriptor/token is required before the new source can be
+	// adopted. This models Codex re-authorizing after Salcara changes API.
+	f.descriptor.Token = strings.Repeat("b", 64)
+	f.write(t)
+	if _, err := f.service.NativeStatus(context.Background()); err != nil {
+		t.Fatal("renewed activation was not accepted", err)
+	}
+	selected = "provider-c/account-c"
+	if _, err := f.service.NativeStatus(context.Background()); !errors.Is(err, ErrActivationRequired) {
+		t.Fatal("third source reused the renewed activation", err)
+	}
+}
+
+func TestNativeActivationTokenRenewalKeepsSourceBinding(t *testing.T) {
+	f := gatewayFixture(t)
+	selected := "relay/account-a"
+	f.service.o.NativeSourceIdentity = func() string { return selected }
+	if _, err := f.service.NativeStatus(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	f.descriptor.Token = strings.Repeat("c", 64)
+	f.write(t)
+	if _, err := f.service.NativeStatus(context.Background()); err != nil {
+		t.Fatal("token renewal failed", err)
+	}
+	selected = "relay/account-b"
+	if _, err := f.service.NativeStatus(context.Background()); !errors.Is(err, ErrActivationRequired) {
+		t.Fatal("renewed token was not bound to the selected source", err)
 	}
 }
 

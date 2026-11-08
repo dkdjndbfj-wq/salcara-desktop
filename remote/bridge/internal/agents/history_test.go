@@ -66,7 +66,7 @@ func TestClaudeHistory(t *testing.T) {
 	}
 	s := list[0]
 	if s.Title != "把按钮改成蓝色" || s.Client != "Claude Desktop" || s.Cwd != "/work/site" || s.Model != "claude-opus-5-5" ||
-		s.Status != "idle" || !s.Controllable {
+		s.Status != "unknown" || s.Controllable {
 		t.Fatalf("info %+v", s)
 	}
 	_, evs, err := cl.Open(context.Background(), id)
@@ -94,7 +94,7 @@ func TestClaudeHistory(t *testing.T) {
 	if list[0].Status != "running" || list[0].Controllable {
 		t.Fatalf("external running %+v", list[0])
 	}
-	if err := cl.Send(context.Background(), id, "hi"); err == nil || err.Error() != errExternalRunning {
+	if err := cl.Send(context.Background(), id, "hi"); err == nil || protocol.ExecutionErrorCode(err) != "external_session_state_unknown" {
 		t.Fatalf("send to external running session: %v", err)
 	}
 }

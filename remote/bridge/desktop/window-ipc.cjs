@@ -11,7 +11,7 @@ function fromMain(event, win, consoleURL) {
 }
 
 function registerWindowIpc({ ipcMain, dialog, getWindow, consoleURL, fromSplash, hide, hideSplash, path, closeUpdate = () => false }) {
-  let choosing = null;
+  let choosing = null, choosingPlugin = null;
   ipcMain.on('win:minimize', event => {
     const win = getWindow();
     if ((fromMain(event, win, consoleURL) || fromSplash(event)) && win && !win.isDestroyed()) win.minimize();
@@ -30,6 +30,15 @@ function registerWindowIpc({ ipcMain, dialog, getWindow, consoleURL, fromSplash,
         .then(result => result.canceled ? null : result.filePaths[0] || null).finally(() => { choosing = null; });
     }
     return choosing;
+  });
+  ipcMain.handle('win:choose-plugin-directory', async event => {
+    const win = getWindow();
+    if (!fromMain(event, win, consoleURL)) throw new Error('不允许从此页面选择插件文件夹');
+    if (!choosingPlugin) {
+      choosingPlugin = dialog.showOpenDialog(win, { title: '选择插件文件夹', properties: ['openDirectory'] })
+        .then(result => result.canceled ? null : result.filePaths[0] || null).finally(() => { choosingPlugin = null; });
+    }
+    return choosingPlugin;
   });
 }
 

@@ -4,7 +4,7 @@
 
 2026-09-30，Windows x64。本文描述当前源码，不是生产上线或原生桌面端到端验收报告。
 
-v1.4.0：新增 companion v0.2 的活动授权实验通道。原生发送不再永久关闭，但只有用户在原 Codex 明确批准 salcara_desktop_connect 且本机验证成功才开放；最多 20 个原会话 / 10 分钟，不含控制对话。完整步骤与按需网络边界见 [TRIAL-v1.4.0.md](TRIAL-v1.4.0.md)。以下旧只读 probe 说明不能代替 connect 授权。
+v1.4.0：新增 companion v0.2 的活动授权实验通道。原生发送不再永久关闭，但只有用户在原 Codex 明确批准 salcara_desktop_connect 且本机验证成功才开放；最多 20 个原会话 / 10 分钟，不含控制对话。旧版试用流程已清理；组件安装与授权边界见[桌面连接组件说明](../../desktop-companion/README.md)。以下旧只读 probe 说明不能代替 connect 授权。
 
 ## 已实现与未实现
 

@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -146,6 +147,98 @@ func TestLocalCRUDWorksWithoutRemoteAndSurvivesRestart(t *testing.T) {
 	}
 }
 
+func TestLocalAccountRemoteBindingDefaultsToCurrentStationAndCanBeDisabled(t *testing.T) {
+	s, h := newTestServer(t)
+	if err := s.d.Store.Update(func(c *config.Config) error {
+		c.ConnectRemote("https://one.example", "https://one.example/salcara-hub")
+		c.ConnectRemote("https://two.example", "https://two.example/salcara-hub")
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	id := createLocal(t, s, h, "api", "current-only", "fixture-key-one", "https://provider.test")
+	account, _ := s.d.Store.Get().LocalAccount(id)
+	if !account.RemoteHubBindingsSet || !reflect.DeepEqual(account.RemoteHubURLs, []string{"https://two.example/salcara-hub"}) {
+		t.Fatalf("new API was not scoped to the current saved station: %+v", account)
+	}
+
+	w := localRequest(s, h, "POST", "/api/local/accounts", map[string]any{
+		"id": id, "name": "current-only", "kind": "api", "baseUrl": "https://provider.test", "key": "",
+		"remoteHubBindingsSet": true, "remoteHubUrls": []string{},
+	})
+	if w.Code != http.StatusOK {
+		t.Fatalf("disable remote binding: %d %s", w.Code, w.Body)
+	}
+	account, _ = s.d.Store.Get().LocalAccount(id)
+	if !account.RemoteHubBindingsSet || len(account.RemoteHubURLs) != 0 || s.d.Store.Get().RemoteHubAllowsAccount("https://two.example/salcara-hub", account) {
+		t.Fatal("explicitly disabled API remained available to a Hub")
+	}
+
+	w = localRequest(s, h, "POST", "/api/local/accounts", map[string]any{
+		"id": id, "name": "current-only", "kind": "api", "baseUrl": "https://provider.test", "key": "",
+		"remoteHubBindingsSet": true, "remoteHubUrls": []string{"https://unregistered.example/salcara-hub"},
+	})
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("accepted an unregistered station binding: %d %s", w.Code, w.Body)
+	}
+	account, _ = s.d.Store.Get().LocalAccount(id)
+	if len(account.RemoteHubURLs) != 0 {
+		t.Fatal("rejected binding partially changed the saved API")
+	}
+}
+
+func TestLocalEditPreservesPoolAndProviderMetadataFromOlderUI(t *testing.T) {
+	s, h := newTestServer(t)
+	id := createLocal(t, s, h, "api", "反代 GPT", "private-pool-key", "https://proxy.test/v1")
+	if err := s.d.Store.Update(func(c *config.Config) error {
+		for i := range c.LocalAccounts {
+			if c.LocalAccounts[i].ID == id {
+				c.LocalAccounts[i].SourceType = "reverse_proxy"
+				c.LocalAccounts[i].ProviderID = "provider-gpt"
+				c.LocalAccounts[i].PoolEnabled = true
+				c.LocalAccounts[i].PoolGroup = "gpt-pool"
+				c.LocalAccounts[i].PoolStrategy = "custom"
+				c.LocalAccounts[i].PoolBackup = true
+				c.LocalAccounts[i].Priority = 7
+				c.LocalAccounts[i].ModelAllowlist = []string{"gpt-5"}
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// This body matches the older UI and omits all newer pool/card fields.
+	w := localRequest(s, h, "POST", "/api/local/accounts", map[string]any{"id": id, "name": "反代 GPT 改名", "kind": "api", "baseUrl": "https://proxy.test", "key": "", "model": "gpt-5"})
+	if w.Code != 200 {
+		t.Fatal(w.Body)
+	}
+	a, _ := s.d.Store.Get().LocalAccount(id)
+	if a.SourceType != "reverse_proxy" || a.ProviderID != "provider-gpt" || !a.PoolEnabled || a.PoolGroup != "gpt-pool" || a.PoolStrategy != "custom" || !a.PoolBackup || a.Priority != 7 || len(a.ModelAllowlist) != 1 {
+		t.Fatalf("metadata was cleared by legacy edit: %+v", a)
+	}
+}
+
+func TestLegacyDefaultApplyCannotBypassGatewayLease(t *testing.T) {
+	s, h := newTestServer(t)
+	id := createLocal(t, s, h, "codex", "受保护反代", "upstream-secret", "https://proxy.test/v1")
+	if err := s.d.Store.Update(func(c *config.Config) error {
+		for i := range c.LocalAccounts {
+			if c.LocalAccounts[i].ID == id {
+				c.LocalAccounts[i].SourceType = "reverse_proxy"
+				c.LocalAccounts[i].Model = "gpt-5"
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	w := localRequest(s, h, "POST", "/api/local/default", map[string]any{"id": id, "action": "apply"})
+	if w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), "不会把反代或官方账号凭据直接写入原工具") {
+		t.Fatalf("legacy default route bypassed gateway protection: %d %s", w.Code, w.Body)
+	}
+}
+
 func TestLocalLaunchUsesSelectedKeyAndProfile(t *testing.T) {
 	s, h := newTestServer(t)
 	exe := filepath.Join(t.TempDir(), "codex.exe")
@@ -197,6 +290,37 @@ func TestLocalLaunchUsesSelectedKeyAndProfile(t *testing.T) {
 	}
 }
 
+func TestIndependentLaunchCannotBypassGatewayLease(t *testing.T) {
+	for _, source := range []string{"reverse_proxy", "oauth", "official_account"} {
+		t.Run(source, func(t *testing.T) {
+			s, h := newTestServer(t)
+			id := createLocal(t, s, h, "codex", "protected", "synthetic-upstream-secret", "https://proxy.test/v1")
+			if err := s.d.Store.Update(func(c *config.Config) error {
+				for i := range c.LocalAccounts {
+					if c.LocalAccounts[i].ID == id {
+						c.LocalAccounts[i].SourceType = source
+						c.LocalAccounts[i].Model = "gpt-fixture"
+					}
+				}
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+			s.d.Local.Start = func(context.Context, launcher.Plan) (int, error) {
+				t.Fatal("protected source was launched with raw credentials")
+				return 0, nil
+			}
+			w := localRequest(s, h, "POST", "/api/local/launch", map[string]string{"id": id, "target": "codex"})
+			if w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), "独立实例不会直接写入") || strings.Contains(w.Body.String(), "synthetic-upstream-secret") {
+				t.Fatalf("independent launch bypassed runtime lease: %d %s", w.Code, w.Body)
+			}
+			if rows, err := os.ReadDir(filepath.Join(s.d.Local.Dir, "profiles")); err == nil && len(rows) != 0 {
+				t.Fatal("rejected launch wrote a profile")
+			}
+		})
+	}
+}
+
 func TestLocalModelsDoesNotReplaceSavedModelAndHandlesFailure(t *testing.T) {
 	s, h := newTestServer(t)
 	fail := false
@@ -229,6 +353,50 @@ func TestLocalModelsDoesNotReplaceSavedModelAndHandlesFailure(t *testing.T) {
 	a, _ = s.d.Store.Get().LocalAccount(id)
 	if a.Model != "coding-model" || len(a.Models) != 2 {
 		t.Fatal("failed probe changed account")
+	}
+}
+
+func TestLocalModelsProbeAppliesSavedModelPolicy(t *testing.T) {
+	s, h := newTestServer(t)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"data":[{"id":"allowed-model"},{"id":"blocked-model"},{"id":"unlisted-model"}]}`))
+	}))
+	defer upstream.Close()
+	id := createLocal(t, s, h, "codex", "policy", "model-private-key", upstream.URL+"/gateway/v1")
+	if err := s.d.Store.Update(func(c *config.Config) error {
+		for i := range c.LocalAccounts {
+			if c.LocalAccounts[i].ID == id {
+				c.LocalAccounts[i].ModelAllowlist = []string{"allowed-model", "blocked-model"}
+				c.LocalAccounts[i].ModelDenylist = []string{"blocked-model"}
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	w := localRequest(s, h, "POST", "/api/local/models", map[string]string{"id": id})
+	if w.Code != 200 {
+		t.Fatalf("model probe failed: %d %s", w.Code, w.Body)
+	}
+	a, _ := s.d.Store.Get().LocalAccount(id)
+	if !reflect.DeepEqual(a.Models, []string{"allowed-model"}) {
+		t.Fatalf("saved model policy was not applied: %v", a.Models)
+	}
+}
+
+func TestLocalAccountModelDirectoryCanBeEdited(t *testing.T) {
+	s, h := newTestServer(t)
+	id := createLocal(t, s, h, "api", "editable", "model-private-key", "https://provider.test/v1")
+	w := localRequest(s, h, "POST", "/api/local/accounts", map[string]any{
+		"id": id, "name": "editable", "kind": "api", "baseUrl": "https://provider.test/v1",
+		"model": "gpt-fixture", "models": []string{"gpt-fixture", "claude-fixture", "gpt-fixture"},
+	})
+	if w.Code != 200 {
+		t.Fatalf("manual model edit failed: %d %s", w.Code, w.Body)
+	}
+	a, ok := s.d.Store.Get().LocalAccount(id)
+	if !ok || !reflect.DeepEqual(a.Models, []string{"gpt-fixture", "claude-fixture"}) {
+		t.Fatalf("manual model directory was not persisted: %#v", a.Models)
 	}
 }
 

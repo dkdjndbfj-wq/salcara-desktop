@@ -12,6 +12,7 @@ import (
 
 	"salcara/bridge/internal/config"
 	"salcara/bridge/internal/launcher"
+	"salcara/bridge/internal/protocol"
 )
 
 func statusFixture(t *testing.T, cfg config.Config) *Client {
@@ -111,6 +112,9 @@ func TestAgentsStatusInstallationNeverEnablesDesktopControl(t *testing.T) {
 	for _, s := range list {
 		if s.ID == "claude-desktop" {
 			// Claude Desktop's Code sessions continue through the Claude Code CLI.
+			if s.Execution == nil || *s.Execution != (agentExecution{Tool: "claude", ControlSurface: "cli", Entrypoint: "claude-desktop"}) {
+				t.Fatalf("Desktop Code execution surface is not explicit: %+v", s)
+			}
 			continue
 		}
 		if s.ControlSurface == "desktop" && (!s.Available || s.RemoteSendSupported) {
@@ -228,9 +232,17 @@ func TestAgentsStatusAppliedMetadataContainsOnlyTheFiniteContract(t *testing.T) 
 		t.Fatal(err)
 	}
 	for _, obj := range decoded {
-		expectedFields := 8
-		if string(obj["id"]) == `"claude-desktop"` {
+		// capabilities is the normalized adapter contract; it is public metadata
+		// and contains no provider credentials or executable paths.
+		expectedFields := 9
+		if string(obj["id"]) == `"claude"` || string(obj["id"]) == `"claude-desktop"` {
 			expectedFields++
+			if string(obj["apiFamily"]) != `"claude"` {
+				t.Fatal("Claude Code and Desktop must advertise their shared API family")
+			}
+		}
+		if string(obj["id"]) == `"claude-desktop"` {
+			expectedFields += 2
 			if string(obj["sessionScope"]) != `"code"` {
 				t.Fatal("Claude Desktop scope must be explicit Code only")
 			}
@@ -252,11 +264,16 @@ func TestAgentsStatusAppliedMetadataContainsOnlyTheFiniteContract(t *testing.T) 
 func TestRemoteAPIOptionCarriesOnlyAnUnambiguousSavedStation(t *testing.T) {
 	cfg := config.Config{
 		ComputerID:    "physical-pc",
-		LocalAccounts: []config.LocalAccount{{ID: "api-b", Name: "B", Kind: "api", BaseURL: "https://b.example/v1", Key: "private-key"}},
+		LocalAccounts: []config.LocalAccount{{ID: "api-b", Name: "B", Kind: "api", SourceType: "api_key", BaseURL: "https://b.example/v1", Key: "private-key"}},
 		RemoteConnections: []config.RemoteConnection{
 			{HubURL: "https://a.example/salcara-hub", DeviceID: "a-device", DeviceSecret: "a-secret"},
 			{HubURL: "https://b.example/salcara-hub", DeviceID: "b-device", DeviceSecret: "b-secret"},
 		},
+	}
+	for i := range cfg.RemoteConnections {
+		if i == 1 {
+			cfg.RemoteConnections[i].RemoteSupport = &config.StationObservation{Mode: "open", Revision: "r1", CheckedAt: time.Now().UnixMilli(), Station: &protocol.StationPolicy{Version: 1, APIBases: []string{"https://b.example"}}}
+		}
 	}
 	result, err := statusFixture(t, cfg).Dispatch(context.Background(), map[string]any{"type": "agents.status"})
 	if err != nil {
@@ -268,6 +285,7 @@ func TestRemoteAPIOptionCarriesOnlyAnUnambiguousSavedStation(t *testing.T) {
 	}
 	// Same-origin stations are ambiguous and must not make the phone guess.
 	cfg.RemoteConnections = append(cfg.RemoteConnections, config.RemoteConnection{HubURL: "https://b.example/another-hub", DeviceID: "b-device-2", DeviceSecret: "b-secret-2"})
+	cfg.RemoteConnections[2].RemoteSupport = config.CloneStationObservation(cfg.RemoteConnections[1].RemoteSupport)
 	result, err = statusFixture(t, cfg).Dispatch(context.Background(), map[string]any{"type": "agents.status"})
 	if err != nil {
 		t.Fatal(err)

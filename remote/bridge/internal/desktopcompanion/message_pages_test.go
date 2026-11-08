@@ -16,7 +16,7 @@ func TestNativeMessagePagesPreserveUnreadPartOfTurnAndItsTools(t *testing.T) {
 		if cmd["cursor"] != nil {
 			t.Error("advanced host cursor before exhausting one turn")
 		}
-		return nativeEnvelope(map[string]any{"schemaVersion": 1, "thread": map[string]any{"id": targetID, "kind": "codex", "hostId": "local"}, "turns": []any{map[string]any{"id": "turn-original", "items": items}}})
+		return nativeEnvelope(map[string]any{"schemaVersion": 1, "thread": map[string]any{"id": targetID, "kind": "codex", "hostId": "local"}, "turns": []any{map[string]any{"id": "turn-original", "status": "completed", "items": items}}})
 	}
 	seen := map[string]bool{}
 	cursor := ""
@@ -71,7 +71,7 @@ func TestNativeLargeToolTurnHasContinuationInsteadOfSilentlyLosingItems(t *testi
 		items = append(items, map[string]any{"id": fmt.Sprint("t", i), "type": "commandExecution", "command": "fixture"})
 	}
 	f.result = func(map[string]any) any {
-		return nativeEnvelope(map[string]any{"schemaVersion": 1, "thread": map[string]any{"id": targetID, "kind": "codex", "hostId": "local"}, "turns": []any{map[string]any{"id": "turn", "items": items}}})
+		return nativeEnvelope(map[string]any{"schemaVersion": 1, "thread": map[string]any{"id": targetID, "kind": "codex", "hostId": "local"}, "turns": []any{map[string]any{"id": "turn", "status": "completed", "items": items}}})
 	}
 	_, first, cursor, err := f.service.NativeOpenMessagesPage(context.Background(), "codex:"+targetID, "", 2)
 	if err != nil || len(first) != 400 || cursor == "" {

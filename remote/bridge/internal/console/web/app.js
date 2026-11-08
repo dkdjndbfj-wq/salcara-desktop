@@ -6,40 +6,57 @@ const $$ = (s, el = document) => Array.from(el.querySelectorAll(s));
 const esc = (v) => String(v ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
 const ICONS = {
-  spark: '<path d="M10.5 6Q11.4 12.6 18 13.5Q11.4 14.4 10.5 21Q9.6 14.4 3 13.5Q9.6 12.6 10.5 6Z"/><path d="M18.75 3.5v3.5M17 5.25h3.5"/>',
-  home: '<path d="M4 10.2 12 4l8 6.2V19a1 1 0 0 1-1 1h-4.5v-5.5h-5V20H5a1 1 0 0 1-1-1z"/>',
-  key: '<circle cx="8.5" cy="15.5" r="4.5"/><path d="M11.7 12.3 20 4M16.5 7.5l2.5 2.5M14.2 9.8l1.8 1.8"/>',
-  plug: '<path d="M9 2v5M15 2v5M6 7h12v4a6 6 0 0 1-12 0zM12 17v5"/>',
-  folder: '<path d="M3 6.5A1.5 1.5 0 0 1 4.5 5H9l2 2.5h8.5A1.5 1.5 0 0 1 21 9v9.5a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 18.5z"/>',
-  chat: '<path d="M4 5h16v11H9l-5 4z"/><path d="M8 9.5h8M8 12.5h5"/>',
-  gear: '<path d="M4 7.5h9M17 7.5h3M4 16.5h3M11 16.5h9"/><circle cx="15" cy="7.5" r="2"/><circle cx="9" cy="16.5" r="2"/>',
-  edit: '<path d="M4 20h4L19 9l-4-4L4 16z"/><path d="m13.5 6.5 4 4"/>',
-  copy: '<rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V5a1 1 0 0 0-1-1H5a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h3"/>',
-  eye: '<path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/>',
-  info: '<circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7.5v.5"/>',
-  warn: '<path d="M12 3 2 20h20z"/><path d="M12 10v5M12 17.5v.5"/>',
-  check: '<circle cx="12" cy="12" r="9"/><path d="m8 12 3 3 5-6"/>',
-  phone: '<rect x="6.5" y="3" width="11" height="18" rx="2.5"/><path d="M10.5 17.5h3"/>',
-  trash: '<path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13"/>',
+  // Salcara icon set v3 (shared with the phone app): 24 grid, 1.75 strokes, line-first.
+  // A few brand icons carry one dot (class "dot"), painted in the brand blue by CSS.
+  spark: '<path d="M12 3.5l1.9 5.1 5.1 1.9-5.1 1.9L12 17.5l-1.9-5.1L5 10.5l5.1-1.9z"/><circle class="dot" cx="18.5" cy="18.5" r="1.6"/>',
+  github: '<path fill="currentColor" stroke="none" d="M12 .75a11.25 11.25 0 0 0-3.56 21.92c.56.1.77-.24.77-.54v-2.1c-3.13.68-3.79-1.33-3.79-1.33-.51-1.3-1.25-1.65-1.25-1.65-1.02-.7.08-.69.08-.69 1.13.08 1.72 1.16 1.72 1.16 1.01 1.72 2.64 1.22 3.28.93.1-.73.4-1.22.71-1.5-2.5-.29-5.13-1.25-5.13-5.56 0-1.23.44-2.23 1.16-3.02-.12-.29-.5-1.43.11-2.98 0 0 .95-.3 3.1 1.16a10.8 10.8 0 0 1 5.63 0c2.15-1.46 3.09-1.16 3.09-1.16.62 1.55.23 2.69.12 2.98.72.79 1.15 1.79 1.15 3.02 0 4.32-2.63 5.27-5.14 5.55.4.35.76 1.04.76 2.1v3.09c0 .3.2.65.77.54A11.25 11.25 0 0 0 12 .75z"/>',
+  star: '<path d="m12 3 2.8 5.7 6.2.9-4.5 4.4 1.1 6.2-5.6-2.9-5.6 2.9 1.1-6.2L3 9.6l6.2-.9z"/>',
+  home: '<path d="M4 10.5 12 4l8 6.5V18a2 2 0 0 1-2 2h-3.5v-5.5h-5V20H6a2 2 0 0 1-2-2z"/>',
+  key: '<circle cx="8.5" cy="15.5" r="4"/><path d="M11.5 12.5 19.5 4.5M16.5 7.5l2.5 2.5"/>',
+  plug: '<path d="M9 3v4.5M15 3v4.5M6.5 7.5h11V11a5.5 5.5 0 0 1-11 0zM12 16.5V21"/>',
+  folder: '<path d="M3.5 7.5a2 2 0 0 1 2-2h4l2 2h7a2 2 0 0 1 2 2v7.5a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z"/>',
+  chat: '<path d="M7.5 4h9A3.5 3.5 0 0 1 20 7.5v5a3.5 3.5 0 0 1-3.5 3.5H12l-4.5 3.5V16A3.5 3.5 0 0 1 4 12.5v-5A3.5 3.5 0 0 1 7.5 4z"/>',
+  gear: '<path d="M4 8h8.5M18.5 8H20M4 16h1.5M11.5 16H20"/><circle cx="15.5" cy="8" r="2.5"/><circle cx="8.5" cy="16" r="2.5"/>',
+  edit: '<path d="M4.5 19.5l.9-3.9L15.6 5.4a2 2 0 0 1 2.8 0l.2.2a2 2 0 0 1 0 2.8L8.4 18.6z"/><path d="m14.2 6.8 3 3"/>',
+  copy: '<path d="M11 9h7a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2h-7a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2z"/><path d="M15 5.5A1.5 1.5 0 0 0 13.5 4H6a2 2 0 0 0-2 2v7.5A1.5 1.5 0 0 0 5.5 15"/>',
+  eye: '<path d="M2.8 12c1.9-4 5.2-6.5 9.2-6.5s7.3 2.5 9.2 6.5c-1.9 4-5.2 6.5-9.2 6.5S4.7 16 2.8 12z"/><circle cx="12" cy="12" r="2.9"/>',
+  info: '<circle cx="12" cy="12" r="8.5"/><path d="M12 11v5"/><circle cx="12" cy="7.8" r=".6"/>',
+  warn: '<path d="M10.3 4.6 3.4 17a2 2 0 0 0 1.7 3h13.8a2 2 0 0 0 1.7-3L13.7 4.6a2 2 0 0 0-3.4 0z"/><path d="M12 10v4.5M12 17.2v.3"/>',
+  check: '<circle cx="12" cy="12" r="8.5"/><path d="m8.3 12.3 2.5 2.5 4.9-5"/>',
+  phone: '<rect x="6.5" y="3" width="11" height="18" rx="3"/><path d="M10.5 17.5h3"/>',
+  trash: '<path d="M4.5 6.5h15M9.5 6.5V5A1.5 1.5 0 0 1 11 3.5h2A1.5 1.5 0 0 1 14.5 5v1.5M6.5 6.5l.8 11.6a2.2 2.2 0 0 0 2.2 2.1h5a2.2 2.2 0 0 0 2.2-2.1l.8-11.6"/>',
   plus: '<path d="M12 5v14M5 12h14"/>',
-  download: '<path d="M12 4v11M7.5 10.5 12 15l4.5-4.5"/><path d="M5 19.5h14"/>',
-  refresh: '<path d="M20 11a8 8 0 0 0-14.6-4.5L4 8M4 4v4h4M4 13a8 8 0 0 0 14.6 4.5L20 16M20 20v-4h-4"/>',
-  chev: '<path d="m9 6 6 6-6 6"/>',
-  up: '<path d="M12 19V5M6 11l6-6 6 6"/>',
-  terminal: '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="m7 9 3 3-3 3M13 15h4"/>',
-  file: '<path d="M6 3h8l5 5v13H6z"/><path d="M14 3v5h5"/>',
-  search: '<circle cx="11" cy="11" r="6"/><path d="m20 20-4.5-4.5"/>',
-  globe: '<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/>',
-  box: '<path d="M12 3.2 19.8 7.6v8.8L12 20.8l-7.8-4.4V7.6z"/><path d="M4.2 7.6 12 12l7.8-4.4M12 12v8.8"/>',
-  stop: '<rect x="6" y="6" width="12" height="12" rx="2"/>',
-  send: '<path d="M4 12 20 4l-6 16-3-7z"/>',
-  power: '<path d="M12 3v9"/><path d="M6.3 7.5a8 8 0 1 0 11.4 0"/>',
-  wallet: '<rect x="3" y="6" width="18" height="14" rx="2"/><path d="M16 13h2M3 10h18M6 6l9-3 1 3"/>',
-  bolt: '<path d="M13 2 4 14h7l-1 8 9-12h-7z"/>',
-  clock: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
-  chart: '<path d="M4 19.5h16"/><path d="m5 15 4.5-4.5 3.5 3 6-6.5"/><path d="M15.5 7H19v3.5"/>',
+  download: '<path d="M12 4v10M7.5 10 12 14.5 16.5 10"/><path d="M5 16.5v1A2.5 2.5 0 0 0 7.5 20h9a2.5 2.5 0 0 0 2.5-2.5v-1"/>',
+  refresh: '<path d="M19.5 12a7.5 7.5 0 1 1-2.2-5.3"/><path d="M19.5 4v4h-4"/>',
+  chev: '<path d="M9.5 5.5 16 12l-6.5 6.5"/>',
+  up: '<path d="M12 19V6M6.5 11.5 12 6l5.5 5.5"/>',
+  terminal: '<path d="M6.5 4.5h11a3 3 0 0 1 3 3v9a3 3 0 0 1-3 3h-11a3 3 0 0 1-3-3v-9a3 3 0 0 1 3-3z"/><path d="m7.5 10 2.5 2.5L7.5 15M13 15h3.5"/>',
+  file: '<path d="M7 3.5h6l5 5v9.5a2.5 2.5 0 0 1-2.5 2.5h-8.5A2.5 2.5 0 0 1 4.5 18V6A2.5 2.5 0 0 1 7 3.5z"/><path d="M13 3.5V8h5M8.5 13h7M8.5 16.5h4"/>',
+  search: '<path d="M17 10.5A6.5 6.5 0 1 1 10.5 4"/><path d="m15.5 15.5 4.5 4.5"/><circle class="dot" cx="15.6" cy="5.4" r="1.5"/>',
+  globe: '<circle cx="12" cy="12" r="8.5"/><path d="M3.5 12h17M12 3.5c2.4 2.4 3.5 5.2 3.5 8.5s-1.1 6.1-3.5 8.5c-2.4-2.4-3.5-5.2-3.5-8.5S9.6 5.9 12 3.5z"/>',
+  box: '<path d="M12 3.5 19.5 7.7v8.6L12 20.5l-7.5-4.2V7.7z"/><path d="M4.5 7.7 12 12l7.5-4.3M12 12v8.5"/>',
+  stop: '<rect x="6.5" y="6.5" width="11" height="11" rx="2.5"/>',
+  send: '<path d="M12 19V6M6.5 11.5 12 6l5.5 5.5"/>',
+  power: '<path d="M12 3.5v8"/><path d="M6.6 7.4a7.5 7.5 0 1 0 10.8 0"/>',
+  wallet: '<path d="M4 7.5A2.5 2.5 0 0 1 6.5 5h11A2.5 2.5 0 0 1 20 7.5v9a2.5 2.5 0 0 1-2.5 2.5h-11A2.5 2.5 0 0 1 4 16.5z"/><path d="M15.5 12h1.5M4 9.5h16"/>',
+  bolt: '<path d="M13.2 3.5 5.8 13.2h5.9l-1 7.3 7.5-9.8h-6z"/>',
+  clock: '<circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/>',
+  chart: '<path d="M4 19.5h16"/><path d="m5 15 4.5-4.5 3.5 3 6-6.5"/><circle class="dot" cx="19" cy="7" r="1.5"/>',
+  mcp: '<circle cx="6" cy="12" r="2.3"/><circle cx="18" cy="6" r="2.3"/><circle cx="18" cy="18" r="2.3"/><path d="M8.1 11 15.9 7M8.1 13l7.8 4"/>',
+  puzzle: '<path d="M9 4.5a2 2 0 1 1 4 0v1h3.5A1.5 1.5 0 0 1 18 7v3h1a2 2 0 1 1 0 4h-1v3a1.5 1.5 0 0 1-1.5 1.5H13v-1a2 2 0 1 0-4 0v1H6.5A1.5 1.5 0 0 1 5 17v-3H4a2 2 0 1 1 0-4h1V7a1.5 1.5 0 0 1 1.5-1.5H9z"/>',
+  tag: '<path d="M4 5.5V11l8.5 8.5a1.5 1.5 0 0 0 2.1 0l4.9-4.9a1.5 1.5 0 0 0 0-2.1L11 4H5.5A1.5 1.5 0 0 0 4 5.5z"/><circle class="dot" cx="8.5" cy="8.5" r="1.5"/>',
+  lock: '<path d="M6.5 10.5h11a1.5 1.5 0 0 1 1.5 1.5v6.5a1.5 1.5 0 0 1-1.5 1.5h-11A1.5 1.5 0 0 1 5 18.5V12a1.5 1.5 0 0 1 1.5-1.5zM8.5 10.5V8a3.5 3.5 0 0 1 7 0v2.5"/>',
+  play: '<path d="M8 6.2v11.6a1.2 1.2 0 0 0 1.8 1l9.2-5.8a1.2 1.2 0 0 0 0-2L9.8 5.2A1.2 1.2 0 0 0 8 6.2z"/>',
+  more: '<circle cx="5.5" cy="12" r="1.4" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="1.4" fill="currentColor" stroke="none"/><circle cx="18.5" cy="12" r="1.4" fill="currentColor" stroke="none"/>',
+  close: '<path d="M6.5 6.5l11 11M17.5 6.5l-11 11"/>',
+  upload: '<path d="M12 15V4M7.5 8.5 12 4l4.5 4.5M5 15v2.5A2.5 2.5 0 0 0 7.5 20h9a2.5 2.5 0 0 0 2.5-2.5V15"/>',
+  branch: '<circle cx="7" cy="5.5" r="2"/><circle cx="7" cy="18.5" r="2"/><circle cx="17" cy="7.5" r="2"/><path d="M7 7.5v9M17 9.5c0 4.5-10 2.5-10 7"/>',
+  image: '<path d="M7 4h10a3 3 0 0 1 3 3v10a3 3 0 0 1-3 3H7a3 3 0 0 1-3-3V7a3 3 0 0 1 3-3zM4 16.5l4.3-4.3a2 2 0 0 1 2.8 0L18 19M14 15l1.6-1.6a2 2 0 0 1 2.8 0l1.6 1.6"/><circle class="dot" cx="15.5" cy="8.5" r="1.6"/>',
+  db: '<path d="M5 7c0-1.7 3.1-3 7-3s7 1.3 7 3-3.1 3-7 3-7-1.3-7-3zM5 7v10c0 1.7 3.1 3 7 3s7-1.3 7-3V7M5 12c0 1.7 3.1 3 7 3s7-1.3 7-3"/>',
+  menu: '<path d="M4 8h11M4 16h16"/><circle class="dot" cx="19.5" cy="8" r="1.6"/>',
+  compose: '<path d="M11 4H7.5A3.5 3.5 0 0 0 4 7.5v9A3.5 3.5 0 0 0 7.5 20h9a3.5 3.5 0 0 0 3.5-3.5V13M10.5 13.5 19 5"/><circle class="dot" cx="9.6" cy="14.4" r="1.5"/>',
 };
-const icon = (n) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">${ICONS[n] || ''}</svg>`;
+const icon = (n) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">${ICONS[n] || ''}</svg>`;
 const ico = (n) => `<span class="ico">${icon(n)}</span>`;
 
 const STATUS = {
@@ -48,7 +65,7 @@ const STATUS = {
   not_logged_in: '本地模式',
   invalid_key: 'Key 无效',
 };
-const TOOL_LABEL = { codex: 'Codex CLI', 'codex-desktop': 'Codex Desktop', claude: 'Claude Code', 'claude-desktop': 'Claude Desktop' };
+const TOOL_LABEL = { codex: 'Codex CLI', 'codex-desktop': 'Codex Desktop', claude: 'Claude Code', 'claude-desktop': 'Claude Desktop', 'deepseek-harness': 'DeepSeek Harness', hermes: 'Hermes Agent' };
 const SESSION_STATUS = { running: '运行中', idle: '空闲', waiting_approval: '等待审批', failed: '失败' };
 
 const S = {
@@ -94,7 +111,7 @@ async function api(path, body, method) {
     const res = await fetch(path, opts);
     let data = null;
     try { data = await res.json(); } catch (error) { if (controller.signal.aborted) throw error; }
-    if (!res.ok) throw new Error((data && data.error) || `请求失败 (${res.status})`);
+    if (!res.ok) throw Object.assign(new Error((data && data.error) || `请求失败 (${res.status})`), { status: res.status, code: typeof data?.code === 'string' ? data.code : undefined });
     if (data === null) throw new Error('本机响应不完整，请重试');
     return data;
   } catch (e) {
@@ -120,16 +137,31 @@ function toast(msg, kind) {
 
 async function copyText(text, what) {
   try {
-    await navigator.clipboard.writeText(text);
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch (_) {
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.readOnly = true;
+      ta.tabIndex = -1;
+      ta.setAttribute('aria-hidden', 'true');
+      ta.style.cssText = 'position:fixed;left:-10000px;top:0;width:1px;height:1px;opacity:0;pointer-events:none';
+      try {
+        document.body.appendChild(ta);
+        ta.select();
+        if (document.execCommand('copy') !== true) throw new Error('copy unavailable');
+      } finally {
+        // A fallback failure must not leave a plaintext key outside its modal.
+        ta.value = '';
+        ta.remove();
+      }
+    }
   } catch (_) {
-    const ta = document.createElement('textarea');
-    ta.value = text;
-    document.body.appendChild(ta);
-    ta.select();
-    document.execCommand('copy');
-    ta.remove();
+    toast('复制失败，请重试或手动复制', 'bad');
+    return false;
   }
   toast(`已复制${what ? ' ' + what : ''}`, 'ok');
+  return true;
 }
 
 function relTime(ms) {
@@ -200,29 +232,42 @@ function renderDiff(d) {
 /* ---------------- shell ---------------- */
 
 const PAGES = {
-  overview: { title: 'Agent', sub: '给每个工具选择 API，原地重启或恢复旧会话；手机远程连接是可选功能' },
-  accounts: { title: 'API 密钥', sub: '每个密钥都可命名，不归属于某个工具；在 Agent 页选择密钥并确认配置' },
-  login: { title: '远程连接（可选）', sub: '输入站点、检测插件、扫码绑定；本地密钥管理与启动不受影响' },
-  tools: { title: '工具配置', sub: '一键把本机的 Claude Code / Codex 接入中转站' },
-  projects: { title: '项目文件夹', sub: '手机只能在这些文件夹里发起任务' },
-  sessions: { title: '会话恢复', sub: '查看原有本地 Codex / Claude Code 记录，恢复同一个会话继续工作' },
-  settings: { title: '设置', sub: '开机自启、审批策略、日志与退出' },
-  usage: { title: '用量', sub: '模型、API 与中转站额度' },
+  overview: { title: 'Agent', sub: '选择 API、重启工具、恢复会话' },
+  accounts: { title: 'API 密钥', sub: '管理密钥，在 Agent 中选择' },
+  login: { title: '远程连接', sub: '扫码绑定手机' },
+  tools: { title: '工具配置', sub: '接入 Claude Code 与 Codex' },
+  projects: { title: '项目文件夹', sub: '手机任务可用的目录' },
+  sessions: { title: '会话恢复', sub: '恢复本地 Codex / Claude Code 会话' },
+  settings: { title: '设置', sub: '启动、审批和日志' },
+  usage: { title: '用量', sub: '模型与 API 用量' },
 };
 
+function connectionPresentation(st) {
+  const config = S.state?.config;
+  const mode = typeof rmEffectiveMode === 'function' ? rmEffectiveMode(config) : config?.effectiveRemoteMode || config?.activeRemoteMode;
+  if (st?.consoleDisconnected) return { state: 'connecting', label: '状态连接中断', title: st.error || '暂时无法读取本机状态' };
+  if (mode === 'direct') {
+    const direct = typeof RM !== 'undefined' ? RM.direct : null;
+    if (direct?.error || direct?.enabled === true && direct.running === false) return { state: 'error', label: '直连待恢复', title: direct.error || '直连监听尚未运行，请在手机远程页查看' };
+    return { state: 'direct', label: direct?.enabled && direct.running ? '直连已启用' : '直连模式', title: '已选择电脑直连；手机是否在线请查看手机远程页。' };
+  }
+  const state = mode === 'none' ? 'not_logged_in' : st?.state || 'not_logged_in';
+  const label = state === 'invalid_key' && config?.remoteDeviceOnly ? '设备验证失败' : STATUS[state] || state;
+  return { state, label: mode === 'bot' ? `Bot · ${state === 'not_logged_in' ? '待连接' : label}` : label, title: mode === 'none' ? '' : st?.error || '' };
+}
+
 function setConn(st) {
-  const s = (st && st.state) || 'not_logged_in';
-  const label = s === 'invalid_key' && S.state?.config?.remoteDeviceOnly ? '设备验证失败' : STATUS[s] || s;
+  const signal = connectionPresentation(st), s = signal.state, label = signal.label;
   const pill = $('#connPill');
   pill.className = 'conn st-' + s;
   $('.conn-label', pill).textContent = label;
-  pill.title = (st && st.error) || '';
+  pill.title = signal.title;
   const hero = $('#heroStatus');
   if (hero) {
     hero.className = 'hero-status st-' + s;
     $('.lbl', hero).textContent = label;
     const er = $('#heroErr');
-    if (er) er.textContent = st && st.error && s !== 'connected' ? st.error : '';
+    if (er) er.textContent = ['error', 'connecting', 'invalid_key'].includes(s) ? signal.title : '';
   }
   if (S.route === 'login') {
     const text = $('#remoteStatusLabel'); if (text) text.textContent = label;
@@ -241,11 +286,15 @@ async function loadState() {
   if (!stateRequest) stateRequest = api('/api/state').finally(() => { stateRequest = null; });
   S.state = await stateRequest;
   setConn(S.state.hub);
-  $('#sideVer').textContent = `v${S.state.version} · ${({ windows: 'Windows', darwin: 'macOS', linux: 'Linux' })[S.state.os] || S.state.os}`;
+  $('#sideVer').textContent = `v${S.state.version}`;
+  $('#sideVer').title = ({ windows: 'Windows', darwin: 'macOS', linux: 'Linux' })[S.state.os] || S.state.os || '';
+  if ($('#sideDevice')) $('#sideDevice').textContent = S.state.config?.deviceName || '';
   return S.state;
 }
 
 async function route() {
+	S.routeRevision = (S.routeRevision || 0) + 1;
+	if (typeof accountDailyDispose === 'function') accountDailyDispose();
   const r = (location.hash || '#overview').slice(1).split('/')[0];
   S.route = PAGES[r] ? r : 'overview';
   $$('#nav a').forEach((a) => a.classList.toggle('active', a.dataset.route === S.route));
@@ -268,43 +317,21 @@ function usageCards(u, err) {
   if (!u) return '';
   const unit = u.unit || 'USD';
   const cards = [];
-  const today = (u.usage && u.usage.today) || {};
-  const total = (u.usage && u.usage.total) || {};
-  if (num(u.remaining) !== null || num(u.balance) !== null) {
+  const today = (u.usage && u.usage.today) || u.today || {};
+  const total = (u.usage && u.usage.total) || u.total || {};
+  const remaining = num(u.remaining) ?? num(u.balance) ?? num(u.quota && u.quota.remaining);
+  if (remaining !== null) {
     cards.push(`<div class="card stat"><div class="stat-label">${ico('wallet')}${esc(u.planName || '剩余额度')}</div>
-      <div class="stat-value">${money(num(u.remaining) ?? u.balance, unit)}</div>
+      <div class="stat-value">${money(remaining, u.quota && num(u.remaining) === null && num(u.balance) === null ? u.quota.unit || unit : unit)}</div>
       <div class="stat-foot">${u.mode === 'quota_limited' ? 'Key 限额模式' : '账户可用'}</div></div>`);
   }
-  if (u.quota && typeof u.quota === 'object') {
-    const p = pct(u.quota.used, u.quota.limit);
-    cards.push(`<div class="card stat"><div class="stat-label">${ico('key')}Key 总额度</div>
-      <div class="stat-value">${money(u.quota.used, u.quota.unit || unit)}<span class="muted small"> / ${money(u.quota.limit, u.quota.unit || unit)}</span></div>${bar(p)}</div>`);
-  }
-  if (today && (today.cost !== undefined || today.requests !== undefined)) {
-    cards.push(`<div class="card stat"><div class="stat-label">${ico('bolt')}今日消费</div>
-      <div class="stat-value">${money(num(today.actual_cost) ?? today.cost, unit)}</div>
-      <div class="stat-foot">${compact(today.requests)} 次请求 · ${compact(today.total_tokens)} tokens</div></div>`);
-  }
-  if (total && (total.cost !== undefined || total.requests !== undefined)) {
-    cards.push(`<div class="card stat"><div class="stat-label">${ico('clock')}累计消费</div>
-      <div class="stat-value">${money(num(total.actual_cost) ?? total.cost, unit)}</div>
-      <div class="stat-foot">${compact(total.requests)} 次请求 · ${compact(total.total_tokens)} tokens</div></div>`);
-  }
-  const sub = u.subscription;
-  if (sub && typeof sub === 'object') {
-    [['daily', '今日'], ['weekly', '本周'], ['monthly', '本月']].forEach(([k, label]) => {
-      const lim = num(sub[k + '_limit_usd']);
-      if (lim) {
-        cards.push(`<div class="card stat"><div class="stat-label">${ico('clock')}订阅 · ${label}</div>
-          <div class="stat-value">${money(sub[k + '_usage_usd'], 'USD')}<span class="muted small"> / ${money(lim, 'USD')}</span></div>${bar(pct(sub[k + '_usage_usd'], lim))}</div>`);
-      }
-    });
-  }
-  if (Array.isArray(u.rate_limits)) {
-    u.rate_limits.forEach((r) => {
-      cards.push(`<div class="card stat"><div class="stat-label">${ico('clock')}${esc(r.window)} 限额</div>
-        <div class="stat-value">${money(r.used, 'USD')}<span class="muted small"> / ${money(r.limit, 'USD')}</span></div>${bar(pct(r.used, r.limit))}</div>`);
-    });
+  for (const [activity, label, symbol] of [[today, '今日', 'bolt'], [total, '累计', 'clock']]) {
+    const tokenCount = num(activity.total_tokens) ?? num(activity.totalTokens) ?? num(activity.tokens);
+    if (tokenCount !== null || num(activity.requests) !== null) {
+      cards.push(`<div class="card stat"><div class="stat-label">${ico(symbol)}${label} Token</div>
+        <div class="stat-value">${compact(tokenCount)}</div>
+        <div class="stat-foot">${compact(activity.requests)} 次请求</div></div>`);
+    }
   }
   if (!cards.length) return '';
   let extra = '';
@@ -324,7 +351,16 @@ function toolCard(t, extra) {
 }
 
 RENDER_overview = async function (view) {
+  const revision = S.routeRevision;
+  const localRevision = S.localAccountsRevision = (S.localAccountsRevision || 0) + 1;
+  // Keep the page's primary navigation usable while the first local reads are
+  // still in flight. These links do not depend on account or Hub state.
+  $('#headActions').innerHTML = `<a class="btn" href="#sessions">${icon('chat')}会话恢复</a><a class="btn primary" href="#accounts">${icon('key')}API 密钥库</a>`;
+  view.innerHTML = `<div class="callout">${ico('info')}<div>正在读取本机工具和 API 配置…<br><span class="small muted">本地使用无需登录远程服务。</span></div></div>
+    <div class="card"><div class="row"><div class="folder-ico">${icon('chat')}</div><div class="li-main"><div class="li-title">会话恢复</div><div class="li-sub">读取原有 Codex / Claude Code 本地记录</div></div><a class="btn" href="#sessions">打开会话</a></div></div>
+    <div class="card"><div class="skeleton" style="width:38%"></div><div class="skeleton" style="width:74%;margin-top:12px"></div></div>`;
   const [st, local] = await Promise.all([loadState(), api('/api/local/accounts')]);
+  if (revision !== S.routeRevision || localRevision !== S.localAccountsRevision || view.isConnected === false || S.route !== 'overview') return;
   S.local = local;
   const c = st.config || {};
   const hub = st.hub || {};
@@ -410,11 +446,9 @@ function agentCard(t) {
   const accounts = S.local.accounts;
   const a = accounts.find((a) => a.id === binding.accountId);
   const applied = S.local.accounts.find((a) => a.id === binding.appliedId);
-  const backendAvailable = S.local.tools.some((x) => x.id === t.kind && x.available);
   const codex = t.kind === 'codex';
   const desktop = t.id.endsWith('-desktop');
   const autoApply = t.id !== 'claude-desktop';
-  const restoreTarget = t.id === 'claude-desktop' ? 'claude' : t.id;
   const protocol = binding.protocol || (codex ? 'responses' : 'anthropic');
   const adapted = protocol !== (codex ? 'responses' : 'anthropic');
   return `<article class="card agent-card" data-tool="${esc(t.id)}" data-available="${t.available}"><div class="tool-head"><span class="tool-logo ${codex ? 'codex' : desktop ? 'desktop' : 'claude'}">${codex ? 'Cx' : desktop ? 'CD' : 'CC'}</span><div class="li-main"><h3 class="tool-name">${esc(t.name)}</h3><div class="muted small">${desktop ? '桌面应用' : '命令行工具'} · 模型不限制品牌</div></div><span class="chip ${t.available ? 'ok' : ''}">${t.available ? '已安装' : '未检测到'}</span></div>
@@ -422,7 +456,7 @@ function agentCard(t) {
     <div class="agent-config" id="agentConfig-${esc(t.id)}">${a ? `<div title="${esc(a.baseUrl)}">${ico('globe')}<span>${esc(a.baseUrl)}</span></div><div>${ico('key')}<code>${esc(a.keyMasked)}</code></div>` : '<div class="muted">选择已命名的密钥；模型在原工具内选择。</div>'}</div>
     <div class="agent-protocol"><label for="toolProtocol-${esc(t.id)}">服务商提供的上游接口</label><select class="input" id="toolProtocol-${esc(t.id)}" data-target="${esc(t.id)}" aria-label="${esc(t.name)}上游接口">${[['responses', 'OpenAI Responses（兼容中转站）'], ['chat', 'OpenAI Chat Completions（Grok / DeepSeek 等）'], ['anthropic', 'Anthropic Messages（Claude 等）']].map(([v,l]) => `<option value="${v}" ${protocol === v ? 'selected' : ''}>${l}</option>`).join('')}</select><span class="help">${!autoApply ? '这里的选择仅保存在 Bridge，须在原桌面应用中手动设置；不会自动应用。' : adapted ? '经 CLIProxyAPI 本地转换；无需远程登录，但 Bridge 必须保持运行。' : '原生接口直接连接服务商，不按模型品牌过滤。'}</span></div>
     <div class="agent-applied" id="agentApplied-${esc(t.id)}">${!autoApply ? '<span class="chip warn">自动应用暂不可用</span>' : binding.pending ? `<span class="chip warn">${a ? '选择已保存，等待应用' : '未选择 API'}</span>${applied ? `<span class="muted small">当前应用：${esc(applied.name)}</span>` : ''}` : `<span class="chip ok">已应用 ${esc(applied?.name || '')}</span>`}</div>
-    <div class="agent-actions"><button class="btn primary" data-act="toolRestart" data-target="${esc(t.id)}" ${autoApply && a && binding.model && t.available ? '' : 'disabled'}>${icon('refresh')}${autoApply ? '应用并重启' : '自动应用暂不可用'}</button><button class="btn" data-act="toolRestore" data-target="${esc(restoreTarget)}" ${backendAvailable ? '' : 'disabled'}>${icon('clock')}${desktop ? 'CLI 恢复会话' : '恢复会话'}</button>${a ? `<button class="icon-btn" data-act="localEdit" data-id="${esc(a.id)}" title="编辑这个密钥" aria-label="编辑这个密钥">${icon('edit')}</button>` : '<button class="btn sm" data-act="localNew">添加密钥</button>'}</div>
+    <div class="agent-actions"><button class="btn primary" data-act="toolRestart" data-target="${esc(t.id)}" ${autoApply && a && binding.model && t.available ? '' : 'disabled'}>${icon('refresh')}${autoApply ? '应用并重启' : '自动应用暂不可用'}</button>${a ? `<button class="icon-btn" data-act="localEdit" data-id="${esc(a.id)}" title="编辑这个密钥" aria-label="编辑这个密钥">${icon('edit')}</button>` : '<button class="btn sm" data-act="localNew">添加密钥</button>'}</div>
     <p class="agent-note muted small" id="remoteDetail-${esc(t.id)}">${esc(desktop ? desktopRemoteLamp(t).detail : binding.remote?.detail || '')}</p>
     ${!autoApply ? `<p class="agent-note small">${esc(claudeDesktopApplyNote())}</p><p class="agent-note small">CLI 恢复会话仅支持本地 Code 记录，使用 Claude Code 卡片已应用的 API 并通过 Claude Code 终端打开；普通云端聊天仍在原桌面应用里查看，不能通过 Bridge 遥控。</p>` : desktop ? '<p class="agent-note muted small">重启原桌面应用保留本地历史；指定旧会话的恢复通过原 CLI 打开。</p>' : '<p class="agent-note muted small">打开原终端会话列表；不会关闭其他终端，请先手动结束旧任务。</p>'}
   </article>`;
@@ -435,12 +469,26 @@ function renderAgentCards() {
   }
 }
 
+async function ensureLocalAccounts(button) {
+  if (S.local) return true;
+  const route = S.route, routeRevision = S.routeRevision, anchor = $('#modalRoot')?.innerHTML;
+  const revision = S.localAccountsRevision = (S.localAccountsRevision || 0) + 1;
+  const local = await api('/api/local/accounts');
+  if (revision !== S.localAccountsRevision || S.route !== route || S.routeRevision !== routeRevision || button?.isConnected === false || $('#modalRoot')?.innerHTML !== anchor) return false;
+  S.local = local;
+  return true;
+}
+
 async function refreshWorkbenchStatus() {
-  if (S.route !== 'overview' || S.bindingLoading) return;
+  if (S.route !== 'overview' || S.bindingLoading || !S.local) return;
+  // Foreground verification owns the account snapshot until its dialog closes.
+  // A status push must not invalidate that read or compete with a pending launch.
+  if (typeof WB !== 'undefined' && (WB.launchPending || typeof wbAccountCurrent === 'function' && wbAccountCurrent(WB.accountOpen))) return;
+  const routeRevision = S.routeRevision, revision = S.localAccountsRevision = (S.localAccountsRevision || 0) + 1;
   S.bindingLoading = true;
   try {
     const local = await api('/api/local/accounts');
-    if (S.route !== 'overview') return;
+    if (S.route !== 'overview' || S.routeRevision !== routeRevision || revision !== S.localAccountsRevision) return;
     S.local = local;
     for (const t of local.tools) {
       const b = local.bindings?.[t.id];
@@ -475,68 +523,473 @@ function localTarget(a) {
   return (tools.find((t) => t.available) || tools[0] || {}).id || a.kind;
 }
 
+function accountLaunchToolIcon(target) {
+	if (target === 'deepseek-harness' || target === 'hermes') return `<span class="account-tool-icon" aria-hidden="true"><img src="agent-brand/${target}-app-official.png" alt="" width="22" height="22"></span>`;
+  const family = target === 'codex' || target === 'codex-desktop' ? 'codex' : target === 'claude' || target === 'claude-desktop' ? 'claude' : '';
+  if (!family) return icon('external');
+  const cli = target === 'codex' || target === 'claude';
+  return `<span class="account-tool-icon" aria-hidden="true"><img src="agent-brand/${family}-app-official.png" alt="" width="22" height="22">${cli ? `<span class="account-tool-cli">${icon('terminal')}</span>` : ''}</span>`;
+}
+
+function accountLaunchButtonsHTML(a) {
+  if (a.libraryOnly || a.officialAccount?.mode === 'chatgpt_web_session') return '';
+  const official = !!a.officialAccount || a.sourceType === 'official_account';
+  const targets = official
+    ? [['codex-desktop', 'Codex'], ['codex', 'Codex CLI']]
+    : [['codex-desktop', 'Codex'], ['claude-desktop', 'Claude Desktop'], ['codex', 'Codex CLI'], ['claude', 'Claude Code'], ['deepseek-harness', 'DeepSeek Harness'], ['hermes', 'Hermes Agent']];
+  return `<div class="account-launch-buttons" aria-label="使用此账号打开工具">${targets.map(([target, label]) => `<button class="btn sm account-open-button" data-act="accountOpen" data-id="${esc(a.id)}" data-target="${target}" title="${esc('使用 ' + a.name + ' 打开 ' + label)}" aria-label="${esc('使用 ' + a.name + ' 打开 ' + label)}">${accountLaunchToolIcon(target)}</button>`).join('')}</div>`;
+}
+
+// A provider card has its own identity and read budget. Never feed it the
+// dashboard's cross-source summary or infer provider usage from CLI traffic.
+const API_CARD_USAGE = { generation: 0, active: 0, queue: [], pending: new Map(), cache: new Map(), timers: new Set() };
+function apiCardUsageDate(now) {
+  const date = new Date(now);
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+}
+function apiCardUsageEligible(account) {
+  return !!account && typeof account.id === 'string' && !!account.id && !account.officialAccount && account.sourceType !== 'official_account' && !account.libraryOnly && typeof account.sourceRevision === 'string' && /^src-v1-[a-f0-9]{64}$/.test(account.sourceRevision);
+}
+function apiCardUsageMetrics(data) {
+  const balance = data?.balance;
+  const amount = balance && typeof balance.amount === 'number' && Number.isFinite(balance.amount) ? balance.amount : null;
+  const currency = typeof balance?.currency === 'string' ? balance.currency.trim() : '';
+  const validUnit = currency && currency.length <= 24 && !/[\x00-\x1f\x7f]/.test(currency);
+  const number = (value) => typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value.toLocaleString('zh-CN') : '—';
+  const money = amount !== null && validUnit ? (currency.toUpperCase() === 'USD' ? '$' : currency + ' ') + amount.toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 6 }) : '—';
+  const billing = data?.billing;
+  const hasRate = billing?.source === 'sub2api.key_billing' && billing.scope === 'token' && typeof billing.effectiveMultiplier === 'number' && Number.isFinite(billing.effectiveMultiplier) && billing.effectiveMultiplier >= 0 && billing.effectiveMultiplier <= 100 && billing.freshUntil > Date.now();
+  const group = data?.group;
+  const hasGroup = group?.source === 'provider_key_usage' && Number.isSafeInteger(group.freshUntil) && group.freshUntil > Date.now() && typeof group.name === 'string' && group.name.trim() && [...group.name].length <= 120 && !/[\x00-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]/.test(group.name);
+  const details = [hasGroup ? `分组 ${group.name}` : '', hasRate ? `当前倍率 ×${billing.effectiveMultiplier}${billing.peak ? ' · 分时计费' : ''}` : ''].filter(Boolean);
+  return `<div title="供应商返回的总余额，不按 Key 拆分；同一账户的多把 Key 可显示相同余额"><span>供应商余额</span><b>${esc(money)}</b></div><div title="服务商返回，今日按服务商时区"><span>今日请求</span><b>${number(data?.today?.requests)}</b></div><div title="服务商返回，今日按服务商时区"><span>今日 Token</span><b>${number(data?.today?.tokens)}</b></div>${details.length ? `<small class="api-billing-note" title="倍率代表这把 Key 此刻的 Token 计费规则，不覆盖图片或模型专价">${esc(details.join(' · '))}</small>` : ''}`;
+}
+function apiCardUsageData(raw, job, now) {
+  if (!raw || raw.id !== job.id || raw.sourceRevision !== job.revision || !Number.isSafeInteger(raw.observedAt) || !Number.isSafeInteger(raw.freshUntil) || raw.observedAt > now || raw.observedAt <= 0 || raw.freshUntil <= now || raw.freshUntil <= raw.observedAt) return null;
+  const freshUntil = Math.min(raw.freshUntil, raw.observedAt + 60000);
+  if (freshUntil <= now) return null;
+  const today = raw.today?.date === apiCardUsageDate(now) ? raw.today : null;
+  const billing = raw.billing?.freshUntil > now ? raw.billing : null;
+  const group = raw.group?.freshUntil > now ? raw.group : null;
+  return { balance: raw.balance, today, billing, group, date: apiCardUsageDate(now), freshUntil: Math.min(freshUntil, billing?.freshUntil || freshUntil, group?.freshUntil || freshUntil) };
+}
+function apiCardUsageCurrent(owner) {
+  if (owner.generation !== API_CARD_USAGE.generation || S.route !== 'accounts' || owner.node.isConnected !== true || document.getElementById(owner.node.id) !== owner.node) return false;
+  const current = S.local?.accounts?.find((row) => row.id === owner.id);
+  return apiCardUsageEligible(current) && current.sourceRevision === owner.revision;
+}
+function apiCardUsageApply(owner, data) {
+  if (!apiCardUsageCurrent(owner) || !data || data.freshUntil <= Date.now() || data.date !== apiCardUsageDate(Date.now())) return;
+  owner.node.innerHTML = apiCardUsageMetrics(data);
+  // Expiry only clears the display. It never starts a polling request.
+  const now = Date.now(), midnight = new Date(now);
+  midnight.setHours(24, 0, 0, 0);
+  const timer = setTimeout(() => {
+    API_CARD_USAGE.timers.delete(timer);
+    if (apiCardUsageCurrent(owner)) owner.node.innerHTML = apiCardUsageMetrics(null);
+  }, Math.max(0, Math.min(data.freshUntil, midnight.getTime()) - now));
+  API_CARD_USAGE.timers.add(timer);
+}
+function apiCardUsagePump() {
+  while (API_CARD_USAGE.active < 4 && API_CARD_USAGE.queue.length) {
+    const job = API_CARD_USAGE.queue.shift();
+    if (!job.owners.some(apiCardUsageCurrent)) { API_CARD_USAGE.pending.delete(job.key); continue; }
+    API_CARD_USAGE.active++;
+    Promise.resolve().then(() => api('/api/local/accounts/usage?id=' + encodeURIComponent(job.id))).then((raw) => {
+      const data = apiCardUsageData(raw, job, Date.now());
+      if (!data || !job.owners.some(apiCardUsageCurrent)) return;
+      API_CARD_USAGE.cache.delete(job.key);
+      API_CARD_USAGE.cache.set(job.key, data);
+      while (API_CARD_USAGE.cache.size > 256) API_CARD_USAGE.cache.delete(API_CARD_USAGE.cache.keys().next().value);
+      job.owners.forEach((owner) => apiCardUsageApply(owner, data));
+    }).catch(() => { /* Missing provider usage is unknown, never a false zero. */ }).finally(() => {
+      API_CARD_USAGE.pending.delete(job.key); API_CARD_USAGE.active--; apiCardUsagePump();
+    });
+  }
+}
+function loadAPICardUsage(accounts) {
+  const generation = ++API_CARD_USAGE.generation;
+  API_CARD_USAGE.timers.forEach(clearTimeout); API_CARD_USAGE.timers.clear();
+  for (const account of accounts) {
+    if (!apiCardUsageEligible(account)) continue;
+    const node = document.getElementById('apiAccountUsage-' + account.id);
+    if (!node) continue;
+    const owner = { generation, node, id: account.id, revision: account.sourceRevision };
+    const key = owner.id + '\x00' + owner.revision, cached = API_CARD_USAGE.cache.get(key);
+    if (cached?.freshUntil > Date.now() && cached.date === apiCardUsageDate(Date.now())) { apiCardUsageApply(owner, cached); continue; }
+    API_CARD_USAGE.cache.delete(key);
+    const pending = API_CARD_USAGE.pending.get(key);
+    if (pending) { pending.owners = [owner]; continue; }
+    const job = { id: owner.id, revision: owner.revision, key, owners: [owner] };
+    API_CARD_USAGE.pending.set(key, job); API_CARD_USAGE.queue.push(job);
+  }
+  apiCardUsagePump();
+}
+
 function localAccountCard(a) {
-  const usedBy = (S.local.tools || []).filter((t) => S.local.bindings?.[t.id]?.accountId === a.id).map((t) => t.name);
-  const wire = a.wire && a.wire !== 'auto' ? ({ responses: 'Responses', chat: 'Chat', anthropic: 'Messages' })[a.wire] : '';
+  const tools = Array.isArray(S.local?.tools) ? S.local.tools : [];
+  const usedBy = tools.filter((t) => S.local?.bindings?.[t.id]?.accountId === a.id).map((t) => t.name);
   const more = typeof wbMore === 'function' ? wbMore : (body) => `<details class="wb-card-more"><summary>⋯</summary><div class="wb-more-body">${body}</div></details>`;
-  return `<article class="wb-card account-card">
-    <span class="tool-logo api">${icon('key')}</span>
-    <div class="wb-main"><div class="wb-name" title="${esc(a.name)}">${esc(a.name)}${wire ? `<span class="chip">${wire}</span>` : ''}</div>
-      <div class="wb-sub"><span title="${esc(a.baseUrl)}">${esc(wbHost ? wbHost(a.baseUrl) : a.baseUrl)}</span><code>${esc(a.keyMasked)}</code>${(a.models || []).length ? `<span>${a.models.length} 个模型</span>` : ''}</div></div>
-    <div class="acct-used">${usedBy.length ? esc(usedBy.join('、')) : '<span class="faint">未使用</span>'}</div>
-    <button class="btn" data-act="localEdit" data-id="${esc(a.id)}">编辑</button>
-    ${more(`<button class="btn sm ghost" data-act="localModels" data-id="${esc(a.id)}">${icon('refresh')}读取模型</button><button class="btn sm ghost danger-text" data-act="localDelete" data-id="${esc(a.id)}">${icon('trash')}移除</button>`)}
+  if (a.officialAccount && typeof officialAccountCard === 'function') return officialAccountCard(a, usedBy, more);
+  let endpoint = '地址未设置';
+  try {
+    const url = new URL(a.baseUrl);
+    if (url.protocol === 'https:' || url.protocol === 'http:') {
+      endpoint = url.origin + url.pathname;
+    }
+  } catch (_) { /* Never turn an unverified address into a navigation target. */ }
+  const models = Number.isSafeInteger(a.modelCount) && a.modelCount >= 0 ? a.modelCount : Array.isArray(a.models) ? a.models.length : 0;
+  const clients = [...new Map((Array.isArray(a.apiService?.clients) ? a.apiService.clients : []).filter((client) => client && typeof client.clientId === 'string' && client.clientId).map((client) => [client.clientId, client])).values()];
+  const remoteStations = localRemoteStationRows();
+  const boundRemoteStations = a.remoteHubBindingsSet === true
+    ? remoteStations.filter(row => (a.remoteHubUrls || []).some(hub => localHubKey(hub) === localHubKey(row.hubUrl)))
+    : remoteStations;
+  const remoteBindingLabel = a.remoteHubBindingsSet === true
+    ? boundRemoteStations.length ? boundRemoteStations.map(row => row.name || row.hubUrl).join('、') : '关闭'
+    : remoteStations.length ? '所有已登记站点' : '未设置';
+  // Active describes membership in an enabled client, not a running service,
+  // a live agent process, or provider entitlement. Keep those claims separate.
+  const serviceDetail = clients.map((client) => `${client.clientName || '客户端'} · ${[client.primary === true ? '主账号' : '', client.text === true ? '文字' : '', client.image === true ? '图片' : '', client.disabled === true ? '已停用' : ''].filter(Boolean).join(' / ') || '配置关联'}`).join('；');
+  // Icon buttons: the label stays in the accessible name and a visually hidden span.
+  const action = (name, label, symbol, danger = false) => `<button class="api-icon-button api-provider-action${danger ? ' danger-text' : ''}" data-act="${name}" data-id="${esc(a.id)}" aria-label="${esc(label + ' · ' + a.name)}" title="${esc(label)}">${icon(symbol)}<span class="sr-only">${label}</span></button>`;
+  let host = '';
+  try { host = new URL(endpoint).host; } catch (_) { /* unset address */ }
+  const initial = [...String(a.name || '?').trim()][0] || '?';
+  const protocolLabel = { auto: '自动识别', responses: 'Responses', chat: 'Chat Completions', anthropic: 'Anthropic' }[a.wire || 'auto'] || '自动识别';
+  return `<article class="wb-card account-card api-provider-card key-card" data-account-id="${esc(a.id)}" data-face="${keyCardFace(a.id)}">
+    <div class="key-face">
+      <span class="key-glow" aria-hidden="true"></span>
+      <header class="api-provider-top">
+        <span class="api-provider-avatar" aria-hidden="true">${esc(initial.toUpperCase())}</span>
+        <span class="api-provider-ident"><span class="api-provider-name" title="${esc(a.name)}">${esc(a.name)}</span><small class="api-provider-host">${esc(host || endpoint)}</small></span>
+        ${typeof accountRemoteSupportHTML === 'function' ? accountRemoteSupportHTML(a) : ''}<span class="api-provider-badge">API</span>
+      </header>
+    </div>
+    <div class="key-body">
+      ${typeof accountDailyCardHTML === 'function' ? accountDailyCardHTML(a) : ''}
+      <div class="api-provider-fields">
+        <div class="api-provider-key"><span>API Key</span><code>${esc(a.keyMasked || '未保存')}</code>${icon('key')}</div>
+        <div class="api-provider-address"><span>基础地址</span><code title="${esc(endpoint)}">${esc(endpoint)}</code></div>
+        <div class="api-provider-remote"><span>手机远程</span><b title="${esc(remoteBindingLabel)}">${esc(remoteBindingLabel)}</b></div>
+        <div class="api-provider-models"><span>已保存模型</span><b>${models}</b><button class="btn sm api-provider-service-action" data-act="apiCardMembership" data-id="${esc(a.id)}" title="${esc(serviceDetail || '加入本地 API 服务')}">${clients.length ? '移出 API 服务' : '加入 API 服务'}</button><button class="btn sm ghost" data-act="accountModelRules" data-id="${esc(a.id)}" aria-label="${esc('模型规则 · ' + a.name)}" title="模型规则">规则</button></div>
+      </div>
+      <div class="api-provider-stats" id="apiAccountUsage-${esc(a.id)}">${apiCardUsageMetrics(null)}</div>
+      <div class="api-provider-preferences"><span class="api-protocol-label" title="上游接口">${esc(protocolLabel)}</span>${typeof accountSpeedControlHTML === 'function' ? accountSpeedControlHTML(a) : ''}</div>
+      <footer class="api-provider-foot">
+        ${accountLaunchButtonsHTML(a)}
+        <div class="api-provider-actions">${action('accountTest', '发送测试请求', 'play')}${action('localEdit', '编辑', 'edit')}${action('localModels', '读取模型', 'refresh')}${action('localDelete', '移除', 'trash', true)}</div>
+      </footer>
+    </div>
   </article>`;
+}
+
+// Each key keeps one stable card colour, so the same key looks the same on every page.
+function keyCardFace(id) {
+  let hash = 0;
+  for (const ch of String(id || '')) hash = (hash * 31 + ch.charCodeAt(0)) >>> 0;
+  return ['ink', 'violet', 'blue', 'pink', 'iris'][hash % 5];
 }
 
 function renderLocalCards() {
   const box = $('#localAccountList');
   if (!box || !S.local) return;
   const q = S.localFilter.toLowerCase().trim();
-  const accounts = S.local.accounts.filter((a) => !q || [a.name, a.baseUrl].some((v) => String(v || '').toLowerCase().includes(q)));
-  box.innerHTML = accounts.length ? accounts.map(localAccountCard).join('') + `<button class="acct-add" data-act="localNew">${icon('plus')}添加 API 密钥</button>` : `<div class="acct-empty"><b>${S.local.accounts.length ? '没有匹配的密钥' : '还没有 API 密钥'}</b><span>保存一次服务商地址和 Key，所有 Agent 都能选用。</span><button class="btn primary" data-act="localNew">${icon('plus')}添加 API 密钥</button></div>`;
+  const library = typeof officialLibraryAccounts === 'function' ? officialLibraryAccounts(S.local.accounts) : S.local.accounts;
+  const accounts = typeof accountDailyFilter === 'function' ? accountDailyFilter(library) : library.filter((a) => !q || [a.name, a.baseUrl].some((v) => String(v || '').toLowerCase().includes(q)));
+  if (typeof accountDailyPrepare === 'function') accountDailyPrepare(library, accounts);
+  box.innerHTML = (typeof codexAPIOverviewHTML === 'function' ? codexAPIOverviewHTML() : '') + (accounts.length ? accounts.map(localAccountCard).join('') + `<button class="key-add" type="button" data-act="localNew"><span>${icon('plus')}</span>添加一把新密钥</button>` : `<div class="acct-empty"><b>${library.length ? '没有匹配的账号' : '还没有 API 或账号'}</b><span>点击右上角“添加”，保存 API Key 或导入 Codex 账号。</span></div>`);
+  loadAPICardUsage(accounts);
+  if (typeof accountDailySync === 'function') accountDailySync();
+  if (typeof scheduleOfficialCostExpiry === 'function') scheduleOfficialCostExpiry(accounts);
+  if (typeof syncRemoteSupport === 'function') syncRemoteSupport();
   const count = $('#localCount');
-  if (count) count.textContent = `${accounts.length} / ${S.local.accounts.length} 个密钥`;
+  if (count) count.textContent = `${accounts.length} / ${library.length} 个密钥`;
+  const toolbar = $('#localToolbar');
+  if (toolbar) toolbar.hidden = library.length <= 5 && !q;
 }
 
 function renderAccountsPage(view, local) {
-  $('#headActions').innerHTML = `<button class="btn primary" data-act="localNew">${icon('plus')}添加</button>`;
-  view.innerHTML = `${local.accounts.length > 5 ? `<div class="local-toolbar"><input class="input" id="localSearch" type="search" aria-label="搜索 API" placeholder="搜索名称或地址" value="${esc(S.localFilter)}"><span class="muted small" id="localCount"></span></div>` : ''}
+  S.officialCleanupKnown = false;
+  $('#headActions').innerHTML = `<div class="account-daily-toolbar account-daily-head" id="accountDailyToolbar"></div><button class="btn primary" data-act="localNew">${icon('plus')}添加密钥</button>`;
+  if (typeof officialAccountActions === 'function') officialAccountActions($('#headActions'));
+  view.innerHTML = `<div class="acct-bar" id="localToolbar" ${local.accounts.length <= 5 && !S.localFilter ? 'hidden' : ''}><div class="local-toolbar"><label class="search">${icon('search')}<input class="input" id="localSearch" type="search" aria-label="搜索 API" placeholder="搜索名称或地址" value="${esc(S.localFilter)}"></label><span class="muted small" id="localCount"></span></div></div>
+    <div class="row account-daily-selection" id="accountDailySelection" role="group" aria-label="批量操作" hidden></div>
     <div class="wb-grid" id="localAccountList"></div>
-    <p class="su-foot">${icon('lock')} Key 只保存在这台电脑上，不会发给中转站或手机。</p>`;
+    <p class="su-foot">${icon('lock')} 密钥保存在本机，调用时仅用于对应服务商认证。</p>`;
   renderLocalCards();
+  if (typeof loadOfficialLibrary === 'function') void loadOfficialLibrary();
+  if (typeof loadCodexAPIOverview === 'function') void loadCodexAPIOverview();
 }
 
 RENDER_accounts = function (view) {
   const target = view;
   const cached = S.local;
+  const revisionAtStart = S.routeRevision;
+  // The add-key entry is independent of the account-list request and should
+  // remain available on a cold start or when the local API is slow.
+  $('#headActions').innerHTML = `<div class="account-daily-toolbar account-daily-head" id="accountDailyToolbar"></div><button class="btn primary" data-act="localNew">${icon('plus')}添加密钥</button>`;
   if (cached) renderAccountsPage(target, cached);
+  else {
+    target.innerHTML = `<div class="card"><div class="skeleton" style="width:34%"></div><div class="skeleton" style="width:68%;margin-top:12px"></div><p class="muted small">正在读取本机 API 和账号…</p></div><p class="su-foot">${icon('lock')} 密钥保存在本机，调用时仅用于对应服务商认证。</p>`;
+    if (typeof accountDailySync === 'function') accountDailySync();
+  }
+  const revision = S.localAccountsRevision = (S.localAccountsRevision || 0) + 1;
   void loadState().catch(() => undefined);
   void api('/api/local/accounts').then((local) => {
-    if (!local || target.isConnected === false || S.route !== 'accounts') return;
+    if (!local || revision !== S.localAccountsRevision || revisionAtStart !== S.routeRevision || target.isConnected === false || S.route !== 'accounts') return;
     S.local = local;
     renderAccountsPage(target, local);
   }).catch((e) => {
-    if (cached || target.isConnected === false || S.route !== 'accounts') return;
+    if (cached || revision !== S.localAccountsRevision || revisionAtStart !== S.routeRevision || target.isConnected === false || S.route !== 'accounts') return;
     target.innerHTML = `<div class="callout bad">${ico('warn')}<div>${esc(e.message)}</div></div>`;
   });
 };
 
-function localEditor(a, kind) {
-  S.localDraftModels = [...(a?.models || [])];
-  $('#modalRoot').innerHTML = `<div class="modal-back" data-act="closeModal"><div class="modal account-modal" data-stop role="dialog" aria-modal="true" aria-labelledby="localEditorTitle"><div class="modal-head"><h3 id="localEditorTitle">${a ? '编辑' : '添加'} API 密钥</h3><button class="icon-btn" data-act="closeModal" aria-label="关闭">✕</button></div>
-    <div class="modal-body"><input type="hidden" id="laID" value="${esc(a?.id || '')}"><input type="hidden" id="laModel" value="${esc(a?.model || '')}"><input type="hidden" id="laWorkspace" value="${esc(a?.workspace || '')}"><div class="form-grid"><div class="field full"><label for="laName">密钥名称</label><input class="input" id="laName" maxlength="80" placeholder="例如：Salcara 主力 / 备用 Key" value="${esc(a?.name || '')}"><span class="help">名称由你决定，同一个密钥可以给多个工具使用。</span></div>
-    <div class="field full"><label for="laBase">服务商 API 地址</label><input class="input" id="laBase" placeholder="https://api.example.com 或 .../v1" value="${esc(a?.baseUrl || 'https://salcara.top')}"><span class="help">可填写任何兼容服务商；可带 /v1，支持自定义路径前缀。</span></div>
-    <div class="field full"><label for="laKey">API Key</label><div class="input-wrap"><input class="input" id="laKey" type="password" autocomplete="off" spellcheck="false" placeholder="${esc(a ? '已保存 ' + a.keyMasked + '；留空保持原 Key' : '粘贴你的 API Key')}"><button class="icon-btn" data-act="toggleVis" data-for="laKey" aria-label="显示或隐藏 Key">${icon('eye')}</button></div></div>
-    <div class="field full"><label for="laAuth">服务商认证方式</label><select class="input" id="laAuth"><option value="bearer" ${a?.authMode !== 'api-key' ? 'selected' : ''}>Bearer（大多数中转站）</option><option value="api-key" ${a?.authMode === 'api-key' ? 'selected' : ''}>x-api-key（Anthropic 官方等）</option></select><span class="help">这是 Key 的发送方式，不是工具归属；不确定时保留 Bearer。</span></div>
-    <div class="field full"><label for="laWire">接口类型</label><select class="input" id="laWire"><option value="auto" ${!a?.wire || a?.wire === 'auto' ? 'selected' : ''}>按模型自动（Claude → Messages，GPT → Responses，其他 → Chat）</option><option value="responses" ${a?.wire === 'responses' ? 'selected' : ''}>OpenAI Responses</option><option value="chat" ${a?.wire === 'chat' ? 'selected' : ''}>OpenAI 兼容（Chat Completions）</option><option value="anthropic" ${a?.wire === 'anthropic' ? 'selected' : ''}>Claude（Anthropic Messages）</option></select><span class="help">中转站一般选「按模型自动」；只支持一种接口的服务商（例如 DeepSeek 官方）选对应的那一种。</span></div>
-    <div class="field full"><div class="row"><button class="btn" data-act="localModels">读取模型目录（可选）</button><span class="muted small">已读取 ${S.localDraftModels.length} 个</span></div><span class="help">这里只保存目录；模型在原工具内选择。读取不会发起生成请求。</span></div></div><div id="localProbeResult" aria-live="polite"></div></div>
-    <div class="modal-foot"><span class="muted small" style="margin-right:auto">只保存在本机，不要求远程登录</span><button class="btn" data-act="closeModal">取消</button><button class="btn primary" data-act="localSave">保存密钥</button></div></div></div>`;
-  $('#laName').focus();
+function localModelCatalogHTML(models) {
+  if (!Array.isArray(models) || !models.length) return '<span class="key-model-catalog-empty">尚未同步模型</span>';
+  return models.map((model) => `<code role="listitem">${esc(model)}</code>`).join('');
 }
 
+function localDraftModelList(value) {
+  return [...new Set(String(value || '').split(/\r?\n/).map(model => model.trim()).filter(Boolean))];
+}
+
+function localEditorProtocolSync() {
+  const select = $('#laWire'), root = $('#modalRoot');
+  if (!select || !root?.querySelectorAll) return;
+  for (const button of root.querySelectorAll('[data-editor-wire]')) {
+    const on = button.dataset.editorWire === select.value;
+    button.classList.toggle('on', on);
+    button.setAttribute('aria-pressed', String(on));
+  }
+  const hint = $('#laWireHint');
+  if (hint) hint.textContent = {
+    auto: '根据服务地址和模型自动选择；已知接口时可以直接指定。',
+    responses: '使用 OpenAI Responses 接口，适合原生 Codex 服务。',
+    chat: '使用 Chat Completions 接口，适合 DeepSeek、OpenRouter 等服务。',
+    anthropic: '使用 Anthropic Messages 接口，适合 Claude 兼容服务。',
+  }[select.value] || '';
+}
+
+function localEditorDraftSync() {
+  const input = $('#laID'), draft = S.localEditorDraft;
+  if (!input || !draft || draft.input !== input) return;
+  const count = $('#laModelCount');
+  if (count) count.textContent = `${localDraftModelList($('#laModels')?.value).length} 个模型`;
+  const note = $('#laDraftNote');
+  if (note) note.textContent = JSON.stringify(localForm()) === draft.initial ? '所有更改在保存后生效' : '有未保存的更改';
+}
+
+async function closeLocalEditor() {
+  const draft = S.localEditorDraft, input = $('#laID');
+  if (!draft || draft.input !== input) { $('#modalRoot').innerHTML = ''; S.localEditorDraft = null; return true; }
+  if (draft.closePromise) return draft.closePromise;
+  draft.closing = true;
+  draft.closePromise = (async () => {
+    try {
+      if (draft.saving) {
+        if (!await confirm('关闭正在保存的 API 配置？保存已经提交，关闭不会撤销本次保存。')) return false;
+      } else if (JSON.stringify(localForm()) !== draft.initial && !await confirm('放弃未保存的 API 配置？本次修改不会保存。')) return false;
+      if (S.localEditorDraft !== draft || $('#laID') !== input) return false;
+      $('#modalRoot').innerHTML = '';
+      S.localEditorDraft = null;
+      return true;
+    } finally { draft.closing = false; draft.closePromise = null; }
+  })();
+  return draft.closePromise;
+}
+
+function localValidateForm(body) {
+  if (!body.id && !body.key.trim()) throw new Error('请填写 API Key');
+  let url;
+  const rawURL = body.baseUrl.trim();
+  try { if (!rawURL) throw new Error(); url = new URL(rawURL.includes('://') ? rawURL : 'https://' + rawURL); } catch (_) { throw new Error('请填写完整的服务地址，例如 https://api.example.com/v1'); }
+  if (!['https:', 'http:'].includes(url.protocol) || url.username || url.password || url.search || url.hash) throw new Error('服务地址应为 HTTP 或 HTTPS 地址，不包含密码、查询参数或片段');
+  const limits = [['laPriority', '优先级', -1000, 1000], ['laWeight', '权重', 0, 1000], ['laMaxConcurrency', '最大并发', 0, 10000], ['laMaxRpm', '每分钟请求上限', 0, Infinity], ['laMaxTpm', '每分钟 Token 上限', 0, Infinity]];
+  for (const [id, label, min, max] of limits) {
+    const raw = $('#' + id)?.value?.trim();
+    if (raw && (!/^-?\d+$/.test(raw) || !Number.isSafeInteger(Number(raw)) || Number(raw) < min || Number(raw) > max)) throw new Error(`${label}需填写 ${min}${Number.isFinite(max) ? '–' + max : ' 或更大'}的整数`);
+  }
+  for (const line of ($('#laExtraHeaders')?.value || '').split(/\r?\n/)) {
+    if (line.trim() && (!/^[!#$%&'*+.^_`|~0-9A-Za-z-]+\s*:\s*\S.*$/.test(line.trim()) || /^(authorization|host)\s*:/i.test(line.trim()))) throw new Error('请求头请按“名称: 值”填写，不能覆盖 Authorization 或 Host');
+  }
+}
+
+function localEditor(a, kind) {
+  if (typeof disposeOfficialPanel === 'function') disposeOfficialPanel();
+  S.localDraftModels = [...(a?.models || [])];
+  S.localDraftTransport = a ? { baseUrl: a.baseUrl, authMode: a.authMode, wire: a.wire } : null;
+  S.localDraftModelsManual = !!a?.modelsManual;
+  S.localDraftSpeed = a?.speedMode || 'standard';
+  S.localDraftSourceRevision = a?.sourceRevision || '';
+  // Extra headers: stored as "Key: Value\nKey: Value" for editing
+  S.localDraftHeaders = a?.extraHeaders ? Object.entries(a.extraHeaders).map(([k, v]) => `${k}: ${v}`).join('\n') : '';
+  const presets = [['OpenAI', 'https://api.openai.com/v1'], ['Anthropic', 'https://api.anthropic.com'], ['DeepSeek', 'https://api.deepseek.com/v1'], ['OpenRouter', 'https://openrouter.ai/api/v1']];
+  const base = a?.baseUrl || 'https://salcara.top';
+  const face = a && typeof keyCardFace === 'function' ? keyCardFace(a.id) : 'iris';
+  const num = (v) => esc(String(v ?? ''));
+  const remoteStations = localRemoteStationRows();
+  const selectedRemoteHubs = a?.remoteHubBindingsSet === true
+    ? new Set((a.remoteHubUrls || []).map(localHubKey))
+    : a ? new Set(remoteStations.map(row => row.hubUrl))
+      : new Set(remoteStations.filter(row => localHubKey(row.hubUrl) === localHubKey(S.state?.config?.effectiveHubUrl)).map(row => row.hubUrl));
+  const remoteBindingLegacy = !!a && a.remoteHubBindingsSet !== true;
+  const remoteBindingEnabled = remoteStations.length > 0 && (a ? a.remoteHubBindingsSet === true ? selectedRemoteHubs.size > 0 : true : selectedRemoteHubs.size > 0);
+  const remoteBindingSummary = remoteStations.length
+    ? remoteBindingEnabled ? '使用已绑定站点，无需重复绑定手机' : '当前关闭，可直接在这里开启'
+    : S.state?.config?.remoteModes?.direct?.paired ? '已完成直连绑定，无需登记中转站' : '中转站或 Bot 只需首次绑定';
+  const modelCount = S.localDraftModels.length;
+  const modelSyncSummary = modelCount ? '可直接编辑模型 ID，每行一个' : '从上游获取，或手动填写模型 ID';
+  const remoteHubOptions = `<section class="remote-hub-bindings" aria-label="手机远程 API 权限" data-legacy="${remoteBindingLegacy}">
+    <label class="remote-binding-toggle" for="laRemoteEnabled"><input id="laRemoteEnabled" type="checkbox" ${remoteBindingEnabled ? 'checked' : ''} ${!remoteStations.length ? 'disabled' : ''}><span class="remote-binding-copy"><strong>允许中转站 / Bot 使用此 API</strong><small>${remoteBindingSummary}</small></span><span class="remote-binding-state" aria-hidden="true"></span></label>
+    <div class="remote-hub-choices" id="laRemoteHubChoices" ${remoteBindingEnabled ? '' : 'hidden'}>
+      ${remoteStations.length ? `<div class="remote-hub-caption">已绑定站点</div>${remoteStations.map(row => `<label class="remote-hub-choice"><input type="checkbox" data-remote-hub="${esc(row.hubUrl)}" ${selectedRemoteHubs.has(row.hubUrl) ? 'checked' : ''}><span>${esc(row.name || row.hubUrl)}</span>${localHubKey(row.hubUrl) === localHubKey(S.state?.config?.effectiveHubUrl) ? '<span class="chip">当前</span>' : ''}</label>`).join('')}<div class="help">保存后应用此 API 的远程权限，无需重新绑定。</div>` : ''}
+    </div>
+    ${remoteStations.length ? '' : `<div class="help remote-binding-empty">${S.state?.config?.remoteModes?.direct?.paired ? '直连手机可选择本机 API；此处的站点授权不影响直连。' : '使用中转站或 Bot 时，首次在「手机远程」绑定，之后在这里管理 API。电脑直连无需登记站点。'}</div>`}
+  </section>`;
+  $('#modalRoot').innerHTML = `<div class="modal-back" data-act="closeModal"><div class="modal account-modal key-editor account-add-modal" data-key-editor data-stop role="dialog" aria-modal="true" aria-labelledby="localEditorTitle">
+    <div class="modal-head key-editor-head" data-face="${face}"><span class="key-glow" aria-hidden="true"></span><div><h3 id="localEditorTitle">${a ? '编辑 API Key' : '添加 API Key'}</h3><p>${a ? esc(a.name || '配置服务地址、接口与模型') : '连接服务商，配置可用模型'}</p></div><button class="icon-btn" data-act="closeModal" aria-label="关闭">${icon('close')}</button></div>
+    <div class="modal-body">${!a && typeof accountAddTabsHTML === 'function' ? accountAddTabsHTML('apikey') : ''}<input type="hidden" id="laID" value="${esc(a?.id || '')}"><input type="hidden" id="laModel" value="${esc(a?.model || '')}"><input type="hidden" id="laWorkspace" value="${esc(a?.workspace || '')}">
+    <section class="api-editor-section"><div class="api-editor-section-head"><strong>连接信息</strong><small>${a ? '留空 Key 可保留原密钥' : '密钥保存在本机'}</small></div><div class="form-grid key-editor-grid">
+      <div class="field full"><label for="laName">名称 <span class="muted small">可选</span></label><input class="input" id="laName" maxlength="80" placeholder="留空使用站点名称" value="${esc(a?.name || '')}"></div>
+      <div class="field full"><label for="laKey">API Key</label><div class="input-wrap"><input class="input key-input" id="laKey" type="password" autocomplete="off" spellcheck="false" placeholder="${esc(a ? '已保存 ' + (a.keyMasked || '') + '，留空则不更换' : '粘贴你的 API Key')}"><button class="icon-btn" data-act="toggleVis" data-for="laKey" aria-label="显示或隐藏 Key">${icon('eye')}</button></div></div>
+      <div class="field full"><label for="laBase">服务地址</label><input class="input mono" id="laBase" placeholder="https://api.example.com/v1" value="${esc(base)}"><div class="preset-row" role="group" aria-label="常用服务商">${presets.map(([name, url]) => `<button type="button" class="preset${url === base ? ' on' : ''}" data-act="localPreset" data-url="${esc(url)}">${name}</button>`).join('')}</div></div>
+    </div></section>
+    <section class="api-editor-section" aria-label="上游接口"><div class="api-editor-section-head"><strong>接口协议</strong></div>
+      <select id="laWire" data-native hidden aria-label="上游接口">${[['auto', '自动识别'], ['responses', 'Responses'], ['chat', 'Chat Completions'], ['anthropic', 'Anthropic Messages']].map(([value, label]) => `<option value="${value}" ${(a?.wire || 'auto') === value ? 'selected' : ''}>${label}</option>`).join('')}</select>
+      <div class="api-editor-protocols" role="group" aria-label="选择上游接口">${[['auto', '自动识别'], ['responses', 'Responses'], ['chat', 'Chat Completions'], ['anthropic', 'Anthropic Messages']].map(([value, label]) => `<button type="button" class="api-editor-protocol${(a?.wire || 'auto') === value ? ' on' : ''}" data-act="localWire" data-editor-wire="${value}" aria-pressed="${(a?.wire || 'auto') === value}">${label}</button>`).join('')}</div>
+      <p class="help" id="laWireHint"></p>
+      <div class="api-editor-speed"><label for="laSpeed">默认速度</label><select class="input" id="laSpeed" aria-label="默认速度">${[['standard', '标准'], ['fast', '快速'], ['ultrafast', '超高速']].map(([value, label]) => `<option value="${value}" ${S.localDraftSpeed === value ? 'selected' : ''}>${label}</option>`).join('')}</select></div><p class="help">快速档位适用于 Responses / Chat，需服务商与模型支持，可能增加费用。</p>
+    </section>
+    <section class="api-editor-section api-editor-models" aria-label="模型列表">
+      <div class="api-editor-section-head"><div><strong>模型列表</strong><small id="laModelSyncState" role="status">${modelSyncSummary}</small></div><span class="chip" id="laModelCount">${modelCount} 个模型</span></div>
+      <label class="sr-only" for="laModels">模型 ID，每行一个</label><textarea class="input mono" id="laModels" rows="5" maxlength="200000" spellcheck="false" placeholder="填写服务商支持的模型 ID，每行一个">${esc(S.localDraftModels.join('\n'))}</textarea>
+      <div class="api-editor-model-tools"><span class="help">获取结果只填入当前草稿，保存前可自由调整。</span><button type="button" class="btn sm" data-act="localModels" aria-label="从上游获取模型">${icon('refresh')}从上游获取</button></div>
+      <p class="help api-editor-catalog-help">模型保存后供 Agent 选择；同步到 Codex 原生模型列表需在 Agent 中确认配置。</p>
+      <div id="localProbeResult" role="status" aria-live="polite"></div>
+    </section>
+    ${remoteHubOptions}
+    <details class="adv key-editor-more api-editor-advanced">
+      <summary><span class="chev">${icon('chev')}</span>高级设置<small>认证、限速与路由规则</small></summary>
+      <div class="form-grid" style="margin-top:12px">
+        <div class="field full"><label for="laAuth">认证方式</label><select class="input" id="laAuth" aria-label="认证方式">${[['auto', '自动识别'], ['bearer', 'Bearer Token'], ['api-key', 'x-api-key']].map(([value, label]) => `<option value="${value}" ${(a?.authMode || 'auto') === value ? 'selected' : ''}>${label}</option>`).join('')}</select></div>
+        <div class="field"><label for="laFallbackModel">回退模型</label><input class="input" id="laFallbackModel" placeholder="不设置" value="${esc(a?.fallbackModel || '')}"></div>
+        <div class="field"><label for="laPriority">优先级</label><input class="input" id="laPriority" type="number" min="-1000" max="1000" placeholder="0" value="${num(a?.priority)}"></div>
+        <div class="field"><label for="laMaxConcurrency">最大并发</label><input class="input" id="laMaxConcurrency" type="number" min="0" max="10000" placeholder="不限" value="${num(a?.maxConcurrency)}"></div>
+        <div class="field"><label for="laWeight">权重</label><input class="input" id="laWeight" type="number" min="0" max="1000" placeholder="1" value="${num(a?.weight)}"></div>
+        <div class="field"><label for="laMaxRpm">每分钟请求上限</label><input class="input" id="laMaxRpm" type="number" min="0" placeholder="不限" value="${num(a?.maxRpm)}"></div>
+        <div class="field"><label for="laMaxTpm">每分钟 Token 上限</label><input class="input" id="laMaxTpm" type="number" min="0" placeholder="不限" value="${num(a?.maxTpm)}"></div>
+        <div class="field full"><label for="laSystemPrompt">系统提示词前缀</label><textarea class="input" id="laSystemPrompt" rows="2" maxlength="8000" placeholder="不注入">${esc(a?.systemPromptPrefix || '')}</textarea></div>
+        <div class="field full"><label for="laModelAllowlist">只允许这些模型（每行一个）</label><textarea class="input mono" id="laModelAllowlist" rows="2" maxlength="10000" placeholder="留空表示不限">${esc((a?.modelAllowlist || []).join('\n'))}</textarea></div>
+        <div class="field full"><label for="laModelDenylist">禁用这些模型（每行一个）</label><textarea class="input mono" id="laModelDenylist" rows="2" maxlength="10000">${esc((a?.modelDenylist || []).join('\n'))}</textarea></div>
+        <div class="field full"><label for="laExtraHeaders">自定义请求头（每行 Key: Value）</label><textarea class="input mono" id="laExtraHeaders" rows="2" maxlength="10000" placeholder="X-Custom-Org: my-org">${esc(S.localDraftHeaders)}</textarea></div>
+      </div>
+    </details><div id="localSaveError" class="api-editor-error" role="alert" aria-live="polite"></div></div>
+    <div class="modal-foot"><span class="api-editor-draft-note" id="laDraftNote">所有更改在保存后生效</span><span class="spacer"></span><button class="btn ghost" data-act="closeModal">取消</button><button class="btn primary" data-act="localSave">${a ? '保存更改' : '保存密钥'}</button></div></div></div>`;
+  S.localEditorDraft = { input: $('#laID'), initial: JSON.stringify(localForm()), saving: false, closing: false };
+  localEditorProtocolSync();
+  (a ? $('#laName') : $('#laKey')).focus();
+}
+
+function localTransportForDraft(baseUrl) {
+  const normalize = value => {
+    try { const url = new URL(value.trim()); return url.origin + url.pathname.replace(/\/v1\/?$/, '').replace(/\/+$/, '') + url.search + url.hash; }
+    catch (_) { return ''; }
+  };
+  const prior = S.localDraftTransport;
+  const sameEndpoint = prior && normalize(baseUrl) && normalize(prior.baseUrl || '') === normalize(baseUrl);
+  // A model name does not define the provider's protocol. In particular,
+  // OpenRouter serves GPT/Claude names through Chat Completions.
+  let authMode = 'bearer', wire = 'auto';
+  try {
+    const url = new URL(baseUrl.trim().includes('://') ? baseUrl.trim() : 'https://' + baseUrl.trim());
+    if (url.hostname === 'api.anthropic.com') { authMode = 'api-key'; wire = 'anthropic'; }
+    else if (url.hostname === 'api.openai.com') wire = 'responses';
+    else if (url.hostname === 'openrouter.ai') wire = 'chat';
+    else if (url.hostname === 'api.deepseek.com') wire = /^\/anthropic(?:\/|$)/.test(url.pathname) ? 'anthropic' : 'chat';
+  } catch (_) {}
+  const authChoice = $('#laAuth')?.value || (sameEndpoint ? prior.authMode : 'auto');
+  const wireChoice = $('#laWire')?.value || (sameEndpoint ? prior.wire : 'auto');
+  if (authChoice === 'bearer' || authChoice === 'api-key') authMode = authChoice;
+  if (['responses', 'chat', 'anthropic'].includes(wireChoice)) wire = wireChoice;
+  return { authMode, wire };
+}
+function localHubKey(raw) {
+  return String(raw || '').trim().replace(/\/+$/, '').replace(/\/v1$/i, '').replace(/\/+$/, '');
+}
+function localRemoteStationRows() {
+  const rows = new Map();
+  for (const row of [...(S.local?.remoteStations || []), ...(S.state?.config?.remoteConnections || [])]) {
+    if (!row || typeof row.hubUrl !== 'string' || !localHubKey(row.hubUrl)) continue;
+    const key = localHubKey(row.hubUrl);
+    if (!rows.has(key)) rows.set(key, { ...row, hubUrl: key });
+  }
+  return [...rows.values()];
+}
 function localForm() {
-  return { id: $('#laID').value, name: $('#laName').value, kind: 'api', baseUrl: $('#laBase').value, key: $('#laKey').value, model: $('#laModel').value, authMode: $('#laAuth').value, wire: $('#laWire') ? $('#laWire').value : 'auto', workspace: $('#laWorkspace').value, models: S.localDraftModels };
+  const modelsText = $('#laModels')?.value;
+  const models = modelsText == null ? S.localDraftModels : [...new Set(modelsText.split(/\r?\n/).map(model => model.trim()).filter(Boolean))];
+  const modelsManual = !!S.localDraftModelsManual || models.join('\n') !== S.localDraftModels.join('\n');
+  const baseUrl = $('#laBase').value;
+
+  // Model allow/deny lists
+  const modelAllowlist = ($('#laModelAllowlist')?.value || '').split(/\r?\n/).map(m => m.trim()).filter(Boolean);
+  const modelDenylist  = ($('#laModelDenylist')?.value  || '').split(/\r?\n/).map(m => m.trim()).filter(Boolean);
+
+  // Extra headers: parse "Key: Value" lines into an object
+  const extraHeaders = {};
+  ($('#laExtraHeaders')?.value || '').split(/\r?\n/).forEach(line => {
+    const idx = line.indexOf(':');
+    if (idx > 0) {
+      const k = line.slice(0, idx).trim();
+      const v = line.slice(idx + 1).trim();
+      if (k && v) extraHeaders[k] = v;
+    }
+  });
+
+  // Empty/zero is an explicit reset. Omission means preserve the saved value
+  // for older clients, so serializing undefined would make clearing impossible.
+  const priority       = parseInt($('#laPriority')?.value   || '0', 10) || 0;
+  const weight         = parseInt($('#laWeight')?.value     || '0', 10) || 0;
+  const maxConcurrency = parseInt($('#laMaxConcurrency')?.value || '0', 10) || 0;
+  const maxRpm         = parseInt($('#laMaxRpm')?.value     || '0', 10) || 0;
+  const maxTpm         = parseInt($('#laMaxTpm')?.value     || '0', 10) || 0;
+
+  const systemPromptPrefix = ($('#laSystemPrompt')?.value || '').trim();
+  const fallbackModel      = ($('#laFallbackModel')?.value || '').trim();
+
+  const bindingRoot = $('#laRemoteEnabled')?.closest?.('.remote-hub-bindings');
+  const remoteBindingEnabled = $('#laRemoteEnabled')?.checked ?? true;
+  const remoteBindingTouched = bindingRoot?.dataset.touched === 'true';
+  const remoteBindings = bindingRoot?.dataset.legacy === 'true' && !remoteBindingTouched ? {} : {
+    remoteHubUrls: remoteBindingEnabled && typeof document !== 'undefined' ? [...document.querySelectorAll('[data-remote-hub]:checked')].map(input => input.dataset.remoteHub) : [],
+    remoteHubBindingsSet: true,
+  };
+  return {
+    id: $('#laID').value,
+    ...(S.localDraftSourceRevision ? { sourceRevision: S.localDraftSourceRevision } : {}),
+    name: $('#laName')?.value || '',
+    kind: 'api',
+    baseUrl,
+    key: $('#laKey').value,
+    model: $('#laModel').value,
+    ...localTransportForDraft(baseUrl),
+    speedMode: $('#laSpeed')?.value || S.localDraftSpeed || 'standard',
+    workspace: $('#laWorkspace').value,
+    models,
+    modelsManual,
+    ...remoteBindings,
+    modelAllowlist,
+    modelDenylist,
+    extraHeaders,
+    systemPromptPrefix,
+    fallbackModel,
+    priority,
+    weight,
+    maxConcurrency,
+    maxRpm,
+    maxTpm,
+  };
 }
 
 function toolForm(target) {
@@ -562,14 +1015,24 @@ function toolDraftStatus(target) {
   }
 }
 
+function canOpenNativeSession(s) {
+  return ['codex', 'claude'].includes(s.tool) && !!s.cwd && !s.activeTurnId
+    && ['idle', 'completed', 'failed', 'interrupted', 'stopped'].includes(s.status)
+    && new RegExp('^' + s.tool + ':[a-fA-F0-9]{8}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{12}$').test(s.sessionKey || '');
+}
+
 async function openRestore(target) {
-  if (target === 'claude-desktop') target = 'claude';
+  target = target.replace(/-desktop$/, '');
   S.restoreTarget = target;
   S.restoreSessions = [];
   S.restoreSearch = '';
-  const kind = target.split('-')[0];
+  const kind = target;
+  const native = kind === 'codex' || kind === 'claude';
   const binding = S.local?.bindings?.[target];
-  $('#modalRoot').innerHTML = `<div class="modal-back" data-act="closeModal"><div class="modal restore-modal" data-stop role="dialog" aria-modal="true" aria-labelledby="restoreTitle"><div class="modal-head"><h3 id="restoreTitle">恢复 ${esc(TOOL_LABEL[target])} 会话</h3><button class="icon-btn" data-act="closeModal" aria-label="关闭">✕</button></div><div class="modal-body"><p class="muted small">读取原工具本地记录。精确恢复通过 ${kind === 'codex' ? 'Codex CLI' : 'Claude Code'} 终端打开，使用原会话编号和原项目目录，不新建会话。${kind === 'claude' ? '使用 Claude Code 卡片已应用的 API，不包含 Claude Desktop 普通云端聊天。' : ''}</p>${!binding?.appliedId || binding.pending ? '<div class="callout warn">请先在对应 CLI 工具卡片应用并重启当前 API，才可以在终端恢复。仍可先查看已有记录。</div>' : ''}<input class="input" id="restoreSearch" type="search" placeholder="搜索标题、项目目录或模型" aria-label="搜索恢复会话"><div id="restoreList" class="restore-list"><div class="empty"><span class="spin"></span>正在读取原会话…</div></div><div id="restoreError" aria-live="polite"></div></div><div class="modal-foot"><span class="muted small" style="margin-right:auto">正在执行的会话不能重复打开</span><button class="btn" data-act="closeModal">关闭</button></div></div></div>`;
+  const historyNote = native
+    ? `读取原工具本地记录。终端恢复使用原会话编号、原项目目录和 ${kind === 'codex' ? 'Codex CLI' : 'Claude Code'} 卡片已应用的 API。${kind === 'claude' ? '不包含 Claude Desktop 普通云端聊天。' : ''}`
+    : '这里列出 Bridge 与手机发起的会话，可在「对话」中查看。普通「打开 Agent」不会自动接回手机会话。' + (kind === 'hermes' ? 'Hermes 原会话固定启动 API；切换 API 或重启 Bridge 后可能需要新建会话，旧记录保留。' : 'DeepSeek 可在原会话中继续；会话存储独立于默认原生界面。');
+  $('#modalRoot').innerHTML = `<div class="modal-back" data-act="closeModal"><div class="modal restore-modal" data-stop role="dialog" aria-modal="true" aria-labelledby="restoreTitle"><div class="modal-head"><h3 id="restoreTitle">查看会话</h3><div class="seg restore-seg" role="tablist" aria-label="选择工具">${['codex', 'claude', 'deepseek-harness', 'hermes'].map((t) => `<button type="button" role="tab" aria-selected="${t === target}" class="${t === target ? 'on' : ''}" data-act="toolRestore" data-target="${t}">${esc(TOOL_LABEL[t] || t)}</button>`).join('')}</div><button class="icon-btn" data-act="closeModal" aria-label="关闭">${icon('close')}</button></div><div class="modal-body"><p class="muted small">${historyNote}</p>${native && (!binding?.appliedId || binding.pending) ? '<div class="callout warn">请先在对应 CLI 工具卡片应用当前 API，才可以在终端恢复。仍可先查看已有记录。</div>' : ''}<input class="input" id="restoreSearch" type="search" placeholder="搜索标题、项目目录或模型" aria-label="搜索恢复会话"><div id="restoreList" class="restore-list"><div class="empty"><span class="spin"></span>正在读取原会话…</div></div><div id="restoreError" aria-live="polite"></div></div><div class="modal-foot"><span class="muted small" style="margin-right:auto">切换 API 不会删除这里的聊天记录</span><button class="btn" data-act="closeModal">关闭</button></div></div></div>`;
   try {
     const r = await api('/api/sessions?tool=' + kind);
     if (S.restoreTarget !== target || !$('#restoreList')) return;
@@ -593,8 +1056,9 @@ function renderRestoreList() {
   const binding = S.local?.bindings?.[S.restoreTarget];
   list.innerHTML = rows.map((s) => {
     const running = s.status === 'running' || s.status === 'waiting_approval';
-    const canResume = binding?.appliedId && !binding.pending && !running && s.cwd;
-    return `<div class="restore-row"><div class="li-main"><div class="li-title">${esc(s.title || '无标题会话')}</div><div class="sess-meta">${toolChip(s.tool, s.client)}<span class="status-dot s-${esc(s.status)}"></span>${esc(SESSION_STATUS[s.status] || s.status)} · ${esc(relTime(s.updatedAt))}${s.model ? ' · ' + esc(s.model) : ''}</div><div class="sess-cwd" title="${esc(s.cwd)}">${esc(s.cwd || '原项目目录未知')}</div></div><div class="restore-actions"><button class="btn sm" data-act="restoreView" data-k="${esc(s.sessionKey)}" data-kind="${esc(s.tool)}">查看记录</button><button class="btn sm primary" data-act="resumeSession" data-k="${esc(s.sessionKey)}" data-target="${esc(S.restoreTarget)}" ${canResume ? '' : 'disabled'} title="${running ? '先结束原任务' : canResume ? '恢复同一个会话，不新建' : '先应用当前 API，原会话须有项目目录'}">终端恢复</button></div></div>`;
+    const native = ['codex', 'claude'].includes(s.tool);
+    const canResume = binding?.appliedId && !binding.pending && canOpenNativeSession(s);
+    return `<div class="restore-row"><div class="li-main"><div class="li-title">${esc(s.title || '无标题会话')}</div><div class="sess-meta">${toolChip(s.tool, s.client)}<span class="status-dot s-${esc(s.status)}"></span>${esc(SESSION_STATUS[s.status] || s.status)} · ${esc(relTime(s.updatedAt))}${s.model ? ' · ' + esc(s.model) : ''}</div><div class="sess-cwd" title="${esc(s.cwd)}">${esc(s.cwd || '原项目目录未知')}</div></div><div class="restore-actions"><button class="btn sm" data-act="restoreView" data-k="${esc(s.sessionKey)}" data-kind="${esc(s.tool)}">查看记录</button>${native ? `<button class="btn sm primary" data-act="resumeSession" data-k="${esc(s.sessionKey)}" data-target="${esc(S.restoreTarget)}" ${canResume ? '' : 'disabled'} title="${running ? '先结束原任务' : canResume ? '恢复同一个会话，不新建' : '先应用当前 API，并确认原会话已结束且目录有效'}">终端恢复</button>` : ''}</div></div>`;
   }).join('') || `<div class="empty">${S.restoreSessions.length ? '没有匹配的会话' : '没有找到原工具本地记录。这里不会自动新建会话。'}</div>`;
 }
 
@@ -684,12 +1148,16 @@ function renderToolsPage(view, st, rawTc) {
   const c = st.config;
   const loggedIn = c.loggedIn && !c.remoteDeviceOnly;
   const cl = tc.claude, cx = tc.codex;
+  const legacy = tc.legacyToolcfg || {};
+  const legacyBlocked = (tool) => !!(legacy[tool] && legacy[tool].requiresWorkbench);
+  const legacyButtonAttrs = (tool) => (loggedIn && !legacyBlocked(tool)) ? '' : 'disabled';
   const toolOf = (id) => (st.tools || []).find((t) => t.id === id) || { available: false };
   const stateChip = (x) => x.configured ? `<span class="chip ok">${icon('check')}已接入中转站</span>` : (x.error ? '<span class="chip bad">读取失败</span>' : '<span class="chip warn">未接入</span>');
   const needLogin = `<div class="callout">${ico('info')}<div>本地多 Key 管理与保留会话的原地切号请使用 <a href="#accounts">API 账号 / 切换</a>。下面保留旧版远程中转站的一键配置${loggedIn ? '。' : '，需要先登录远程服务。'}</div></div>`;
+  const managedNotice = legacy.managed ? `<div class="callout warn">${ico('warn')}<div>当前 Bridge 正在使用进程级安全租约。旧版一键配置已暂停，避免把反代或官方账号凭据直接写入原工具；请在 <a href="#accounts">API 账号 / 切换</a> 中通过工具工作台应用或恢复。</div></div>` : '';
   const isWin = tc.os === 'windows';
   const mode = tc.codexAuthMode || 'token';
-  view.innerHTML = `${needLogin}
+  view.innerHTML = `${needLogin}${managedNotice}
   <div class="grid grid-2">
     <div class="card tool-card">
       <div class="tool-head"><span class="tool-logo claude">CC</span><div><div class="tool-name">Claude Code</div>
@@ -702,8 +1170,8 @@ function renderToolsPage(view, st, rawTc) {
       ${cl.apiKeySet ? `<div class="callout warn">${ico('warn')}<div>settings.json 里还设置了 <code>ANTHROPIC_API_KEY</code>，它的优先级更高，可能导致不走中转站。建议删掉。</div></div>` : ''}
       ${cl.error ? `<div class="callout bad">${ico('warn')}<div>${esc(cl.error)}</div></div>` : ''}
       <div class="muted small">写入 <code>env</code>：<code>ANTHROPIC_BASE_URL</code> = 中转站地址（不带 /v1）、<code>ANTHROPIC_AUTH_TOKEN</code> = Claude Key、<code>CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC</code> = 1。其他设置保持不变，第一次修改前自动备份。</div>
-      <div class="row"><button class="btn primary" data-act="toolcfg" data-tool="claude" data-a="apply" ${loggedIn ? '' : 'disabled'}>一键配置</button>
-        <button class="btn" data-act="toolcfg" data-tool="claude" data-a="restore">恢复原配置</button></div>
+      <div class="row"><button class="btn primary" data-act="toolcfg" data-tool="claude" data-a="apply" ${legacyButtonAttrs('claude')}>一键配置</button>
+        <button class="btn" data-act="toolcfg" data-tool="claude" data-a="restore" ${legacyBlocked('claude') ? 'disabled' : ''}>恢复原配置</button></div>
     </div>
 
     <div class="card tool-card">
@@ -721,8 +1189,8 @@ function renderToolsPage(view, st, rawTc) {
           <label class="radio-card ${mode === 'env' ? 'sel' : ''}"><input type="radio" name="cxmode" value="env" ${mode === 'env' ? 'checked' : ''}><span class="t">环境变量</span><span class="d">env_key = ${esc(tc.envKeyName)}${isWin ? '，自动用 setx 设置' : tc.os === 'darwin' ? '，需要自己在 ~/.zshrc 里 export（从程序坞打开的 App 读不到，Mac 上推荐左边的方式）' : '，需要你自己在 shell 里 export'}</span></label>
         </div></div>
       <div class="muted small">设置 <code>model_provider = "salcara"</code>，并写入 <code>[model_providers.salcara]</code>：base_url = 中转站地址/v1、wire_api = "responses"、requires_openai_auth = false、supports_websockets = false。其他配置和注释保持不变，第一次修改前自动备份。</div>
-      <div class="row"><button class="btn primary" data-act="toolcfg" data-tool="codex" data-a="apply" ${loggedIn ? '' : 'disabled'}>一键配置</button>
-        <button class="btn" data-act="toolcfg" data-tool="codex" data-a="restore">恢复原配置</button></div>
+      <div class="row"><button class="btn primary" data-act="toolcfg" data-tool="codex" data-a="apply" ${legacyButtonAttrs('codex')}>一键配置</button>
+        <button class="btn" data-act="toolcfg" data-tool="codex" data-a="restore" ${legacyBlocked('codex') ? 'disabled' : ''}>恢复原配置</button></div>
     </div>
   </div>
 
@@ -749,13 +1217,17 @@ RENDER_tools = function (view) {
   const target = view;
   const cachedState = S.state || { os: 'windows', config: {}, tools: [] };
   const cachedConfig = S.toolcfg;
-  if (cachedConfig || S.state) renderToolsPage(target, cachedState, cachedConfig);
+  // The cached machine state alone is not enough to safely paint this page:
+  // toolcfg contains the managed-lease policy that can disable legacy writes.
+  // Keep the page skeleton until both snapshots are known, rather than briefly
+  // enabling a config mutation from an empty/default toolcfg object.
+  if (cachedConfig && S.state) renderToolsPage(target, cachedState, cachedConfig);
   void Promise.all([loadState(), api('/api/toolcfg')]).then(([st, tc]) => {
     if (target.isConnected === false || S.route !== 'tools') return;
     S.toolcfg = tc;
     renderToolsPage(target, st, tc);
   }).catch((e) => {
-    if (!cachedConfig && !S.state && target.isConnected !== false && S.route === 'tools') target.innerHTML = `<div class="callout bad">${ico('warn')}<div>${esc(e.message)}</div></div>`;
+    if (!(cachedConfig && S.state) && target.isConnected !== false && S.route === 'tools') target.innerHTML = `<div class="callout bad">${ico('warn')}<div>${esc(e.message)}</div></div>`;
   });
 };
 
@@ -891,15 +1363,30 @@ function tlApply(ev) {
 
 const KIND_ICON = { command: 'terminal', file_change: 'edit', read: 'file', search: 'search', web: 'globe', mcp: 'box', other: 'box' };
 
-function tlItem(ev) {
+function delegationSource(ev, tool) {
+  const origin = ev.messageOrigin;
+  if (ev.role !== 'user' || !origin || typeof origin !== 'object' || Array.isArray(origin) || origin.kind !== 'delegation') return '';
+  // The mark identifies this conversation's runtime, never a claimed sender
+  // in the message body or unverified origin metadata.
+  const brand = tool === 'codex' || tool === 'codex-desktop' ? 'codex'
+    : tool === 'claude' || tool === 'claude-desktop' ? 'claude' : '';
+  return `<div class="msg-origin">${brand ? `<img src="agent-brand/${brand}-app-official.png" alt="" width="16" height="16" aria-hidden="true">` : ''}<span>来自另一项任务</span></div>`;
+}
+
+function tlItem(ev, tool) {
   switch (ev.type) {
-    case 'message':
-      return `<div class="msg ${ev.role === 'user' ? 'user' : 'assistant'}">${renderText(ev.text)}</div>`;
+    case 'message': {
+      const role = ev.role === 'user' ? 'user' : 'assistant';
+      const body = `<div class="msg ${role}">${renderText(ev.text)}</div>`;
+      const source = delegationSource(ev, tool);
+      return source ? `<div class="msg-envelope ${role}">${source}${body}</div>` : body;
+    }
     case 'reasoning':
       return ev.text ? `<div class="reason">${esc(ev.text)}</div>` : '';
     case 'tool': {
       const chip = ev.status === 'running' ? '<span class="chip info"><span class="spin" style="width:10px;height:10px"></span>运行中</span>'
-        : ev.status === 'failed' ? `<span class="chip bad">失败${ev.exitCode !== undefined && ev.exitCode !== null ? ' ' + esc(ev.exitCode) : ''}</span>` : '<span class="chip ok">完成</span>';
+        : ev.status === 'failed' ? `<span class="chip bad">失败${ev.exitCode !== undefined && ev.exitCode !== null ? ' ' + esc(ev.exitCode) : ''}</span>`
+          : ev.kind === 'plan' && ev.planKind === 'tasks' ? '<span class="chip">已更新</span>' : '<span class="chip ok">完成</span>';
       const has = ev.detail || ev.output || ev.diff;
       return `<details class="tl-tool"><summary>${ico(KIND_ICON[ev.kind] || 'box')}<span class="tt">${esc(ev.title || ev.kind)}</span>${chip}</summary>
         ${has ? `<div class="body">${ev.detail ? `<pre>${esc(ev.detail)}</pre>` : ''}${ev.diff ? `<pre class="diff">${renderDiff(ev.diff)}</pre>` : ''}${ev.output ? `<pre>${esc(ev.output)}</pre>` : ''}</div>` : ''}</details>`;
@@ -936,8 +1423,8 @@ function renderDetail(scroll) {
   const atBottom = !tlEl || tlEl.scrollHeight - tlEl.scrollTop - tlEl.clientHeight < 80;
   el.innerHTML = `<div class="detail-head"><div class="row"><div class="li-main"><div class="detail-title">${esc(s.title || S.openKey)}</div>
       <div class="sess-meta" style="margin-top:6px">${toolChip(s.tool, s.client)}<span class="status-dot s-${esc(s.status)}"></span>${esc(SESSION_STATUS[s.status] || s.status || '')}${s.model ? ' · ' + esc(s.model) : ''}${s.cwd ? ` · <span class="mono">${esc(s.cwd)}</span>` : ''}</div></div>
-      ${running ? `<button class="btn sm danger" data-act="interrupt">${icon('stop')}停止</button>` : s.cwd && s.sessionKey ? `<button class="btn sm" data-act="resumeSession" data-k="${esc(s.sessionKey)}" data-target="${esc(s.tool)}">${icon('terminal')}终端恢复</button>` : ''}</div></div>
-    <div class="timeline" id="timeline">${S.tl.map(tlItem).join('') || '<div class="empty">还没有内容</div>'}</div>
+      ${running ? `<button class="btn sm danger" data-act="interrupt">${icon('stop')}停止</button>` : canOpenNativeSession(s) ? `<button class="btn sm" data-act="resumeSession" data-k="${esc(s.sessionKey)}" data-target="${esc(s.tool)}">${icon('terminal')}终端恢复</button>` : ''}</div></div>
+    <div class="timeline" id="timeline">${S.tl.map(ev => tlItem(ev, s.tool)).join('') || '<div class="empty">还没有内容</div>'}</div>
     <div class="composer">${s.controllable === false ? '<div class="muted small" style="flex:1">这个会话目前不能从这里继续</div>'
       : `<textarea class="input" id="sendText" placeholder="继续对话…（${OSX() === 'darwin' ? '⌘' : 'Ctrl+'}Enter 发送）"></textarea><button class="btn primary" data-act="send">${icon('send')}发送</button>`}</div>`;
   const t = $('#timeline');
@@ -965,6 +1452,81 @@ async function openSession(key, keepScroll) {
 
 /* ---------------- 设置 ---------------- */
 
+const SETTINGS_FIELDS = { autostart: 'swAuto', openConsoleOnStart: 'swOpen', allowPhoneAutoAll: 'swPhoneAuto', approval: 'pol' };
+const SETTINGS_UI = { revision: 0, values: new Map(), pending: new Map(), messages: new Map() };
+function settingsSnapshot(st, startedAt = SETTINGS_UI.revision) {
+  const config = { ...(st.config || {}) };
+  for (const key of Object.keys(SETTINGS_FIELDS)) {
+    const previous = SETTINGS_UI.values.get(key);
+    if (previous && (previous.revision > startedAt || SETTINGS_UI.pending.has(key))) config[key] = previous.value;
+    else SETTINGS_UI.values.set(key, { value: config[key], revision: startedAt });
+  }
+  return { ...st, config };
+}
+function settingsControls(key) {
+  return key === 'approval' ? $$('input[name="pol"]') : [document.getElementById(SETTINGS_FIELDS[key])].filter(Boolean);
+}
+function projectSettingsState() {
+  for (const key of Object.keys(SETTINGS_FIELDS)) {
+    const pending = SETTINGS_UI.pending.get(key), stored = SETTINGS_UI.values.get(key);
+    if (!stored && !pending) continue;
+    const value = pending ? pending.value : stored.value;
+    for (const control of settingsControls(key)) {
+      control.checked = key === 'approval' ? control.value === value : Boolean(value);
+      control.disabled = Boolean(pending);
+      control.setAttribute?.('aria-busy', String(Boolean(pending)));
+      if (key === 'approval') control.closest('.radio-card')?.classList.toggle('sel', control.checked);
+    }
+    const status = document.getElementById('settingStatus-' + key);
+    if (status) status.textContent = pending ? pending.message : SETTINGS_UI.messages.get(key) || '';
+    if (key === 'approval') {
+      const warning = document.getElementById('approvalPolicyWarning');
+      if (warning) warning.hidden = value !== 'auto_all';
+    }
+  }
+}
+function saveSetting(control) {
+  const key = Object.keys(SETTINGS_FIELDS).find((name) => name === 'approval' ? control.name === 'pol' : control.id === SETTINGS_FIELDS[name]);
+  if (!key) return Promise.resolve();
+  const active = SETTINGS_UI.pending.get(key);
+  if (active) { projectSettingsState(); return active.promise; }
+  const value = key === 'approval' ? control.value : control.checked;
+  const previous = SETTINGS_UI.values.get(key)?.value ?? S.state?.config?.[key];
+  SETTINGS_UI.values.set(key, { value: previous, revision: SETTINGS_UI.revision });
+  const owner = $('#view');
+  SETTINGS_UI.revision++;
+  const operation = { value, message: key === 'approval' && value === 'auto_all' ? '等待确认…' : '正在保存…', promise: null };
+  SETTINGS_UI.pending.set(key, operation);
+  SETTINGS_UI.messages.delete(key);
+  projectSettingsState();
+  operation.promise = (async () => {
+    let saved = false;
+    try {
+      if (key === 'approval' && value === 'auto_all') {
+        if (!await confirm('“全部自动”会让 AI 不经确认运行任意命令，确定开启吗？')) return;
+        if (S.route !== 'settings' || $('#view') !== owner || control.isConnected === false) return;
+        operation.message = '正在保存…'; projectSettingsState();
+      }
+      const result = await api('/api/settings', { [key]: value });
+      if (result?.ok !== true) throw new Error('保存结果尚未确认');
+      SETTINGS_UI.values.set(key, { value, revision: ++SETTINGS_UI.revision });
+      saved = true;
+      if (S.state) S.state.config = { ...(S.state.config || {}), [key]: value };
+      SETTINGS_UI.messages.set(key, '已保存');
+    } catch (error) {
+      SETTINGS_UI.messages.set(key, '未确认保存，已还原显示：' + (error?.message || String(error)));
+    } finally {
+      if (!saved) {
+        SETTINGS_UI.values.set(key, { value: previous, revision: ++SETTINGS_UI.revision });
+        if (S.state) S.state.config = { ...(S.state.config || {}), [key]: previous };
+      }
+      if (SETTINGS_UI.pending.get(key) === operation) SETTINGS_UI.pending.delete(key);
+      projectSettingsState();
+    }
+  })();
+  return operation.promise;
+}
+
 function renderSettingsPage(view, st) {
   const c = st.config || {};
   const pol = [
@@ -976,24 +1538,30 @@ function renderSettingsPage(view, st) {
   view.innerHTML = `
   <a class="card set-link" href="#sessions">
     <span class="set-link-ico">${icon('chat')}</span>
-    <span class="li-main"><span class="li-title">对话</span><span class="li-sub">这台电脑上的 Codex 与 Claude Code 对话，可恢复继续</span></span>
+    <span class="li-main"><span class="li-title">对话记录</span><span class="li-sub">查看四种 Agent 的对话与手机任务记录，进入后加载</span></span>
     ${pending ? `<span class="chip bad">${pending} 个待批准</span>` : ''}<span class="set-link-chev">${icon('chev')}</span>
   </a>
+  <div class="card" id="localConversationSync">
+    <div class="row"><div class="li-main"><div class="li-title">本机对话同步</div><div class="li-sub">重新读取 Codex、Claude Code 和 Claude Desktop 的会话列表；当前打开的对话会一并刷新</div></div><button class="btn sm" data-act="syncLocalConversations">${icon('refresh')}重新同步</button></div>
+    <div class="muted small" id="localSyncStatus" role="status" aria-live="polite" style="margin-top:8px">仅读取本机记录，不修改原应用数据；未打开的对话正文会在进入时读取。</div>
+  </div>
+  ${st.os === 'darwin' ? `<div class="callout small">首次访问项目文件夹时，macOS 会询问文件权限；是否允许由系统控制。</div>` : ''}
   <div class="card">
     <h3 class="card-title" style="margin-bottom:14px">${ico('power')}启动</h3>
     <div class="setting-row"><div class="txt"><div class="t">开机自动启动</div><div class="d">登录电脑后在后台运行，手机随时能连上这台电脑</div></div>
-      <label class="switch"><input type="checkbox" id="swAuto" ${c.autostart ? 'checked' : ''}><span></span></label></div>
+      <label class="switch"><input type="checkbox" id="swAuto" ${c.autostart ? 'checked' : ''}><span></span></label></div><div class="muted small" id="settingStatus-autostart" role="status" aria-live="polite"></div>
     <div class="setting-row"><div class="txt"><div class="t">开机启动时打开控制台</div><div class="d">关闭后开机只在后台运行，需要时${launchHint()}即可打开这个页面</div></div>
-      <label class="switch"><input type="checkbox" id="swOpen" ${c.openConsoleOnStart ? 'checked' : ''}><span></span></label></div>
+      <label class="switch"><input type="checkbox" id="swOpen" ${c.openConsoleOnStart ? 'checked' : ''}><span></span></label></div><div class="muted small" id="settingStatus-openConsoleOnStart" role="status" aria-live="polite"></div>
   </div>
   <div class="card">
     <h3 class="card-title" style="margin-bottom:6px">${ico('check')}审批策略</h3>
     <p class="card-sub" style="margin-bottom:14px">从手机发起的新任务默认使用这个策略（手机上发任务时也可以单独选择）</p>
     <div class="radio-cards">${pol.map(([v, t, d, cls]) => `<label class="radio-card ${cls} ${c.approval === v ? 'sel' : ''}"><input type="radio" name="pol" value="${v}" ${c.approval === v ? 'checked' : ''}>
       <span class="t">${cls ? `<span style="color:var(--danger)">${icon('warn')}</span>` : ''}${t}</span><span class="d">${d}</span></label>`).join('')}</div>
-    ${c.approval === 'auto_all' ? `<div class="callout bad" style="margin-top:14px">${ico('warn')}<div><b>风险提示：</b>“全部自动”下 AI 可以不经确认运行任意命令（包括删除文件、访问网络）。请只在允许的项目文件夹里、并且信任任务内容时使用。</div></div>` : ''}
+    <div class="muted small" id="settingStatus-approval" role="status" aria-live="polite"></div>
+    <div class="callout bad" id="approvalPolicyWarning" ${c.approval === 'auto_all' ? '' : 'hidden'} style="margin-top:14px">${ico('warn')}<div><b>风险提示：</b>“全部自动”下 AI 可以不经确认运行任意命令（包括删除文件、访问网络）。请只在允许的项目文件夹里、并且信任任务内容时使用。</div></div>
     <div class="setting-row" style="margin-top:14px;border-top:1px solid var(--border)"><div class="txt"><div class="t">允许手机选择「全部自动」</div><div class="d">关闭时手机只能用「每步询问」或「自动改文件」，手机绑定泄露也无法不经确认运行命令</div></div>
-      <label class="switch"><input type="checkbox" id="swPhoneAuto" ${c.allowPhoneAutoAll ? 'checked' : ''}><span></span></label></div>
+      <label class="switch"><input type="checkbox" id="swPhoneAuto" ${c.allowPhoneAutoAll ? 'checked' : ''}><span></span></label></div><div class="muted small" id="settingStatus-allowPhoneAutoAll" role="status" aria-live="polite"></div>
   </div>
   <div class="card"><details class="adv logs-box"><summary><span class="chev">${icon('chev')}</span>${ico('terminal')}运行日志</summary>
     <pre class="logs" id="logs">加载中…</pre>
@@ -1006,25 +1574,29 @@ function renderSettingsPage(view, st) {
       <dt>程序位置</dt><dd class="mono">${esc(st.appBundle || st.exe || '—')} <button class="btn sm" data-act="reveal" data-w="exe">${icon('folder')}${openWord()}</button></dd>
       <dt>配置文件</dt><dd class="mono">${esc(c.configPath)} <button class="btn sm" data-act="reveal" data-w="config">${icon('folder')}${openWord()}</button></dd><dt>服务地址</dt><dd class="mono">${esc(c.effectiveHubUrl || '—')}</dd></dl>
     ${st.installedFrom ? `<div class="callout ok" style="margin-top:12px">${ico('check')}<div>已自动安装到 <code>${esc(st.appBundle)}</code>，开机自启也指向这里。原来下载的 <code>${esc(st.installedFrom)}</code> 可以删除。</div></div>` : ''}
-    ${st.os === 'darwin' ? `<div class="callout" style="margin-top:12px">${ico('info')}<div>第一次让 Codex / Claude Code 读写“文稿”“桌面”“下载”里的项目时，macOS 会弹窗询问 <b>“Salcara Bridge”想访问…</b>，请点<b>允许</b>；点错了可以到 <b>系统设置 → 隐私与安全性 → 文件和文件夹</b> 里重新打开。</div></div>` : ''}
     <div class="divider"></div>
     <div class="row"><div class="li-main"><div class="li-title">退出程序</div><div class="li-sub">退出后手机将看不到这台电脑，正在运行的任务会停止</div></div>
       <button class="btn danger" data-act="quit">${icon('power')}退出 Salcara Bridge</button></div>
+  </div>
+  <div class="card set-support">
+    <div class="set-support-copy"><span class="set-link-ico" aria-hidden="true">${icon('github')}</span>
+      <div class="li-main"><div class="li-title">支持 Salcara</div><div class="li-sub">觉得好用？在 GitHub 点个 Star，支持项目继续成长。</div></div></div>
+    <a class="btn" href="https://github.com/dkdjndbfj-wq/salcara-desktop" target="_blank" rel="noopener noreferrer">${icon('star')}去 GitHub 点星</a>
   </div>`;
+  projectSettingsState();
   loadLogs();
 }
 
 RENDER_settings = function (view) {
   const target = view;
-  const fallback = { version: '', os: 'windows', appBundle: '', exe: '', config: {
-    approval: 'ask', projects: [], autostart: false, openConsoleOnStart: false,
-    allowPhoneAutoAll: false, deviceId: '', configPath: '', effectiveHubUrl: ''
-  } };
-  const cached = S.state || fallback;
-  renderSettingsPage(target, cached);
+  const startedAt = SETTINGS_UI.revision;
+  // Without a real state, wait on the skeleton instead of painting default switches that then flip.
+  if (S.state) renderSettingsPage(target, settingsSnapshot(S.state));
   void loadState().then((st) => {
     if (target.isConnected === false || S.route !== 'settings') return;
-    renderSettingsPage(target, st);
+    const snapshot = settingsSnapshot(st, startedAt);
+    if (S.state === st) S.state = snapshot;
+    renderSettingsPage(target, snapshot);
     if (typeof window.__salcaraAttachSettingsPrefs === 'function') window.__salcaraAttachSettingsPrefs(target);
   }).catch((e) => {
     if (!S.state && target.isConnected !== false && S.route === 'settings') target.innerHTML = `<div class="callout bad">${ico('warn')}<div>${esc(e.message)}</div></div>`;
@@ -1056,13 +1628,138 @@ var RENDER_overview, RENDER_accounts, RENDER_login, RENDER_tools, RENDER_project
 
 /* ---------------- actions ---------------- */
 
-async function busy(btn, fn) {
-  if (btn) { btn.disabled = true; btn.dataset.html = btn.innerHTML; btn.innerHTML = '<span class="spin"></span>' + btn.textContent; }
-  try { return await fn(); } finally { if (btn && btn.isConnected) { btn.disabled = false; btn.innerHTML = btn.dataset.html; } }
+// Confirmations open as a centred in-app dialog instead of the system box. Callers await the
+// answer; a missing document (tests, early boot) falls back to the browser's own confirm.
+const nativeConfirm = typeof window !== 'undefined' && typeof window.confirm === 'function' ? window.confirm.bind(window) : null;
+let activeConfirmation = null;
+function cancelActiveConfirmation() { activeConfirmation?.finish(false); }
+function confirmDialog(message) {
+  if (typeof document === 'undefined' || !document.body) return Promise.resolve(nativeConfirm ? nativeConfirm(message) : false);
+  const text = String(message || '');
+  const cut = text.search(/[？?]/);
+  const title = cut >= 0 && cut < 60 ? text.slice(0, cut + 1) : text.split('\n')[0];
+  const body = (cut >= 0 && cut < 60 ? text.slice(cut + 1) : text.split('\n').slice(1).join('\n')).trim();
+  const danger = /移除|删除|清空|退出|重置|解除|卸载|断开|消耗|不可撤销/.test(title + body);
+  const okLabel = danger ? (title.match(/移除|删除|清空|退出|重置|解除|卸载|断开/) || ['确定'])[0] : '确定';
+  const previousFocus = activeConfirmation?.previousFocus || document.activeElement;
+  activeConfirmation?.finish(false, false);
+  return new Promise((resolve) => {
+    document.getElementById('confirmRoot')?.remove();
+    const root = document.createElement('div');
+    root.id = 'confirmRoot';
+    root.innerHTML = `<div class="confirm-back"><div class="confirm-modal" role="alertdialog" aria-modal="true" aria-labelledby="confirmTitle" aria-describedby="confirmBody"><span class="confirm-ico${danger ? ' danger' : ''}">${icon(danger ? 'trash' : 'info')}</span><h3 id="confirmTitle">${esc(title)}</h3>${body ? `<p id="confirmBody">${esc(body).replace(/\n+/g, '<br>')}</p>` : ''}<div class="confirm-actions"><button type="button" class="btn" data-confirm="0">取消</button><button type="button" class="btn ${danger ? 'danger-solid' : 'primary'}" data-confirm="1">${esc(okLabel)}</button></div></div></div>`;
+    let settled = false;
+    const done = (value, restoreFocus = true) => {
+      if (settled) return;
+      settled = true;
+      removeEventListener('keydown', onKey, true);
+      root.remove();
+      if (activeConfirmation?.root === root) activeConfirmation = null;
+      if (restoreFocus && previousFocus?.isConnected !== false) previousFocus?.focus?.();
+      resolve(value);
+    };
+    const onKey = (e) => {
+      if (e.isComposing) return;
+      if (e.key === 'Escape') { e.preventDefault(); e.stopImmediatePropagation(); done(false); }
+      else if (e.key === 'Enter') { e.preventDefault(); e.stopImmediatePropagation(); done(document.activeElement?.dataset?.confirm === '1'); }
+      else if (e.key === 'Tab') {
+        e.preventDefault(); e.stopImmediatePropagation();
+        const next = document.activeElement?.dataset?.confirm === '1' ? '0' : '1';
+        root.querySelector(`[data-confirm="${next}"]`)?.focus();
+      }
+    };
+    root.addEventListener('click', (e) => {
+      const b = e.target.closest('[data-confirm]');
+      if (b) { e.stopPropagation(); done(b.dataset.confirm === '1'); }
+      else if (e.target.classList.contains('confirm-back')) done(false);
+    });
+    addEventListener('keydown', onKey, true);
+    document.body.appendChild(root);
+    activeConfirmation = { root, previousFocus, finish: done };
+    root.querySelector(`[data-confirm="${danger ? '0' : '1'}"]`).focus();
+  });
+}
+if (typeof window !== 'undefined') window.confirm = confirmDialog;
+
+const BUTTON_OPERATIONS = new WeakMap();
+const APPROVAL_OPERATIONS = new Map();
+function exclusiveUIOperation(operations, key, fn) {
+  if (operations.has(key)) return operations.get(key);
+  let resolve, reject;
+  const pending = new Promise((done, fail) => { resolve = done; reject = fail; });
+  operations.set(key, pending);
+  const settle = (fn, value) => { if (operations.get(key) === pending) operations.delete(key); fn(value); };
+  try { Promise.resolve(fn()).then((value) => settle(resolve, value), (error) => settle(reject, error)); }
+  catch (error) { settle(reject, error); }
+  return pending;
+}
+function busy(btn, fn) {
+  if (!btn) { try { return Promise.resolve(fn()); } catch (error) { return Promise.reject(error); } }
+  return exclusiveUIOperation(BUTTON_OPERATIONS, btn, async () => {
+    const original = { html: btn.innerHTML, disabled: btn.disabled, aria: btn.getAttribute?.('aria-busy') };
+    btn.disabled = true;
+    btn.setAttribute?.('aria-busy', 'true');
+    btn.innerHTML = '<span class="spin"></span>' + btn.textContent;
+    try { return await fn(); }
+    finally {
+      if (btn.isConnected !== false) {
+        btn.disabled = original.disabled;
+        btn.innerHTML = original.html;
+        if (original.aria == null) btn.removeAttribute?.('aria-busy'); else btn.setAttribute?.('aria-busy', original.aria);
+      }
+    }
+  });
+}
+
+let localConversationSyncPending = false;
+async function syncLocalConversations(button) {
+  if (localConversationSyncPending || S.route !== 'settings') return;
+  const status = $('#localSyncStatus');
+  if (!status) return;
+  const routeRevision = S.routeRevision;
+  const openedKey = S.openKey;
+  let syncStage = '会话索引';
+  const ownsView = () => S.route === 'settings' && S.routeRevision === routeRevision && status.isConnected !== false;
+  const setStatus = (message) => { if (ownsView()) status.textContent = message; };
+  localConversationSyncPending = true;
+  try {
+    await busy(button, async () => {
+      try {
+        setStatus('正在重新读取本机会话索引…');
+        const listing = await api('/api/sessions');
+        if (!ownsView()) return;
+        const sessions = Array.isArray(listing.sessions) ? listing.sessions : [];
+        S.sessions = sessions;
+        if (openedKey && S.openKey === openedKey) {
+          syncStage = '当前对话内容';
+          setStatus(`已读取 ${sessions.length} 个会话，正在重新读取当前对话…`);
+          const opened = await api('/api/session?key=' + encodeURIComponent(openedKey));
+          if (!ownsView() || S.openKey !== openedKey) return;
+          S.openInfo = opened.session;
+          S.tl = [];
+          S.tlIndex = new Map();
+          (opened.events || []).forEach(tlApply);
+          S.approvals.filter((approval) => approval.sessionKey === openedKey).forEach(tlApply);
+          setStatus(`已同步 ${sessions.length} 个会话，并重新读取当前对话内容。`);
+        } else {
+          setStatus(`已重新读取 ${sessions.length} 个本机会话索引；完整对话内容会在打开时读取。`);
+        }
+      } catch (error) {
+        setStatus(`${syncStage}读取失败：${error && typeof error.message === 'string' ? error.message : String(error)}`);
+      }
+    });
+  } finally {
+    localConversationSyncPending = false;
+  }
 }
 
 const ACTIONS = {
+  accountOpen: async (button) => {
+    if (typeof wbOpenAccount !== 'function') throw new Error('工具启动组件尚未就绪，请刷新后重试');
+    await wbOpenAccount(button.dataset.target, button.dataset.id, button);
+  },
   refresh: () => route(),
+  syncLocalConversations,
   remoteProbe: async (b) => {
     await busy(b, async () => {
       const out = $('#remoteProbeResult');
@@ -1086,7 +1783,7 @@ const ACTIONS = {
     });
   },
   pairRevoke: async (b) => {
-    if (!confirm('解除这台电脑的手机绑定？旧手机和未使用的二维码都会失效，本地 API 密钥与会话保留。')) return;
+    if (!await confirm('解除这台电脑的手机绑定？旧手机和未使用的二维码都会失效，本地 API 密钥与会话保留。')) return;
     await busy(b, async () => { const r = await api('/api/pair/revoke', {}); S.pairQR = ''; S.pairExpires = 0; toast(r.message, 'ok'); await route(); });
   },
   toolRestart: async (b) => {
@@ -1110,7 +1807,7 @@ const ACTIONS = {
     });
   },
   toolRestore: async (b) => {
-    if (!S.local) S.local = await api('/api/local/accounts');
+    if (b?.isConnected === false || !await ensureLocalAccounts(b)) return;
     await openRestore(b.dataset.target);
   },
   restoreView: async (b) => {
@@ -1120,65 +1817,152 @@ const ACTIONS = {
     if (location.hash === '#sessions') await route(); else location.hash = 'sessions';
   },
   resumeSession: async (b) => {
+    if (b?.isConnected === false || (typeof WB !== 'undefined' && WB.launchPending)) return;
+    const progress = typeof beginLaunchProgress === 'function' ? beginLaunchProgress(b.dataset.target, '原会话', ['提交启动请求']) : null;
+    const owner = $('#restoreError'), route = S.route;
+    if (typeof WB !== 'undefined') WB.launchPending = true;
+    try {
     await busy(b, async () => {
       try {
-        const r = await api('/api/local/resume', { target: b.dataset.target, sessionKey: b.dataset.k });
+        const r = await (typeof launchAPI === 'function' ? launchAPI : ((path, body) => api(path, body)))('/api/local/resume', { target: b.dataset.target, sessionKey: b.dataset.k }, progress);
+        if (r?.ok !== true) throw new Error('启动结果尚未确认');
+        progress?.finish();
+        if (b.isConnected === false || S.route !== route || $('#restoreError') !== owner) return;
         toast(r.result.message, 'ok');
         const out = $('#restoreError');
         if (out) out.innerHTML = `<div class="callout ok">${ico('check')}<div>${esc(r.result.message)}</div></div>`;
       } catch (e) {
+        progress?.fail(e);
+        if (b.isConnected === false || S.route !== route || $('#restoreError') !== owner) return;
         const out = $('#restoreError');
         if (out) out.innerHTML = `<div class="callout warn">${ico('warn')}<div>${esc(e.message)}</div></div>`;
         else throw e;
       }
     });
+    } finally { if (typeof WB !== 'undefined') WB.launchPending = false; }
   },
-  localNew: async (b) => { if (!S.local) S.local = await api('/api/local/accounts'); localEditor(null, b.dataset.kind); },
+  localNew: async (b) => { if (b?.isConnected === false || !await ensureLocalAccounts(b)) return; localEditor(null, b.dataset.kind); },
   localEdit: (b) => localEditor(S.local.accounts.find((a) => a.id === b.dataset.id)),
+  localPreset: (b) => {
+    const input = $('#laBase');
+    if (!input) return;
+    input.value = b.dataset.url || '';
+    for (const id of ['laAuth', 'laWire']) {
+      const control = $('#' + id);
+      if (control) { control.value = 'auto'; control.dispatchEvent(new Event('change', { bubbles: true })); }
+    }
+    $$('.preset-row .preset').forEach((x) => x.classList.toggle('on', x === b));
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  },
+  localWire: (b) => {
+    const select = $('#laWire');
+    if (!select || !['auto', 'responses', 'chat', 'anthropic'].includes(b.dataset.editorWire)) return;
+    select.value = b.dataset.editorWire;
+    select.dispatchEvent(new Event('change', { bubbles: true }));
+    localEditorProtocolSync();
+    localEditorDraftSync();
+  },
   localSave: async (b) => {
     await busy(b, async () => {
       const body = localForm();
-      if (!body.name.trim()) throw new Error('请填写账号名称');
-      if (!body.id && !body.key.trim()) throw new Error('请填写 API Key');
-      const saved = await api('/api/local/accounts', body);
-      const wbTarget = b.dataset.wbTarget;
-      const continueInAgent = wbTarget && b.isConnected && S.route === 'overview';
-      $('#modalRoot').innerHTML = '';
-      if (continueInAgent && typeof wbContinueWithSaved === 'function') {
-        await wbContinueWithSaved(wbTarget, saved.account?.id);
-        return;
+      const editor = $('#laID'), submitted = JSON.stringify(body);
+      const draft = S.localEditorDraft?.input === editor ? S.localEditorDraft : null;
+      const errorBox = $('#localSaveError');
+      if (errorBox) errorBox.textContent = '';
+      if (draft) draft.saving = true;
+      try {
+        if (typeof localValidateForm === 'function') localValidateForm(body);
+        else if (!body.id && !body.key.trim()) throw new Error('请填写 API Key');
+        const saved = await api('/api/local/accounts', body);
+        if (!saved?.account?.id) throw new Error('尚未确认保存结果，请重试');
+        if (saved.account && typeof queueAccountRemoteProbe === 'function') void queueAccountRemoteProbe(saved.account);
+        // A late save must not dismiss another editor or discard newer input.
+        if ($('#laID') !== editor) return;
+        if (JSON.stringify(localForm()) !== submitted || draft?.closing) {
+          // The create succeeded while the user kept editing. Retain the new
+          // record identity so their next save updates it instead of creating
+          // a duplicate card; leave every visible draft field untouched.
+          if (!body.id && saved.account?.id) editor.value = saved.account.id;
+          if (saved.account.sourceRevision) S.localDraftSourceRevision = saved.account.sourceRevision;
+          if (draft) draft.initial = JSON.stringify({ ...body, id: saved.account.id, ...(S.localDraftSourceRevision ? { sourceRevision: S.localDraftSourceRevision } : {}) });
+          if (typeof localEditorDraftSync === 'function') localEditorDraftSync();
+          return;
+        }
+        const wbTarget = b.dataset.wbTarget;
+        const continueInAgent = wbTarget && b.isConnected && S.route === 'overview';
+        $('#modalRoot').innerHTML = '';
+        if (S.localEditorDraft === draft) S.localEditorDraft = null;
+        if (continueInAgent && typeof wbContinueWithSaved === 'function') {
+          await wbContinueWithSaved(wbTarget, saved.account?.id);
+          return;
+        }
+        const directoryReset = body.models?.length && Object.hasOwn(saved.account, 'models') && !saved.account.models?.length;
+        toast(directoryReset ? 'API 已保存，连接信息已变更，请重新读取模型目录' : '密钥已保存，到 Agent 选择工具并确认配置', directoryReset ? '' : 'ok');
+        if (wbTarget) return;
+        if (location.hash === '#accounts') await route(); else location.hash = 'accounts';
+      } catch (error) {
+        if ($('#laID') !== editor) return;
+        if (errorBox && errorBox.isConnected !== false) errorBox.textContent = error?.message || String(error);
+        throw error;
+      } finally {
+        if (draft) draft.saving = false;
       }
-      toast('密钥已保存，到 Agent 选择工具并确认配置', 'ok');
-      if (wbTarget) return;
-      if (location.hash === '#accounts') await route(); else location.hash = 'accounts';
     });
   },
   localModels: async (b) => {
     await busy(b, async () => {
       const modal = !b.dataset.id && $('#laID');
       const body = modal ? localForm() : { id: b.dataset.id };
+      const submitted = modal ? JSON.stringify(body) : '';
+      const modelsInput = modal ? $('#laModels') : null;
       const out = modal ? $('#localProbeResult') : null;
+      const catalog = modal ? $('#laModelCatalog') : null;
+      const status = modal ? $('#laModelSyncState') : null;
+      const stillCurrent = () => !modal || $('#laID') === modal && $('#laModels') === modelsInput && JSON.stringify(localForm()) === submitted;
+      const markStale = () => { if (modal && $('#laID') === modal && status) status.textContent = '配置已更改，请重新同步'; };
+      if (status) status.textContent = '正在同步…';
       try {
-        const result = await api('/api/local/models', body);
+        const result = await api('/api/local/models', modal ? { ...body, draftOnly: true } : body);
+        if (!Array.isArray(result?.models) || result.models.some((model) => typeof model !== 'string')) throw new Error('上游返回的模型列表格式无效');
+        if (!stillCurrent()) { markStale(); return; }
         if (modal && out) {
-          S.localDraftModels = result.models;
-          out.innerHTML = `<div class="callout ok">${ico('check')}<div>读取到 ${result.models.length} 个模型，保存后可在 Agent 中配置。这里只验证目录访问，不代表推理已测试。</div></div><div class="model-catalog">${result.models.map((m) => `<code>${esc(m)}</code>`).join('')}</div>`;
+          const models = [...new Set(result.models.map(model => model.trim()).filter(Boolean))];
+          S.localDraftModels = models;
+          S.localDraftModelsManual = false;
+          if (modelsInput) modelsInput.value = models.join('\n');
+          if (catalog) catalog.innerHTML = localModelCatalogHTML(models);
+          if (status) status.textContent = `${models.length} 个模型 · 已填入草稿`;
+          out.innerHTML = `<div class="callout ${models.length ? 'ok' : 'warn'}">${ico(models.length ? 'check' : 'info')}<div>${models.length ? '模型列表已获取，保存后生效。此操作未发起生成请求。' : '上游未返回模型，可手动填写模型 ID 后保存。'}</div></div>`;
+          if (typeof localEditorDraftSync === 'function') localEditorDraftSync();
         } else { toast(`已读取 ${result.models.length} 个模型；到 Agent 中配置`, 'ok'); await route(); }
       } catch (e) {
+        if (!stillCurrent()) { markStale(); return; }
+        if (status) status.textContent = S.localDraftModels.length ? `${S.localDraftModels.length} 个模型 · 同步失败` : '同步失败';
         if (out) out.innerHTML = `<div class="callout warn">${ico('warn')}<div>${esc(e.message)}</div></div>`; else throw e;
       }
     });
   },
   localSelect: async (b) => { const r = await api('/api/local/accounts/select', { id: b.dataset.id }); toast(r.message, 'ok'); await route(); },
   localDelete: async (b) => {
-    if (!confirm('从账号列表移除？正在运行的工具、会话与实例配置目录会保留（其中可能仍有 Key）。需要撤销访问时，请同时在服务商后台撤销 Key。')) return;
-    await api('/api/local/accounts/delete', { id: b.dataset.id }); toast('已从账号列表移除'); await route();
+    if (!await confirm('从账号列表移除？正在运行的工具、会话与实例配置目录会保留（其中可能仍有 Key）。需要撤销访问时，请同时在服务商后台撤销 Key。')) return;
+    await api('/api/local/accounts/delete', { id: b.dataset.id });
+    if ($('#laID')?.value === b.dataset.id) $('#modalRoot').innerHTML = '';
+    toast('已从账号列表移除', 'ok'); await route();
   },
   localLaunch: async (b) => {
-    if (!confirm('这是高级“独立多开”：会打开一个独立的新实例，不显示原工具的历史。如果只是换 Key 继续原工作，请取消并使用“切换并打开”。确定新建独立实例？')) return;
+    if (b?.isConnected === false || (typeof WB !== 'undefined' && WB.launchPending)) return;
+    const independentOk = confirm('这是高级“独立多开”：会打开一个独立的新实例，不显示原工具的历史。如果只是换 Key 继续原工作，请取消并使用“切换并打开”。确定新建独立实例？');
+    if (!(independentOk instanceof Promise ? await independentOk : independentOk)) return;
+    const target = b.dataset.target || document.getElementById('localTarget-' + b.dataset.id)?.value;
+    const progress = typeof beginLaunchProgress === 'function' ? beginLaunchProgress(target, '独立实例', ['提交启动请求']) : null;
+    const owner = $('#view'), route = S.route;
+    if (typeof WB !== 'undefined') WB.launchPending = true;
+    try {
     await busy(b, async () => {
-      const target = b.dataset.target || document.getElementById('localTarget-' + b.dataset.id)?.value;
-      const r = await api('/api/local/launch', { id: b.dataset.id, target });
+      const r = await (typeof launchAPI === 'function' ? launchAPI : ((path, body) => api(path, body)))('/api/local/launch', { id: b.dataset.id, target }, progress);
+      if (r?.ok !== true) throw new Error('启动结果尚未确认');
+      progress?.finish();
+      if (b.isConnected === false || S.route !== route || $('#view') !== owner) return;
       toast('已启动 ' + (TOOL_LABEL[target] || (target === 'codex-desktop' ? 'Codex Desktop' : target)), 'ok');
       const hint = $('#localLaunchResult');
       if (hint) hint.remove();
@@ -1187,6 +1971,11 @@ const ACTIONS = {
       $('#view').prepend(note);
       if (S.local) { const a = S.local.accounts.find((a) => a.id === b.dataset.id); if (a) { a.target = target; a.lastUsedAt = Date.now(); } }
     });
+    } catch (error) {
+      progress?.fail(error);
+      if (b.isConnected !== false && S.route === route && $('#view') === owner) throw error;
+    }
+    finally { if (typeof WB !== 'undefined') WB.launchPending = false; }
   },
   localSwitch: async (b) => {
     await busy(b, async () => {
@@ -1197,27 +1986,40 @@ const ACTIONS = {
     });
   },
   localSwitchConfirm: async (b) => {
+    if (b?.isConnected === false || (typeof WB !== 'undefined' && WB.launchPending)) return;
     if (!$('#switchReady')?.checked) throw new Error('请先结束任务、保存内容，并勾选确认');
+    const progress = typeof beginLaunchProgress === 'function' ? beginLaunchProgress(b.dataset.target, '当前 API', ['提交启动请求']) : null;
+    const owner = $('#switchReady'), routeBefore = S.route;
+    if (typeof WB !== 'undefined') WB.launchPending = true;
+    try {
     await busy(b, async () => {
       try {
-        const r = await api('/api/local/switch', { id: b.dataset.id, target: b.dataset.target, confirmed: true });
+        const r = await (typeof launchAPI === 'function' ? launchAPI : ((path, body) => api(path, body)))('/api/local/switch', { id: b.dataset.id, target: b.dataset.target, confirmed: true }, progress);
+        if (r?.ok !== true) throw new Error('启动结果尚未确认');
+        progress?.finish();
+        if (S.route !== routeBefore || $('#switchReady') !== owner) return;
         $('#modalRoot').innerHTML = '';
-        await route();
+        const refresh = route(), revision = S.routeRevision;
+        await refresh;
+        if (S.route !== routeBefore || S.routeRevision !== revision || $('#modalRoot')?.innerHTML) return;
         const note = document.createElement('div'); note.className = 'callout ok'; note.textContent = r.result.message;
         $('#view').prepend(note); toast('已切换并打开原工具', 'ok');
       } catch (e) {
+        progress?.fail(e);
+        if (S.route !== routeBefore || $('#switchReady') !== owner) return;
         const out = $('#switchError');
         if (out) out.innerHTML = `<div class="callout warn">${ico('warn')}<div>${esc(e.message)}</div></div>`;
         else throw e;
       }
     });
+    } finally { if (typeof WB !== 'undefined') WB.launchPending = false; }
   },
   localApply: async (b) => {
-    if (!confirm('只更新原工具的 CLI API 配置，不自动打开？会先备份，保留原会话。请先退出旧工具，更新后手动重开；后续打开也会使用这个 Key。')) return;
+    if (!await confirm('只更新原工具的 CLI API 配置，不自动打开？会先备份，保留原会话。请先退出旧工具，更新后手动重开；后续打开也会使用这个 Key。')) return;
     await busy(b, async () => { const r = await api('/api/local/default', { id: b.dataset.id, action: 'apply' }); toast(r.message, 'ok'); });
   },
   localRestore: async (b) => {
-    if (!confirm('恢复通过本地账号应用前的系统配置？若配置后来被其他程序修改，会停止自动恢复以保护新改动。')) return;
+    if (!await confirm('恢复通过本地账号应用前的系统配置？若配置后来被其他程序修改，会停止自动恢复以保护新改动。')) return;
     await busy(b, async () => { const r = await api('/api/local/default', { kind: b.dataset.kind, action: 'restore' }); toast(r.message, 'ok'); await route(); });
   },
   localPaths: async (b) => {
@@ -1276,7 +2078,7 @@ const ACTIONS = {
     });
   },
   logout: async () => {
-    if (!confirm('退出登录后，手机将看不到这台电脑。确定吗？')) return;
+    if (!await confirm('退出登录后，手机将看不到这台电脑。确定吗？')) return;
     await api('/api/logout', {});
     S.pairQR = ''; S.pairExpires = 0;
     toast('已退出登录');
@@ -1284,7 +2086,7 @@ const ACTIONS = {
   },
   toolcfg: async (b) => {
     const tool = b.dataset.tool, a = b.dataset.a;
-    if (a === 'restore' && !confirm('恢复到一键配置之前的原配置？')) return;
+    if (a === 'restore' && !await confirm('恢复到一键配置之前的原配置？')) return;
     const m = $('input[name=cxmode]:checked');
     await busy(b, async () => {
       try {
@@ -1309,7 +2111,7 @@ const ACTIONS = {
   },
   fsGo: (b) => S.fsLoad(b.dataset.p),
   fsPick: () => { const c = S.fsCur(); $('#modalRoot').innerHTML = ''; const i = $('#projPath'); if (i && c) { i.value = c.path; ACTIONS.addProj($('[data-act=addProj]')); } },
-  closeModal: (b, e) => { if (b.classList.contains('modal-back') && e.target.closest('[data-stop]')) return; $('#modalRoot').innerHTML = ''; },
+  closeModal: (b, e) => { if (b.classList.contains('modal-back') && e.target.closest('[data-stop]')) return; return closeLocalEditor(); },
   addProj: async (b) => {
     const p = $('#projPath').value.trim();
     if (!p) { toast('请填写文件夹路径', 'bad'); return; }
@@ -1318,7 +2120,7 @@ const ACTIONS = {
     });
   },
   rmProj: async (b) => {
-    if (!confirm('移除后手机不能再在这个文件夹里发起任务。确定吗？')) return;
+    if (!await confirm('移除后手机不能再在这个文件夹里发起任务。确定吗？')) return;
     await api('/api/projects/remove', { path: b.dataset.path });
     route();
   },
@@ -1326,11 +2128,18 @@ const ACTIONS = {
   reloadSessions: () => loadSessions(),
   openSess: (b) => openSession(b.dataset.k),
   approve: async (b) => {
-    await busy(b, async () => {
-      try { await api('/api/approval', { approvalId: b.dataset.id, decision: b.dataset.d }); toast('已处理', 'ok'); } catch (e) { toast(e.message, 'bad'); }
-      S.approvals = S.approvals.filter((a) => a.approvalId !== b.dataset.id);
-      setApprovalBadge();
-      renderApprovalsBox();
+    await exclusiveUIOperation(APPROVAL_OPERATIONS, b.dataset.id, async () => {
+      const buttons = (typeof $$ === 'function' ? $$('[data-act="approve"]').filter((button) => button.dataset.id === b.dataset.id) : [b])
+        .map((button) => ({ button, disabled: button.disabled }));
+      buttons.forEach(({ button }) => { button.disabled = true; });
+      try { await busy(b, async () => {
+        const result = await api('/api/approval', { approvalId: b.dataset.id, decision: b.dataset.d });
+        if (result?.ok !== true) throw new Error('处理结果尚未确认，待批准操作已保留');
+        S.approvals = S.approvals.filter((a) => a.approvalId !== b.dataset.id);
+        setApprovalBadge();
+        renderApprovalsBox();
+        toast('已处理', 'ok');
+      }); } finally { buttons.forEach(({ button, disabled }) => { if (button.isConnected !== false) button.disabled = disabled; }); }
     });
   },
   send: async (b) => {
@@ -1348,10 +2157,22 @@ const ACTIONS = {
     });
   },
   loadLogs: () => loadLogs(),
-  quit: async () => {
-    if (!confirm('退出 Salcara Bridge？手机将看不到这台电脑，直到你再次打开它。')) return;
-    try { await api('/api/quit', {}); } catch (_) { /* ignore */ }
-    document.body.innerHTML = '<div style="display:flex;height:100vh;align-items:center;justify-content:center;flex-direction:column;gap:8px;font-family:var(--font)"><h2 style="margin:0">Salcara Bridge 已退出</h2><p style="color:#6D768B">可以关闭这个页面了。需要时' + launchHint() + '即可重新打开。</p></div>';
+  quit: async (button) => {
+    if (S.route !== 'settings' || button?.isConnected === false) return;
+    const owner = $('#view'), body = document.body, revision = S.routeRevision;
+    const current = () => S.route === 'settings' && S.routeRevision === revision && $('#view') === owner
+      && owner?.isConnected !== false && button?.isConnected !== false && document.body === body;
+    await busy(button, async () => {
+      try {
+        if (!await confirm('退出 Salcara Bridge？手机将看不到这台电脑，直到你再次打开它。') || !current()) return;
+        const result = await api('/api/quit', {});
+        if (!current()) return;
+        if (result?.ok !== true) throw new Error('服务端未确认退出请求');
+        body.innerHTML = '<div style="display:flex;height:100vh;align-items:center;justify-content:center;flex-direction:column;gap:8px;font-family:var(--font)"><h2 style="margin:0">Salcara Bridge 正在退出</h2><p style="color:#6D768B">退出请求已受理，请稍候…</p></div>';
+      } catch (error) {
+        if (current()) toast('退出未确认，请重试：' + (error?.message || String(error)), 'bad');
+      }
+    });
   },
 };
 
@@ -1369,9 +2190,18 @@ document.addEventListener('click', (e) => {
 document.addEventListener('change', async (e) => {
   const t = e.target;
   try {
-    if (t.id === 'localKind') { S.localKind = t.value; renderLocalCards(); }
+    if (t.id === 'laWire') localEditorProtocolSync();
+    else if (t.id === 'localKind') { S.localKind = t.value; renderLocalCards(); }
+    else if (t.id === 'laRemoteEnabled') {
+      const choices = $('#laRemoteHubChoices');
+      if (choices) choices.hidden = !t.checked;
+      const root = t.closest('.remote-hub-bindings');
+      if (root) root.dataset.touched = 'true';
+      const state = t.closest('.remote-binding-toggle')?.querySelector('.remote-binding-copy small');
+      if (state) state.textContent = t.checked ? '仅对下方已登记站点开放' : '当前关闭';
+    }
+    else if (t.matches?.('[data-remote-hub]')) t.closest('.remote-hub-bindings')?.setAttribute('data-touched', 'true');
     else if (t.id === 'remoteSaved' && t.value) { const u = new URL(t.value); $('#remoteRoot').value = u.origin; $('#remoteHub').value = t.value; S.remoteDiscovery = null; $('#remoteConnect').disabled = true; }
-    else if (t.id === 'laBase') { try { if (new URL(t.value).hostname === 'api.anthropic.com') $('#laAuth').value = 'api-key'; } catch (_) {} }
     else if (t.id.startsWith('toolAPI-') || t.id.startsWith('toolModel-') || t.id.startsWith('toolProtocol-')) {
       const form = toolForm(t.dataset.target), keyChanged = t.id.startsWith('toolAPI-');
       if (keyChanged) {
@@ -1390,20 +2220,17 @@ document.addEventListener('change', async (e) => {
       toast(form.id ? '卡片设置已保存，点击“应用并重启”才会切换' : '已取消选择');
     }
     else if (t.id.startsWith('localTarget-')) { const a = S.local.accounts.find((a) => 'localTarget-' + a.id === t.id); const b = t.closest('.account-launch').querySelector('button'); if (b) b.disabled = !a?.model || !S.local.tools.some((x) => x.id === t.value && x.available); }
-    else if (t.id === 'swAuto') { await api('/api/settings', { autostart: t.checked }); toast(t.checked ? '已开启开机自启' : '已关闭开机自启', 'ok'); }
-    else if (t.id === 'swOpen') { await api('/api/settings', { openConsoleOnStart: t.checked }); toast('已保存', 'ok'); }
-    else if (t.id === 'swPhoneAuto') { await api('/api/settings', { allowPhoneAutoAll: t.checked }); toast(t.checked ? '手机可以选择「全部自动」' : '已禁止手机使用「全部自动」', 'ok'); }
-    else if (t.name === 'pol') {
-      if (t.value === 'auto_all' && !confirm('“全部自动”会让 AI 不经确认运行任意命令，确定开启吗？')) { route(); return; }
-      await api('/api/settings', { approval: t.value }); toast('审批策略已更新', 'ok'); route();
-    } else if (t.name === 'cxmode') {
+    else if (t.id === 'swAuto' || t.id === 'swOpen' || t.id === 'swPhoneAuto' || t.name === 'pol') await saveSetting(t);
+    else if (t.name === 'cxmode') {
       $$('input[name=cxmode]').forEach((i) => i.closest('.radio-card').classList.toggle('sel', i.checked));
     }
+    if (t.id?.startsWith('la') || t.matches?.('[data-remote-hub]')) localEditorDraftSync();
   } catch (err) { toast(err.message, 'bad'); if (t.type === 'checkbox') t.checked = !t.checked; if (t.id.startsWith('tool')) { t.disabled = false; toolDraftStatus(t.dataset.target); } }
 });
 
 document.addEventListener('input', (e) => {
-  if (e.target.id === 'localSearch') { S.localFilter = e.target.value; renderLocalCards(); }
+  if (e.target.id?.startsWith('la')) localEditorDraftSync();
+  else if (e.target.id === 'localSearch') { S.localFilter = e.target.value; renderLocalCards(); }
   else if (e.target.id === 'remoteRoot' || e.target.id === 'remoteHub') { S.remoteDiscovery = null; $('#remoteConnect').disabled = true; }
   else if (e.target.id === 'restoreSearch') { S.restoreSearch = e.target.value; renderRestoreList(); }
   else if (e.target.id === 'sessionSearch') { S.sessSearch = e.target.value; renderSessionList(); }
@@ -1414,7 +2241,13 @@ document.addEventListener('keydown', (e) => {
   if (e.target.id === 'sendText' && e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); ACTIONS.send($('[data-act=send]')); }
   if (e.target.id === 'devInput' && e.key === 'Enter') ACTIONS.saveName($('[data-act=saveName]'));
   if (e.target.id === 'projPath' && e.key === 'Enter') ACTIONS.addProj($('[data-act=addProj]'));
-  if (e.key === 'Escape') $('#modalRoot').innerHTML = '';
+  if (e.key === 'Escape' && $('#modalRoot').children.length) {
+    e.preventDefault();
+    // The shell also handles Escape on window. Closing a nested editor must
+    // not let that same key press close the API library underneath it.
+    e.stopPropagation();
+    void closeLocalEditor();
+  }
 });
 
 /* ---------------- live stream ---------------- */
@@ -1444,6 +2277,7 @@ function connectStream() {
       const i = S.sessions.findIndex((s) => s.sessionKey === ev.session.sessionKey);
       if (i >= 0) S.sessions[i] = ev.session; else if (!S.sessFilter || S.sessFilter === ev.session.tool) S.sessions.unshift(ev.session);
       S.sessions.sort((a, b) => b.updatedAt - a.updatedAt);
+      if (typeof homeSessionUpdated === 'function') homeSessionUpdated(ev.session);
       if (S.route === 'sessions') renderSessionList();
     }
     if (S.route === 'sessions' && S.openKey && ev.sessionKey === S.openKey) {
@@ -1452,7 +2286,7 @@ function connectStream() {
     }
   });
   es.onerror = () => {
-    setConn({ state: 'connecting', error: '与本机程序的连接断开' });
+    setConn({ state: 'connecting', error: '与本机程序的连接断开', consoleDisconnected: true });
     $$('.remote-lamp[data-remote-capability="cli"]').forEach((lamp) => { lamp.className = 'remote-lamp lamp-connecting'; lamp.innerHTML = '<span class="lamp-dot"></span>状态连接中断'; });
   };
 }
@@ -1462,6 +2296,7 @@ function boot() {
   $$('[data-icon]').forEach((el) => { el.innerHTML = icon(el.dataset.icon); });
   const approvalChanges = new Map();
   bootApprovalChanges = approvalChanges;
+  S.approvalsLoadState = 'loading';
   connectStream();
   void route();
   void loadState().catch(() => undefined);
@@ -1475,9 +2310,13 @@ function boot() {
       else approvals.delete(id);
     }
     S.approvals = [...approvals.values()];
+    S.approvalsLoadState = 'ready';
     setApprovalBadge();
     renderApprovalsBox();
-  }).catch(() => undefined).finally(() => { if (bootApprovalChanges === approvalChanges) bootApprovalChanges = null; });
+  }).catch(() => {
+    S.approvalsLoadState = 'error';
+    setApprovalBadge();
+  }).finally(() => { if (bootApprovalChanges === approvalChanges) bootApprovalChanges = null; });
 }
 // Boot after every page script (remote.js, workbench.js) has registered its renderers.
 if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot); else setTimeout(boot, 0);

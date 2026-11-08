@@ -192,6 +192,7 @@ func TestPhoneQuestionClaudeMapsTextKeysAndPreservesInput(t *testing.T) {
 	rec := &recorder{}
 	a := newClaudeAgent(rec.sink, func() Settings { return Settings{Approval: "auto_all"} }, "fixture-not-launched", t.TempDir())
 	t.Cleanup(a.Close)
+	claudeSyntheticPermissionWorker(t, a, "fixture-thread")
 	// Even a stale session-wide allow rule must not bypass user input.
 	a.allowed["fixture-thread"] = map[string]bool{"AskUserQuestion": true}
 	input := json.RawMessage(`{"questions":[{"header":"Format","question":"How should I format?","options":[{"label":"Summary"},{"label":"Detailed"}],"multiSelect":false},{"header":"Sections","question":"Which sections?","options":[{"label":"Intro"},{"label":"Results"}],"multiSelect":true}],"metadata":{"keep":"original"},"answers":{"stale":"wrong"}}`)
@@ -234,6 +235,7 @@ func TestPhoneQuestionClaudeHelperDisconnectCancelsAndRejectsReplay(t *testing.T
 	rec := &recorder{}
 	a := newClaudeAgent(rec.sink, func() Settings { return Settings{Approval: "ask"} }, "fixture-not-launched", t.TempDir())
 	t.Cleanup(a.Close)
+	claudeSyntheticPermissionWorker(t, a, "fixture-thread")
 	ctx, cancel := context.WithCancel(context.Background())
 	r := httptest.NewRequest("POST", PermissionPath, nil).WithContext(ctx)
 	results := make(chan PermissionDecision, 1)

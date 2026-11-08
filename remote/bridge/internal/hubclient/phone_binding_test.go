@@ -41,6 +41,11 @@ func TestPhysicalPhoneBindingAcrossStationsAndRevocation(t *testing.T) {
 	}
 	snapshot(first, true, phone)
 	bound := store.Get()
+	if c.canUpload(bound) || c.Status().Pairing != nil {
+		t.Fatal("QR authorized the phone before reconnecting its stream")
+	}
+	c.lastPairRevision = -1 // the fresh stream resets its pair revision baseline
+	snapshot(bound, true, phone)
 	if !phoneMatches(bound, bound.PhoneBindingID, phone) || !c.canUpload(bound) || !c.Status().Pairing.Paired {
 		t.Fatal("QR did not bind phone locally")
 	}

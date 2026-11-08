@@ -16,6 +16,9 @@ import (
 // the already discovered catalog as a bootstrap, without asking for a model.
 // No chat database, authentication token or session is returned to the browser.
 func PreserveCurrentToolModel(a config.LocalAccount, target string) (config.LocalAccount, error) {
+	if config.IsAdditionalTool(target) {
+		return a, nil
+	}
 	if !ValidTarget(target) || target == "claude-desktop" {
 		return a, errors.New("此工具需要自己的配置适配器")
 	}

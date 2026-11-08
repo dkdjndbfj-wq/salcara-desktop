@@ -1,7 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { win32 } from "node:path";
-import { KNOWN_RESOURCES_PATH, KNOWN_ASAR_SHA256, CURRENT_RESOURCES_PATH, CURRENT_ASAR_SHA256, createResourceVerifier } from "../src/host-policy.mjs";
+import { KNOWN_RESOURCES_PATH, KNOWN_ASAR_SHA256, CURRENT_RESOURCES_PATH, CURRENT_ASAR_SHA256,
+  LATEST_RESOURCES_PATH, LATEST_ASAR_SHA256, LATEST_ARCHIVE_BYTES, createResourceVerifier } from "../src/host-policy.mjs";
 
 function fixture(overrides = {}) {
   const inspected = [];
@@ -50,6 +51,24 @@ test("researched updated desktop accepts only its own pinned digest; old build i
   const redirected = fixture({ redirect: KNOWN_RESOURCES_PATH, redirectTo: CURRENT_RESOURCES_PATH });
   assert.equal(await redirected.verifier(KNOWN_RESOURCES_PATH), false);
   assert.deepEqual(redirected.hashed, []);
+});
+
+test("26.1007 accepts its researched larger archive without widening legacy or unknown version trust", async () => {
+  const current = fixture({ resources: LATEST_RESOURCES_PATH, digest: LATEST_ASAR_SHA256, archiveSize: LATEST_ARCHIVE_BYTES });
+  assert.equal(await current.verifier(LATEST_RESOURCES_PATH), true);
+  assert.deepEqual(current.hashed, [win32.join(LATEST_RESOURCES_PATH, "app.asar")]);
+  for (const archiveSize of [LATEST_ARCHIVE_BYTES - 1, LATEST_ARCHIVE_BYTES + 1]) {
+    const changed = fixture({ resources: LATEST_RESOURCES_PATH, digest: LATEST_ASAR_SHA256, archiveSize });
+    assert.equal(await changed.verifier(LATEST_RESOURCES_PATH), false);
+    assert.deepEqual(changed.hashed, []);
+  }
+  assert.equal(await fixture({ resources: LATEST_RESOURCES_PATH, digest: CURRENT_ASAR_SHA256, archiveSize: LATEST_ARCHIVE_BYTES }).verifier(LATEST_RESOURCES_PATH), false);
+  const legacy = fixture({ archiveSize: LATEST_ARCHIVE_BYTES });
+  assert.equal(await legacy.verifier(KNOWN_RESOURCES_PATH), false);
+  assert.deepEqual(legacy.hashed, []);
+  const unknown = fixture();
+  assert.equal(await unknown.verifier(LATEST_RESOURCES_PATH.replace("2314.0", "2315.0")), false);
+  assert.deepEqual(unknown.inspected, []);
 });
 
 test("unknown paths and platforms never inspect disk", async () => {

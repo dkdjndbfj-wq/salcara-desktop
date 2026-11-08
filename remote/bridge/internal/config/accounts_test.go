@@ -50,6 +50,43 @@ func TestLocalAccountValidation(t *testing.T) {
 	if ValidateLocalAccount(&a) == nil {
 		t.Fatal("accepted multiline model")
 	}
+	a = base
+	a.ModelAllowlist = []string{"gpt-5", "gpt-5"}
+	a.ModelDenylist = []string{"gpt-5-mini"}
+	if err := ValidateLocalAccount(&a); err != nil {
+		t.Fatal(err)
+	}
+	if len(a.ModelAllowlist) != 1 || !ModelAllowed(a, "gpt-5") || ModelAllowed(a, "gpt-5-mini") || ModelAllowed(a, "other") {
+		t.Fatalf("model rules were not applied: %+v", a)
+	}
+}
+
+func TestLocalAccountDefaultAuthUsesExactNormalizedHost(t *testing.T) {
+	for _, tc := range []struct {
+		name, baseURL, auth, want string
+	}{
+		{"official host", "https://api.anthropic.com/v1/", "", "api-key"},
+		{"normalized bare host", " api.anthropic.com/v1 ", "", "api-key"},
+		{"case insensitive host", "https://API.Anthropic.COM/v1", "", "api-key"},
+		{"ordinary provider", "https://api.example.test/v1", "", "bearer"},
+		{"host suffix spoof", "https://api.anthropic.com.example.test/v1", "", "bearer"},
+		{"host prefix spoof", "https://fakeapi.anthropic.com/v1", "", "bearer"},
+		{"path is not host", "https://example.test/api.anthropic.com/v1", "", "bearer"},
+		{"trailing dot is not exact", "https://api.anthropic.com./v1", "", "bearer"},
+		{"preserve explicit bearer", "https://api.anthropic.com/v1", "bearer", "bearer"},
+		{"preserve explicit api key", "https://example.test/v1", "api-key", "api-key"},
+		{"codex official endpoint", "https://chatgpt.com/backend-api/codex", "", "bearer"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			account := LocalAccount{ID: NewUUID(), Name: "测试 API", Kind: "api", BaseURL: tc.baseURL, Key: "synthetic-test-key", AuthMode: tc.auth}
+			if err := ValidateLocalAccount(&account); err != nil {
+				t.Fatal(err)
+			}
+			if account.AuthMode != tc.want {
+				t.Fatalf("AuthMode = %q, want %q", account.AuthMode, tc.want)
+			}
+		})
+	}
 }
 
 func TestLocalMigrationAndClone(t *testing.T) {
@@ -87,6 +124,17 @@ func TestLocalMigrationAndClone(t *testing.T) {
 	copy.LocalToolPaths["codex"] = "changed"
 	if st.Get().LocalAccounts[0].Models[0] != "one" || st.Get().LocalToolPaths["codex"] != "original" {
 		t.Fatal("shallow clone")
+	}
+	if err := st.Update(func(c *Config) error {
+		c.LocalAccounts[0].ModelAllowlist = []string{"one"}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	copy = st.Get()
+	copy.LocalAccounts[0].ModelAllowlist[0] = "changed"
+	if st.Get().LocalAccounts[0].ModelAllowlist[0] != "one" {
+		t.Fatal("model rules were shallow-copied")
 	}
 	if err := st.Update(func(c *Config) error {
 		c.LocalAccounts = nil

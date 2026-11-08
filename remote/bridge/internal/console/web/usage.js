@@ -1,49 +1,140 @@
 'use strict';
-/* 用量: balance left on the relay, today's spend, a trend curve, usage by model
-   and by saved API. Data comes from USAGE (usage-data.js). */
+/* Provider balances and Token activity, by model and saved API. */
 
-const USAGE_VIEW = { days: 14, metric: 'tokens', data: null, seq: 0 };
+const USAGE_VIEW = { days: 14, metric: 'tokens', source: '', options: [], data: null, seq: 0, controller: null, dayTimer: 0 };
+
+function usageVisible() {
+  return S.route === 'usage' && (typeof document === 'undefined' || document.hidden !== true);
+}
+
+function suspendUsage() {
+  clearTimeout(USAGE_VIEW.dayTimer); USAGE_VIEW.dayTimer = 0;
+  ++USAGE_VIEW.seq;
+  USAGE_VIEW.controller?.abort(); USAGE_VIEW.controller = null;
+  USAGE_VIEW.data = null;
+  if (S.route === 'usage') {
+    $('#usRefresh')?.classList.remove('spinning');
+    const view = $('#view');
+    if (view) view.innerHTML = usageSkeleton();
+  }
+}
+
+function scheduleUsageDayChange() {
+  clearTimeout(USAGE_VIEW.dayTimer); USAGE_VIEW.dayTimer = 0;
+  if (typeof document === 'undefined' || !usageVisible()) return;
+  const revision = S.routeRevision, now = new Date(), next = new Date(now);
+  next.setHours(24, 0, 0, 0);
+  USAGE_VIEW.dayTimer = setTimeout(() => {
+    USAGE_VIEW.dayTimer = 0;
+    if (usageVisible() && S.routeRevision === revision) void loadUsage(false);
+  }, Math.max(1, next.getTime() - now.getTime() + 50));
+}
+
+if (typeof document !== 'undefined') document.addEventListener('visibilitychange', () => {
+  // Returning to the window must recheck the selected credentials and date,
+  // rather than briefly presenting the previous account's cached numbers.
+  if (document.hidden === true) suspendUsage();
+  else if (S.route === 'usage') void loadUsage(false);
+});
+addEventListener('pagehide', suspendUsage);
+addEventListener('pageshow', (event) => {
+  if (event.persisted && usageVisible()) void loadUsage(false);
+});
 
 function usageSkeleton() {
+  if (typeof pageSkeleton === 'function') return pageSkeleton('usage');
   const stat = '<div class="us-stat"><div class="skeleton" style="width:50%"></div><div class="skeleton" style="margin-top:14px;height:26px;width:70%"></div></div>';
   return `<div class="us-stats">${stat.repeat(4)}</div><div class="card us-chart-card"><div class="skeleton" style="height:220px"></div></div>`;
 }
 
 function usageHead() {
   $('#headActions').innerHTML = `
+    <div class="us-controls">
+    <select class="input us-source" id="usSource" aria-label="用量来源"></select>
     <div class="us-seg" role="tablist" aria-label="时间范围">
       ${[7, 14, 30].map((d) => `<button type="button" role="tab" data-days="${d}" aria-selected="${USAGE_VIEW.days === d}">${d} 天</button>`).join('')}
     </div>
-    <button class="btn sm icon-only" type="button" id="usRefresh" aria-label="刷新" title="刷新">${icon('refresh')}</button>`;
+    <button class="btn sm icon-only" type="button" id="usRefresh" aria-label="刷新" title="刷新">${icon('refresh')}</button></div>`;
+  usageOptions();
+  $('#usSource').addEventListener('change', (event) => {
+    USAGE_VIEW.source = event.target.value;
+    return loadUsage(false);
+  });
   $$('#headActions [data-days]').forEach((b) => b.addEventListener('click', () => {
     USAGE_VIEW.days = Number(b.dataset.days);
     $$('#headActions [data-days]').forEach((x) => x.setAttribute('aria-selected', String(x === b)));
-    loadUsage(false);
+    return loadUsage(false);
   }));
   $('#usRefresh').addEventListener('click', () => loadUsage(true));
 }
 
+function usageOptions() {
+  const select = $('#usSource');
+  if (!select) return;
+  select.disabled = !USAGE_VIEW.options.length && !USAGE_VIEW.source;
+  const label = (s) => `${s.kind === 'official' || s.kind === 'official_account' ? '账号' : s.kind === 'relay' ? '中转站' : 'API'} · ${s.name || s.host || '未命名'}${s.host && s.host !== s.name ? ' · ' + s.host : ''}`;
+  const names = new Map();
+  for (const option of USAGE_VIEW.options) names.set(label(option), (names.get(label(option)) || 0) + 1);
+  const choices = USAGE_VIEW.options.map((option) => {
+    const name = label(option);
+    let display = name;
+    if (names.get(name) > 1) {
+      const shortID = option.id.slice(-8);
+      const unique = USAGE_VIEW.options.filter((s) => label(s) === name && s.id.slice(-8) === shortID).length === 1;
+      // Put the distinction before a long host so a compact closed control
+      // still tells same-name accounts apart. The option value stays exact.
+      display = label({ ...option, name: `${option.name || option.host || '未命名'} · ${unique ? shortID : option.id}` });
+    }
+    return `<option value="${esc(option.id)}"${option.id === USAGE_VIEW.source ? ' selected' : ''}>${esc(display)}</option>`;
+  });
+  if (USAGE_VIEW.source && !USAGE_VIEW.options.some((s) => s.id === USAGE_VIEW.source)) choices.unshift(`<option value="${esc(USAGE_VIEW.source)}" selected>来源已不可用</option>`);
+  const html = `<option value=""${!USAGE_VIEW.source ? ' selected' : ''}>用量总览</option>${choices.join('')}`;
+  // Keep the select and its styled button alive so keyboard focus survives.
+  if (select.innerHTML !== html) select.innerHTML = html;
+}
+
 RENDER_usage = async function (view) {
   usageHead();
-  if (!USAGE_VIEW.data) view.innerHTML = usageSkeleton();
-  else drawUsage(view, USAGE_VIEW.data);
+  // Credentials or an account can change while another page is open.
+  USAGE_VIEW.data = null;
+  view.innerHTML = usageSkeleton();
   await loadUsage(false);
 };
 
 async function loadUsage(refresh) {
+  clearTimeout(USAGE_VIEW.dayTimer); USAGE_VIEW.dayTimer = 0;
+  if (!usageVisible()) { suspendUsage(); return; }
   const seq = ++USAGE_VIEW.seq;
+  const source = USAGE_VIEW.source, days = USAGE_VIEW.days, revision = S.routeRevision;
+  USAGE_VIEW.controller?.abort();
+  const controller = new AbortController();
+  USAGE_VIEW.controller = controller;
+  const timeout = setTimeout(() => controller.abort(), 30000);
+  const current = () => seq === USAGE_VIEW.seq && usageVisible() && S.routeRevision === revision && USAGE_VIEW.source === source && USAGE_VIEW.days === days;
   const btn = $('#usRefresh');
   if (btn) btn.classList.add('spinning');
+  // Never leave A's numbers under B's selected label, including on failures.
+  USAGE_VIEW.data = null;
+  $('#view').innerHTML = usageSkeleton();
   try {
-    const data = await USAGE.load(USAGE_VIEW.days, refresh);
-    if (seq !== USAGE_VIEW.seq || S.route !== 'usage') return;
+    const data = await USAGE.load(days, refresh, source, controller.signal);
+    if (!current()) return;
+    if (controller.signal.aborted) throw new Error('用量读取超时');
+    USAGE_VIEW.options = data.options;
+    usageOptions();
     USAGE_VIEW.data = data;
     drawUsage($('#view'), data);
   } catch (e) {
-    if (seq !== USAGE_VIEW.seq || S.route !== 'usage') return;
-    $('#view').innerHTML = `<div class="callout bad">${ico('warn')}<div>${esc(e.message)}</div></div>`;
+    if (!current()) return;
+    if (Array.isArray(e.options)) { USAGE_VIEW.options = e.options; usageOptions(); }
+    $('#view').innerHTML = `<div class="callout bad" role="status">${ico('warn')}<div>${esc(controller.signal.aborted ? '用量读取超时' : e.message)}</div></div>`;
   } finally {
+    clearTimeout(timeout);
     if (btn && seq === USAGE_VIEW.seq) btn.classList.remove('spinning');
+    if (seq === USAGE_VIEW.seq) {
+      USAGE_VIEW.controller = null;
+      scheduleUsageDayChange();
+    }
   }
 }
 
@@ -51,59 +142,57 @@ function drawUsage(view, d) {
   if (!d.sources.length) {
     view.innerHTML = `<div class="us-empty">
       <div class="us-empty-ico">${icon('chart')}</div>
-      <div class="us-empty-t">还没有可以统计的 API</div>
-      <div class="us-empty-d">在「API 密钥」里保存中转站的 Key，或登录中转站后，这里会显示余额、花费和模型用量。</div>
+      <div class="us-empty-t">暂无可读取的用量</div>
+      <div class="us-empty-d">${d.options?.length ? '选择 API 或账号查看独立用量。' : '还没有可统计的 API 或账号。'}</div>
       <a class="btn" href="#accounts">${icon('key')}打开 API 密钥</a></div>`;
     return;
   }
   const bal = d.balance;
+  const selected = d.selectedSource ? d.sources.find((s) => s.id === d.selectedSource) : null;
+  const scopeName = selected ? selected.name || selected.host || '当前来源' : '可读取来源合计';
+  const localLabel = (selected ? '该账号的本机记录' : '本机记录') + (d.partial ? ' · 部分记录' : '');
+  const errors = selected ? [selected.error, selected.localUsageError].filter(Boolean) : [];
   const stats = [
-    { k: '中转剩余', v: bal ? USAGE.fmtMoney(bal.value, bal.unit) : '—', f: bal ? esc(bal.host || bal.name) : '中转站未返回余额', main: true },
-    { k: '今日 Token', v: d.today ? USAGE.fmtTokens(d.today.tokens) : '—', f: d.today ? `${USAGE.fmtTokens(d.today.requests)} 次请求${d.todayLocal ? ' · 本机记录' : ''}` : '—' },
-    { k: '今日花费', v: d.today && d.today.cost !== null ? USAGE.fmtMoney(d.today.cost) : '—', f: d.todayLocal ? '本机记录不含花费' : '按实际扣费' },
-    { k: `近 ${d.days} 天花费`, v: d.rangeCost !== null ? USAGE.fmtMoney(d.rangeCost) : '—', f: d.rangeTokens !== null ? `${USAGE.fmtTokens(d.rangeTokens)} tokens${d.curveLocal ? ' · 本机记录' : ''}` : '中转站未返回每日数据' },
+    { k: !selected && d.sources.filter((s) => s.kind !== 'local').length > 1 ? '来源余额' : '剩余金额', v: bal ? USAGE.fmtMoney(bal.value, bal.unit) : '—', f: bal ? bal.name || bal.host || '当前来源' : '服务商未返回余额', title: bal ? [bal.name, bal.host].filter(Boolean).join(' · ') : '服务商未返回余额', main: true },
+    { k: '今日 Token', v: d.today ? USAGE.fmtTokens(d.today.tokens) : '—', f: d.today ? `${USAGE.fmtTokens(d.today.requests)} 次请求` : '暂无数据' },
+    { k: '今日请求', v: d.today ? USAGE.fmtTokens(d.today.requests) : '—', f: d.todayLocal ? localLabel : '服务商返回' },
+    { k: `近 ${d.days} 天 Token`, v: d.rangeTokens !== null ? USAGE.fmtTokens(d.rangeTokens) : '—', f: d.curveLocal ? localLabel : '服务商返回' },
   ];
   const maxModel = Math.max(1, ...d.models.map((m) => m.tokens));
   const totalTok = d.sources.filter((s) => s.kind !== 'local').reduce((a, s) => a + (s.range.tokens || 0), 0) || 1;
   view.innerHTML = `
-  <div class="us-stats">${stats.map((s) => `<div class="us-stat${s.main ? ' main' : ''}"><div class="us-k">${s.k}</div><div class="us-v">${s.v}</div><div class="us-f">${s.f}</div></div>`).join('')}</div>
+  ${errors.length ? `<div class="callout warn us-source-error" role="status">${ico('warn')}<div>${errors.map(esc).join(' · ')}</div></div>` : ''}
+  <div class="us-stats">${stats.map((s) => `<div class="us-stat${s.main ? ' us-stat-balance' : ''}"><div class="us-k">${esc(s.k)}</div><div class="us-v" title="${esc(s.v)}">${esc(s.v)}</div><div class="us-f" title="${esc(s.title || s.f)}">${esc(s.f)}</div></div>`).join('')}</div>
 
   <div class="card us-chart-card">
     <div class="us-card-head">
-      <div><div class="us-title">趋势</div><div class="us-sub">近 ${d.days} 天 · ${d.curveLocal ? '来自本机 Codex / Claude Code 记录（中转站未返回每日数据）' : '所有可读取的 API 合计'}</div></div>
-      <div class="us-seg small" role="tablist" aria-label="指标">
-        <button type="button" data-metric="tokens" aria-selected="${USAGE_VIEW.metric === 'tokens'}">Token</button>
-        ${d.curveLocal ? '' : `<button type="button" data-metric="cost" aria-selected="${USAGE_VIEW.metric === 'cost'}">花费</button>`}
-      </div>
+      <div><div class="us-title">趋势</div><div class="us-sub">近 ${d.days} 天 · ${esc(scopeName)}${d.curveLocal ? ' · 本机记录' : ''}</div></div>
+      <span class="us-tag">Token</span>
     </div>
     <div class="us-chart" id="usChart"></div>
   </div>
 
   <div class="us-cols">
     <div class="card us-list-card">
-      <div class="us-card-head"><div><div class="us-title">模型用量</div><div class="us-sub">按 Token 排序${d.modelsLocal ? ' · 本机记录' : ''}</div></div></div>
+      <div class="us-card-head"><div><div class="us-title">模型用量</div><div class="us-sub">按 Token 排序${d.modelsLocal ? ' · 本机记录' : ''}${d.partial ? ' · 部分记录' : ''}</div></div></div>
       ${d.models.length ? `<ol class="us-models">${d.models.slice(0, 8).map((m, i) => `
-        <li><div class="us-m-top"><span class="us-m-name" title="${esc(m.model)}">${esc(m.model)}</span><span class="us-m-val">${USAGE.fmtTokens(m.tokens)}${d.modelsLocal ? '' : `<em>${USAGE.fmtMoney(m.cost)}</em>`}</span></div>
-        <div class="us-m-bar"><i style="width:${Math.max(2, (m.tokens / maxModel) * 100).toFixed(1)}%;opacity:${(1 - i * 0.08).toFixed(2)}"></i></div></li>`).join('')}</ol>`
-        : '<div class="us-none">中转站没有返回按模型的统计</div>'}
+        <li><div class="us-m-top"><span class="us-m-name" title="${esc(m.model)}">${esc(m.model)}</span><span class="us-m-val">${USAGE.fmtTokens(m.tokens)}</span></div>
+        ${m.tokens !== null ? `<div class="us-m-bar"><i style="width:${Math.max(2, (m.tokens / maxModel) * 100).toFixed(1)}%;opacity:${(1 - i * 0.08).toFixed(2)}"></i></div>` : ''}</li>`).join('')}</ol>`
+        : '<div class="us-none">暂无模型用量</div>'}
     </div>
     <div class="card us-list-card">
-      <div class="us-card-head"><div><div class="us-title">API 用量</div><div class="us-sub">每个已保存的 API</div></div></div>
+      <div class="us-card-head"><div><div class="us-title">来源用量</div><div class="us-sub">${selected ? '当前 API / 账号' : '可读取的来源'}</div></div></div>
       <ul class="us-apis">${d.sources.map((s) => `
         <li class="${s.ok ? '' : 'off'}">
           <span class="us-a-dot ${s.ok ? 'ok' : ''}"></span>
-          <div class="us-a-main"><div class="us-a-name">${esc(s.name)}${s.kind === 'relay' ? '<span class="us-tag">中转站</span>' : s.kind === 'local' ? '<span class="us-tag">本机</span>' : ''}</div>
-            <div class="us-a-sub">${s.ok ? `${esc(s.host)} · ${s.range.known ? USAGE.fmtTokens(s.range.tokens) + ' tokens' + (s.kind === 'local' ? ' · 与上面的 API 有重叠，仅供参考' : ' · ' + USAGE.fmtMoney(s.range.cost)) : '今日 ' + (s.today ? USAGE.fmtTokens(s.today.tokens) + ' tokens' : '—')}` : esc(s.error || '读取失败')}</div>
+          <div class="us-a-main"><div class="us-a-name">${esc(s.name)}${s.kind === 'relay' ? '<span class="us-tag">中转站</span>' : s.kind === 'local' ? '<span class="us-tag">本机</span>' : s.kind === 'official' || s.kind === 'official_account' ? '<span class="us-tag">账号</span>' : ''}</div>
+            <div class="us-a-sub">${s.ok ? `${s.host ? esc(s.host) + ' · ' : ''}${s.range.known ? USAGE.fmtTokens(s.range.tokens) + ' tokens' + (s.kind === 'local' ? ' · 与上面的 API 有重叠，仅供参考' : '') : '今日 ' + (s.today ? USAGE.fmtTokens(s.today.tokens) + ' tokens' : '—')}` : esc(s.error || '读取失败')}</div>
             ${s.ok && s.range.known && s.kind !== 'local' ? `<div class="us-a-share"><i style="width:${((s.range.tokens / totalTok) * 100).toFixed(1)}%"></i></div>` : ''}</div>
-          <div class="us-a-bal">${s.ok && s.remaining.value !== null ? `<b>${USAGE.fmtMoney(s.remaining.value, s.remaining.unit)}</b><span>剩余</span>` : ''}</div>
+          <div class="us-a-bal">${s.ok && s.remaining.value !== null ? `<b>${esc(USAGE.fmtMoney(s.remaining.value, s.remaining.unit))}</b><span>剩余</span>` : ''}</div>
         </li>`).join('')}</ul>
     </div>
   </div>`;
-  $$('[data-metric]', view).forEach((b) => b.addEventListener('click', () => {
-    USAGE_VIEW.metric = b.dataset.metric;
-    $$('[data-metric]', view).forEach((x) => x.setAttribute('aria-selected', String(x === b)));
-    drawChart($('#usChart'), d);
-  }));
+
   drawChart($('#usChart'), d);
 }
 
@@ -138,29 +227,39 @@ function niceMax(v) {
 function drawChart(box, d) {
   if (!box) return;
   if (!d.hasDaily) {
-    box.innerHTML = '<div class="us-none tall">中转站没有返回每日数据，暂时画不出曲线</div>';
+    box.innerHTML = '<div class="us-none tall">暂无每日 Token 数据</div>';
     return;
   }
-  const metric = d.curveLocal ? 'tokens' : USAGE_VIEW.metric;
-  const vals = d.series.map((x) => (metric === 'cost' ? x.cost : x.tokens));
-  const fmt = (v) => (metric === 'cost' ? USAGE.fmtMoney(v) : USAGE.fmtTokens(v));
+  const vals = d.series.map((x) => x.tokens);
+  if (!vals.some((value) => value !== null)) {
+    box.innerHTML = '<div class="us-none tall">服务商未提供每日 Token 数据</div>';
+    return;
+  }
+  const fmt = USAGE.fmtTokens;
   const W = Math.max(320, box.clientWidth || 640), H = 230;
   const pad = { l: 46, r: 14, t: 16, b: 28 };
-  const max = niceMax(Math.max(...vals) * 1.08);
+  const max = niceMax(Math.max(...vals.filter((value) => value !== null)) * 1.08);
   const x = (i) => pad.l + (vals.length === 1 ? (W - pad.l - pad.r) / 2 : (i * (W - pad.l - pad.r)) / (vals.length - 1));
   const y = (v) => pad.t + (1 - v / max) * (H - pad.t - pad.b);
-  const pts = vals.map((v, i) => [x(i), y(v)]);
-  const line = smoothPath(pts);
-  const area = `${line} L${x(vals.length - 1).toFixed(1)},${H - pad.b} L${x(0).toFixed(1)},${H - pad.b} Z`;
-  const grid = [0, 0.5, 1].map((f) => { const gy = y(max * f); return `<line x1="${pad.l}" x2="${W - pad.r}" y1="${gy}" y2="${gy}" class="us-grid"/><text x="${pad.l - 10}" y="${gy + 4}" text-anchor="end" class="us-axis">${fmt(max * f)}</text>`; }).join('');
+  const pts = vals.map((v, i) => v === null ? null : [x(i), y(v)]);
+  const segments = [];
+  let segment = [];
+  for (const point of pts) {
+    if (point) segment.push(point);
+    else if (segment.length) { segments.push(segment); segment = []; }
+  }
+  if (segment.length) segments.push(segment);
+  const line = segments.map(smoothPath).join(' ');
+  const area = segments.map((points) => `${smoothPath(points)} L${points[points.length - 1][0].toFixed(1)},${H - pad.b} L${points[0][0].toFixed(1)},${H - pad.b} Z`).join(' ');
+  const grid = (max <= 1 ? [0, 1] : [0, 0.5, 1]).map((f) => { const gy = y(max * f); return `<line x1="${pad.l}" x2="${W - pad.r}" y1="${gy}" y2="${gy}" class="us-grid"/><text x="${pad.l - 10}" y="${gy + 4}" text-anchor="end" class="us-axis">${fmt(max * f)}</text>`; }).join('');
   const every = Math.ceil(vals.length / 7);
   const labels = d.series.map((s, i) => ((vals.length - 1 - i) % every === 0 ? `<text x="${x(i)}" y="${H - 8}" text-anchor="middle" class="us-axis">${s.date.slice(5).replace('-', '/')}</text>` : '')).join('');
   box.innerHTML = `
-    <svg viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" role="img" aria-label="${metric === 'cost' ? '每日花费' : '每日 Token'}趋势">
-      <defs><linearGradient id="usFill" x1="0" x2="0" y1="0" y2="1"><stop offset="0" stop-color="var(--us-accent)" stop-opacity=".22"/><stop offset="1" stop-color="var(--us-accent)" stop-opacity="0"/></linearGradient></defs>
+    <svg viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" role="img" aria-label="每日 Token 趋势">
+      <defs><linearGradient id="usFill" x1="0" x2="0" y1="0" y2="1"><stop offset="0" stop-color="#8A7BF6" stop-opacity=".30"/><stop offset="1" stop-color="#7CC6FF" stop-opacity="0"/></linearGradient><linearGradient id="usLine" x1="0" x2="1" y1="0" y2="0"><stop offset="0" stop-color="#7CC6FF"/><stop offset=".5" stop-color="#3D7BFA"/><stop offset=".85" stop-color="#A68BF7"/><stop offset="1" stop-color="#F4A6CE"/></linearGradient></defs>
       ${grid}${labels}
       <path d="${area}" fill="url(#usFill)" class="us-area"/>
-      <path d="${line}" class="us-line" pathLength="1"/>
+      <path d="${line}" class="us-line" stroke="url(#usLine)" pathLength="1"/>
       <line class="us-guide" y1="${pad.t}" y2="${H - pad.b}" x1="0" x2="0" opacity="0"/>
       <circle class="us-dot" r="4.5" cx="0" cy="0" opacity="0"/>
       <rect x="${pad.l}" y="0" width="${W - pad.l - pad.r}" height="${H}" fill="transparent" class="us-hit"/>
@@ -175,13 +274,16 @@ function drawChart(box, d) {
     let i = Math.round(((mx - pad.l) / (W - pad.l - pad.r)) * (vals.length - 1));
     i = Math.max(0, Math.min(vals.length - 1, i));
     const s = d.series[i];
-    guide.setAttribute('x1', pts[i][0]); guide.setAttribute('x2', pts[i][0]); guide.setAttribute('opacity', '1');
-    dot.setAttribute('cx', pts[i][0]); dot.setAttribute('cy', pts[i][1]); dot.setAttribute('opacity', '1');
+    const point = pts[i];
+    if (point) {
+      guide.setAttribute('x1', point[0]); guide.setAttribute('x2', point[0]); guide.setAttribute('opacity', '1');
+      dot.setAttribute('cx', point[0]); dot.setAttribute('cy', point[1]); dot.setAttribute('opacity', '1');
+    } else { guide.setAttribute('opacity', '0'); dot.setAttribute('opacity', '0'); }
     tip.hidden = false;
-    tip.innerHTML = `<b>${s.date.slice(5).replace('-', ' 月 ')} 日</b><span>${USAGE.fmtTokens(s.tokens)} tokens</span><span>${USAGE.fmtMoney(s.cost)} · ${USAGE.fmtTokens(s.requests)} 次</span>`;
-    const left = (pts[i][0] / W) * r.width;
+    tip.innerHTML = `<b>${s.date.slice(5).replace('-', ' 月 ')} 日</b><span>${USAGE.fmtTokens(s.tokens)} tokens</span><span>${USAGE.fmtTokens(s.requests)} 次</span>`;
+    const left = (x(i) / W) * r.width;
     tip.style.left = `${Math.min(r.width - 150, Math.max(0, left + 12))}px`;
-    tip.style.top = `${Math.max(0, (pts[i][1] / H) * r.height - 30)}px`;
+    tip.style.top = `${Math.max(0, ((point ? point[1] : H / 2) / H) * r.height - 30)}px`;
   });
   hit.addEventListener('mouseleave', () => { tip.hidden = true; guide.setAttribute('opacity', '0'); dot.setAttribute('opacity', '0'); });
 }

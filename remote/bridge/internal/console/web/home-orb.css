@@ -1,0 +1,8 @@
+/* Shared by the desktop home screen and the native updater window. */
+.orb { position: relative; z-index: 2; width: 144px; height: 144px; border-radius: 50%; border: 1px solid #ffffffb3; padding: 0; background: radial-gradient(circle at var(--hx,34%) var(--hy,28%),#fff 0%,#fff 12%,#ffffff00 48%),radial-gradient(circle at 45% 35%,#fbfdff 0%,#eef2ff 48%,#bac8ed 80%,#a69adf 100%); box-shadow: inset -8px -12px 22px #7481bf4d,inset 7px 10px 17px #fff,0 14px 22px -12px #5769bc73,0 25px 45px -16px #8b7bdd66; transform: perspective(600px) rotateX(var(--rx,0deg)) rotateY(var(--ry,0deg)); }
+.orb-face { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; gap: 22px; transform: translate(var(--ex,0px),var(--ey,0px)); }
+.eye { display: block; width: 9px; height: 32px; border-radius: 8px; background: linear-gradient(#414f8e,#272d54); box-shadow: inset 1px 1px 1px #ffffff88; }
+.orb.blink .eye { animation: blink .18s ease-in-out; }
+@keyframes blink { 50% { transform: scaleY(.08); } }
+.orb-shadow { position: absolute; width: 130px; height: 15px; left: 50%; bottom: 16px; translate: -50% 0; background: radial-gradient(ellipse,#869bd144,transparent 68%); filter: blur(3px); }
+@media (prefers-reduced-motion: reduce) { .orb, .orb-shadow, .orb.blink .eye { animation: none; } }

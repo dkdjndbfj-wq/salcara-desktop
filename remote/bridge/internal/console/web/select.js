@@ -89,7 +89,13 @@
     select.setAttribute('aria-hidden', 'true');
     select.insertAdjacentElement('afterend', button);
     select.addEventListener('change', () => sync(select));
-    new MutationObserver(() => sync(select)).observe(select, { attributes: true, childList: true, subtree: true });
+    new MutationObserver((records) => {
+      // Async source refreshes can replace options while the menu is open.
+      // Retire that snapshot rather than letting an obsolete option choose
+      // the empty value (and silently switch an account back to overview).
+      if (OPEN.select === select && (select.disabled || records.some(record => record.type === 'childList'))) close();
+      sync(select);
+    }).observe(select, { attributes: true, childList: true, subtree: true });
     sync(select);
   }
 

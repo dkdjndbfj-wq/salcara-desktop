@@ -27,7 +27,7 @@
     const bootOrb = document.querySelector('.boot-orb');
     const bootBrand = document.querySelector('.boot-brand');
     const orb = document.getElementById('orb');
-    const hudBrand = document.querySelector('.hud-brand');
+    const hudBrand = document.querySelector('.desktop-brand strong') || document.querySelector('.hud-brand');
     const zone = document.getElementById('orbZone');
     if (!scene || !bootOrb || !orb) return finish();
     const panelOpen = document.body.classList.contains('panel-open');
@@ -65,11 +65,17 @@
 
     setTimeout(() => {
       finish();
-      const foot = document.querySelector('.stage > .foot');
-      foot?.animate([{ opacity: 0, transform: 'translateY(8px)' }, { opacity: 1, transform: 'none' }], { duration: 520, easing: 'cubic-bezier(.16, 1, .3, 1)' });
+      // The orb has landed: the desktop navigation and content settle in.
+      const settle = (selector, delay) => document.querySelectorAll(selector).forEach((el) => el.animate(
+        [{ opacity: 0, transform: 'translateY(8px)' }, { opacity: 1, transform: 'none' }],
+        { duration: 480, delay, easing: 'cubic-bezier(.16, 1, .3, 1)', fill: 'backwards' }));
+      settle('.desktop-header, .desktop-nav', 0);
+      settle('.home-copy', 40);
+      settle('.home-stats', 90);
+      settle('.home-workspace', 120);
+      settle('.panel-back', 0);
       if (!fly) {
-        document.querySelector('.stage > .orb-zone')?.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 400 });
-        document.querySelector('.stage > .hud')?.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 400 });
+        document.querySelector('.home-hero .orb-zone')?.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 400 });
         return;
       }
       const ripple = document.createElement('i');

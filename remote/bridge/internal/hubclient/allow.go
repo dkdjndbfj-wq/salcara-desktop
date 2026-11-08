@@ -16,7 +16,8 @@ var ErrNotAllowed = errors.New("这个文件夹没有被允许远程操作")
 
 // CheckCwd verifies cwd lies inside one of the allowed project folders (or is one). Symlinks are resolved on
 // both sides so a link inside a project can't point outside it; ".." is cleaned away first; on Windows the
-// comparison is case-insensitive. Returns the cleaned cwd.
+// case-folding only selects a candidate; filesystem identity proves the root.
+// Returns the resolved cwd.
 func CheckCwd(cwd string, projects []protocol.Project) (string, error) {
 	cwd = strings.TrimSpace(cwd)
 	if cwd == "" {
@@ -26,8 +27,15 @@ func CheckCwd(cwd string, projects []protocol.Project) (string, error) {
 		return "", ErrNotAllowed
 	}
 	clean := filepath.Clean(cwd)
-	real, err := resolve(clean)
+	if runtime.GOOS == "windows" && !workspaceLocalRoot(clean) {
+		// Reject caller-selected SMB/device paths before any filesystem access.
+		return "", ErrNotAllowed
+	}
+	real, err := resolveCwdPath(clean)
 	if err != nil {
+		if errors.Is(err, ErrNotAllowed) {
+			return "", ErrNotAllowed
+		}
 		return "", errors.New("文件夹不存在：" + clean)
 	}
 	if st, err := os.Stat(real); err != nil || !st.IsDir() {
@@ -35,18 +43,40 @@ func CheckCwd(cwd string, projects []protocol.Project) (string, error) {
 	}
 	win := runtime.GOOS == "windows"
 	for _, p := range projects {
-		if p.Path == "" || !filepath.IsAbs(p.Path) {
+		if p.Path == "" || !filepath.IsAbs(p.Path) || win && !workspaceLocalRoot(p.Path) {
 			continue
 		}
-		root, err := resolve(filepath.Clean(p.Path))
+		root, err := resolveCwdPath(filepath.Clean(p.Path))
 		if err != nil {
 			continue
 		}
-		if IsWithin(root, real, win) {
-			return clean, nil
+		if IsWithin(root, real, win) && sameCwdAncestor(root, real) {
+			return real, nil
 		}
 	}
 	return "", ErrNotAllowed
+}
+
+// IsWithin alone is insufficient on Windows volumes with case-sensitive
+// directories. Walk the resolved target back to the candidate root depth and
+// compare actual filesystem objects, not two folded spellings.
+func sameCwdAncestor(root, target string) bool {
+	rel, err := filepath.Rel(root, target)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+		return false
+	}
+	ancestor := target
+	if rel != "." {
+		for range strings.Split(rel, string(filepath.Separator)) {
+			ancestor = filepath.Dir(ancestor)
+		}
+	}
+	a, err := os.Stat(root)
+	if err != nil || !a.IsDir() {
+		return false
+	}
+	b, err := os.Stat(ancestor)
+	return err == nil && b.IsDir() && os.SameFile(a, b)
 }
 
 func resolve(p string) (string, error) {

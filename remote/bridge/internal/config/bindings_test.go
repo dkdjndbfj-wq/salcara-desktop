@@ -32,3 +32,21 @@ func TestToolBindingsSeparateSelectionApplicationAndCopy(t *testing.T) {
 		t.Fatal("edited API silently became applied")
 	}
 }
+
+func TestAppliedBindingRequiresSalcaraProvenance(t *testing.T) {
+	a := LocalAccount{ID: "one", Kind: "codex", Name: "first", BaseURL: "https://api.test", Key: "private-one", Model: "model", AuthMode: "bearer"}
+	c := Config{LocalAccounts: []LocalAccount{a}, ToolAPIApplied: map[string]AppliedAPI{
+		"codex": {AccountID: a.ID, Fingerprint: AccountFingerprint(a), Provider: "foreign-provider"},
+	}}
+	if _, ok := c.AuthorizedAppliedToolAccount("codex"); ok {
+		t.Fatal("an imported or legacy binding was treated as remote authorization")
+	}
+	c.RecordAppliedAPI("codex", a, "salcara-provider")
+	b, ok := c.AppliedToolBinding("codex")
+	if !ok || b.ManagedBy != "salcara" {
+		t.Fatalf("explicit Salcara apply did not create provenance marker: %+v", b)
+	}
+	if _, ok := c.AuthorizedAppliedToolAccount("codex"); !ok {
+		t.Fatal("explicit Salcara apply was not authorized")
+	}
+}

@@ -55,6 +55,12 @@ func (m *claudeMapper) subagentEntry(l *claudeLine) []protocol.Event {
 				e.Output = truncTail(strings.Join(l.Errors, "\n"), maxOutputChars)
 			}
 		}
+		if tu := m.tools[parent]; tu != nil && tu.ev.Status == "interrupted" {
+			e.Status = "interrupted"
+			if e.Output == "" {
+				e.Output = tu.ev.Output
+			}
+		}
 		if tu := m.tools[parent]; tu != nil {
 			tu.ev = e
 		}
@@ -69,6 +75,9 @@ func (m *claudeMapper) subagentEntry(l *claudeLine) []protocol.Event {
 }
 
 func (m *claudeMapper) hasActiveSubtasks() bool {
+	if m == nil {
+		return false
+	}
 	for _, active := range m.activeTasks {
 		if active {
 			return true
@@ -114,7 +123,13 @@ func (m *claudeMapper) taskLifecycle(l *claudeLine) ([]protocol.Event, bool) {
 	if e.Kind == "" {
 		e.Kind, e.Title = "other", "后台任务"
 	}
-	if l.Subtype == "task_progress" && (e.Status == "done" || e.Status == "failed") {
+	// Once a task has been explicitly stopped/killed, later progress or a
+	// delayed completion notification belongs to the old launch and must not
+	// resurrect it as a successful child.
+	if e.Status == "interrupted" {
+		return []protocol.Event{e}, true
+	}
+	if l.Subtype == "task_progress" && (e.Status == "done" || e.Status == "failed" || e.Status == "interrupted") {
 		return nil, true
 	}
 	if l.Description != "" && e.Kind != "subagent" {
@@ -134,8 +149,10 @@ func (m *claudeMapper) taskLifecycle(l *claudeLine) ([]protocol.Event, bool) {
 		switch status {
 		case "completed":
 			e.Status = "done"
-		case "failed", "stopped", "killed":
+		case "failed":
 			e.Status = "failed"
+		case "stopped", "killed":
+			e.Status = "interrupted"
 		}
 	}
 	if l.Summary != "" {
@@ -145,7 +162,7 @@ func (m *claudeMapper) taskLifecycle(l *claudeLine) ([]protocol.Event, bool) {
 		e.Output = titleText("正在使用 " + l.LastToolName)
 	}
 	if status == "stopped" || status == "killed" {
-		e.Output = strings.TrimSpace("已停止\n" + e.Output)
+		e.Output = strings.TrimSpace("被中断\n" + e.Output)
 	}
 	if l.Usage != nil && l.Usage.DurationMS > 0 {
 		e.DurationMS = l.Usage.DurationMS

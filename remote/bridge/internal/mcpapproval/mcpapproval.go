@@ -6,11 +6,14 @@ package mcpapproval
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 	"time"
 )
@@ -19,6 +22,22 @@ import (
 const decisionTimeout = 11 * time.Minute
 
 const defaultProtocolVersion = "2025-06-18"
+
+const (
+	maxMessageBytes    = 1 << 20
+	maxInFlight        = 32
+	maxSessionRequests = 65_536
+	maxRequestIDBytes  = 256
+	maxDecisionBytes   = 2 << 20
+	shutdownTimeout    = time.Second
+)
+
+var errMessageTooLarge = errors.New("MCP input line exceeds the size limit")
+
+type pendingCall struct {
+	ctx    context.Context
+	cancel context.CancelFunc
+}
 
 type message struct {
 	JSONRPC string          `json:"jsonrpc,omitempty"`
@@ -34,15 +53,20 @@ func Run(port int, token, session string) error {
 
 // Serve is Run with explicit streams and endpoint (used by tests).
 func Serve(in io.Reader, out io.Writer, endpoint, token, session string) error {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	var wmu sync.Mutex
-	write := func(v any) {
+	writeLocked := func(v any) {
 		b, err := json.Marshal(v)
 		if err != nil {
 			return
 		}
+		_, _ = out.Write(append(b, '\n'))
+	}
+	write := func(v any) {
 		wmu.Lock()
 		defer wmu.Unlock()
-		_, _ = out.Write(append(b, '\n'))
+		writeLocked(v)
 	}
 	reply := func(id json.RawMessage, result any) {
 		write(map[string]any{"jsonrpc": "2.0", "id": id, "result": result})
@@ -50,15 +74,85 @@ func Serve(in io.Reader, out io.Writer, endpoint, token, session string) error {
 	replyErr := func(id json.RawMessage, code int, msg string) {
 		write(map[string]any{"jsonrpc": "2.0", "id": id, "error": map[string]any{"code": code, "message": msg}})
 	}
-	client := &http.Client{Timeout: decisionTimeout}
+	client := &http.Client{Timeout: decisionTimeout, CheckRedirect: func(*http.Request, []*http.Request) error {
+		// The loopback approval endpoint is not a redirectable resource. In
+		// particular a redirect must not forward the scoped permission token.
+		return http.ErrUseLastResponse
+	}}
+	defer client.CloseIdleConnections()
 	var wg sync.WaitGroup
-	br := bufio.NewReaderSize(in, 1<<20)
+	var mu sync.Mutex
+	pending := make(map[string]*pendingCall)
+	// MCP request IDs must not be reused during one connection. Keeping bounded
+	// tombstones also stops a delayed cancellation targeting a newer approval.
+	seen := make(map[string]struct{})
+	defer func() {
+		cancel()
+		mu.Lock()
+		for _, call := range pending {
+			call.cancel()
+		}
+		mu.Unlock()
+		done := make(chan struct{})
+		go func() { wg.Wait(); close(done) }()
+		select {
+		case <-done:
+		case <-time.After(shutdownTimeout):
+			// A caller-supplied Writer can block forever and cannot be cancelled
+			// through io.Writer. Do not let it keep the helper alive after EOF.
+		}
+	}()
+	br := bufio.NewReaderSize(in, 64<<10)
 	for {
-		line, err := br.ReadBytes('\n')
+		line, err := boundedLine(br)
+		if err != nil && err != io.EOF {
+			return err
+		}
 		if len(bytes.TrimSpace(line)) > 0 {
 			var m message
-			if json.Unmarshal(line, &m) == nil {
-				hasID := len(m.ID) > 0 && string(m.ID) != "null"
+			if uniqueObject(line, &m) == nil && m.JSONRPC == "2.0" {
+				hasID := len(m.ID) > 0
+				key, validID := requestKey(m.ID)
+				if hasID {
+					if !validID {
+						return errors.New("invalid MCP request ID")
+					}
+					if _, duplicate := seen[key]; duplicate {
+						// There is no unambiguous response for two requests sharing
+						// an ID. Close this connection and cancel pending work.
+						return errors.New("reused MCP request ID")
+					}
+					if len(seen) >= maxSessionRequests {
+						return errors.New("MCP session request limit reached")
+					}
+					seen[key] = struct{}{}
+				}
+				if m.Method == "notifications/cancelled" && !hasID {
+					var p struct {
+						RequestID json.RawMessage `json:"requestId"`
+					}
+					if uniqueObject(m.Params, &p) == nil {
+						if id, ok := requestKey(p.RequestID); ok {
+							mu.Lock()
+							if call := pending[id]; call != nil {
+								call.cancel()
+							}
+							mu.Unlock()
+						}
+					}
+					if err == io.EOF {
+						return nil
+					}
+					continue
+				}
+				// tools/call without an ID is not an approval request. In
+				// particular it must not cause an unanswerable side effect.
+				if !hasID {
+					if err != nil {
+						return nil
+					}
+					continue
+				}
 				switch m.Method {
 				case "initialize":
 					var p struct {
@@ -78,11 +172,33 @@ func Serve(in io.Reader, out io.Writer, endpoint, token, session string) error {
 				case "tools/list":
 					reply(m.ID, map[string]any{"tools": []any{toolDef()}})
 				case "tools/call":
+					mu.Lock()
+					if len(pending) >= maxInFlight {
+						mu.Unlock()
+						replyErr(m.ID, -32000, "too many pending approvals")
+						break
+					}
+					callCtx, callCancel := context.WithCancel(ctx)
+					call := &pendingCall{ctx: callCtx, cancel: callCancel}
+					pending[key] = call
+					mu.Unlock()
 					wg.Add(1)
-					go func(m message) {
+					go func(m message, key string, call *pendingCall) {
 						defer wg.Done()
-						reply(m.ID, callApprove(client, endpoint, token, session, m.Params))
-					}(m)
+						defer call.cancel()
+						result := callApprove(call.ctx, client, endpoint, token, session, m.Params)
+						wmu.Lock()
+						defer wmu.Unlock()
+						mu.Lock()
+						// Completion/cancellation linearizes here; never send a
+						// cancelled request's late allow into the host stream.
+						live := pending[key] == call && call.ctx.Err() == nil
+						delete(pending, key)
+						mu.Unlock()
+						if live {
+							writeLocked(map[string]any{"jsonrpc": "2.0", "id": m.ID, "result": result})
+						}
+					}(m, key, call)
 				default:
 					if hasID {
 						replyErr(m.ID, -32601, "method not found: "+m.Method)
@@ -92,13 +208,102 @@ func Serve(in io.Reader, out io.Writer, endpoint, token, session string) error {
 			}
 		}
 		if err != nil {
-			wg.Wait()
 			if err == io.EOF {
 				return nil
 			}
 			return err
 		}
 	}
+}
+
+// Unlike ReadBytes, this never accumulates an unbounded line before rejecting it.
+func boundedLine(br *bufio.Reader) ([]byte, error) {
+	line := make([]byte, 0, 4096)
+	for {
+		part, err := br.ReadSlice('\n')
+		if len(line)+len(part) > maxMessageBytes {
+			return nil, errMessageTooLarge
+		}
+		line = append(line, part...)
+		if !errors.Is(err, bufio.ErrBufferFull) {
+			return line, err
+		}
+		if len(line) == maxMessageBytes {
+			// ReadSlice otherwise waits for another full reader buffer, EOF or
+			// a delimiter. A peer sending max+1 bytes with stdin still open
+			// must be rejected immediately, not hold up all cancellation input.
+			if _, nextErr := br.ReadByte(); nextErr != nil {
+				return line, nextErr
+			}
+			return nil, errMessageTooLarge
+		}
+	}
+}
+
+// Request IDs are strings or integers, with distinct numeric/string domains.
+// No float conversion: large integer IDs must not collide through precision loss.
+func requestKey(raw json.RawMessage) (string, bool) {
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 0 || len(raw) > maxRequestIDBytes || !json.Valid(raw) {
+		return "", false
+	}
+	if raw[0] == '"' {
+		var value string
+		if json.Unmarshal(raw, &value) == nil {
+			return "s:" + value, true
+		}
+		return "", false
+	}
+	value := string(raw)
+	if value == "-0" {
+		value = "0"
+	}
+	for i, c := range value {
+		if c < '0' || c > '9' {
+			if i != 0 || c != '-' {
+				return "", false
+			}
+		}
+	}
+	return "n:" + value, true
+}
+
+// Reject ambiguous envelope keys instead of letting encoding/json choose the
+// last ID, method or requestId. Nested tool input remains the caller's payload.
+func uniqueObject(raw []byte, dst any) error {
+	d := json.NewDecoder(bytes.NewReader(raw))
+	tok, err := d.Token()
+	if err != nil || tok != json.Delim('{') {
+		return errors.New("expected JSON object")
+	}
+	keys := map[string]bool{}
+	for d.More() {
+		tok, err := d.Token()
+		if err != nil {
+			return err
+		}
+		key, ok := tok.(string)
+		if !ok {
+			return errors.New("invalid object key")
+		}
+		key = strings.ToLower(key)
+		if keys[key] {
+			return errors.New("duplicate object key")
+		}
+		keys[key] = true
+		var value json.RawMessage
+		if err := d.Decode(&value); err != nil {
+			return err
+		}
+	}
+	if _, err := d.Token(); err != nil {
+		return err
+	}
+	var tail any
+	if d.Decode(&tail) != io.EOF {
+		return errors.New("trailing JSON data")
+	}
+	return json.Unmarshal(raw, dst)
 }
 
 func toolDef() map[string]any {
@@ -126,7 +331,7 @@ func deny(msg string) map[string]any {
 	return textResult(map[string]any{"behavior": "deny", "message": msg})
 }
 
-func callApprove(client *http.Client, endpoint, token, session string, params json.RawMessage) map[string]any {
+func callApprove(ctx context.Context, client *http.Client, endpoint, token, session string, params json.RawMessage) map[string]any {
 	var p struct {
 		Name      string `json:"name"`
 		Arguments struct {
@@ -144,7 +349,7 @@ func callApprove(client *http.Client, endpoint, token, session string, params js
 	}
 	body, _ := json.Marshal(map[string]any{"session": session, "tool_name": p.Arguments.ToolName,
 		"input": input, "tool_use_id": p.Arguments.ToolUseID})
-	req, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
 		return deny("无法联系 Salcara 桥接程序")
 	}
@@ -155,7 +360,10 @@ func callApprove(client *http.Client, endpoint, token, session string, params js
 		return deny("无法联系 Salcara 桥接程序：" + err.Error())
 	}
 	defer resp.Body.Close()
-	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 16<<20))
+	raw, readErr := io.ReadAll(io.LimitReader(resp.Body, maxDecisionBytes+1))
+	if readErr != nil || len(raw) > maxDecisionBytes {
+		return deny("Salcara 桥接程序返回了无效的结果")
+	}
 	if resp.StatusCode != http.StatusOK {
 		return deny(fmt.Sprintf("Salcara 桥接程序拒绝了请求（HTTP %d）", resp.StatusCode))
 	}

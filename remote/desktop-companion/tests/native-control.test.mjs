@@ -36,6 +36,15 @@ test("native call uses genuine supplied request context, fixed namespace/host/so
   assert.notEqual(f.sent[0].params.callId, f.sent[1].params.callId);
 });
 
+test("native send serializes exact model and thinking under the original caller context", async () => {
+  const f = fixture();
+  const args = { threadId: "target", prompt: "fixture", model: "gpt-fixture", thinking: "high" };
+  await f.invoke({ pipePath: pipe, context, tool: "send_message_to_thread", args });
+  assert.deepEqual(f.sent[0].params.arguments, args);
+  assert.equal(f.sent[0].params.threadId, context.threadId);
+  assert.equal(f.sent[0].params.tool, "send_message_to_thread");
+});
+
 test("arbitrary pipe, missing context, unsupported action and revoked call never open a socket", async () => {
   const f = fixture(); const revoked = new AbortController(); revoked.abort();
   for (const options of [{ pipePath: "\\\\.\\pipe\\other" }, { context: undefined }, { context: { ...context, threadId: "fake" } },

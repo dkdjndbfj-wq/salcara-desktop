@@ -24,13 +24,22 @@ import (
 	"sync"
 	"time"
 
+	"salcara/bridge/internal/accounthealth"
 	"salcara/bridge/internal/agents"
+	"salcara/bridge/internal/agentwatchdog"
+	"salcara/bridge/internal/apiservice"
+	"salcara/bridge/internal/codexaccounts"
 	"salcara/bridge/internal/config"
 	"salcara/bridge/internal/desktopcompanion"
+	"salcara/bridge/internal/directrelay"
 	"salcara/bridge/internal/gateway"
 	"salcara/bridge/internal/hubclient"
 	"salcara/bridge/internal/launcher"
+	"salcara/bridge/internal/pluginhook"
+	"salcara/bridge/internal/prober"
 	"salcara/bridge/internal/protocol"
+	"salcara/bridge/internal/toolcfg"
+	"salcara/bridge/internal/usageledger"
 )
 
 //go:embed web
@@ -41,18 +50,21 @@ const CookieName = "salcara_console"
 
 // Deps are what the console needs from the rest of the program.
 type Deps struct {
-	Store         *config.Store
-	Hub           *hubclient.Client
-	Version       string
-	Port          int
-	LogPath       string
-	Exe           string
-	Dir           string // config / log folder (for "打开文件夹")
-	Logger        *log.Logger
-	Quit          func()
-	Local         *launcher.Service
-	ClaudeDesktop *launcher.ClaudeDesktop3PService
-	Companion     CompanionInstaller
+	Store           *config.Store
+	Hub             *hubclient.Client
+	Version         string
+	Port            int
+	LogPath         string
+	Exe             string
+	Dir             string // config / log folder (for "打开文件夹")
+	Logger          *log.Logger
+	Quit            func()
+	Local           *launcher.Service
+	ClaudeDesktop   *launcher.ClaudeDesktop3PService
+	Companion       CompanionInstaller
+	CodexAccounts   *codexaccounts.Service
+	OfficialGateway func(context.Context, config.LocalAccount, []byte, bool, bool, func() bool) (*http.Response, error)
+	OfficialImages  func(context.Context, config.LocalAccount, []byte, bool, string, func() bool) (*http.Response, error)
 }
 
 // CompanionInstaller is local-only. Installation alone never connects to a
@@ -66,9 +78,10 @@ type CompanionInstaller interface {
 
 // Server is the console.
 type Server struct {
-	d     Deps
-	token string
-	log   *log.Logger
+	pluginHooks *pluginhook.Hooks
+	d           Deps
+	token       string
+	log         *log.Logger
 
 	mgrMu sync.RWMutex
 	mgr   agents.Manager
@@ -76,26 +89,94 @@ type Server struct {
 	subMu sync.Mutex
 	subs  map[chan sseMsg]struct{}
 
-	pendMu  sync.Mutex
-	pending map[string]protocol.Event
+	pendMu           sync.Mutex
+	pending          map[string]protocol.Event
+	activityRevision uint64
+	activeSessions   map[string]string
 
 	byMu      sync.Mutex
 	byDesktop map[string]time.Time
 
-	usageMu      sync.Mutex
-	usageAt      time.Time
-	usageKey     string
-	usageData    map[string]any
-	usageErr     string
-	nativeMu     sync.Mutex
-	nativeAt     time.Time
-	nativeState  desktopcompanion.NativeConnection
-	nativeFlight *nativeStatusFlight
-	nativeEpoch  uint64
-	pairMu       sync.Mutex
-	pairPNG      []byte
-	pairExpires  int64
-	pairIdentity string
+	usageMu                  sync.Mutex
+	usageAt                  time.Time
+	usageKey                 string
+	usageData                map[string]any
+	usageErr                 string
+	nativeMu                 sync.Mutex
+	nativeAt                 time.Time
+	nativeState              desktopcompanion.NativeConnection
+	nativeFlight             *nativeStatusFlight
+	nativeEpoch              uint64
+	modelProbeMu             sync.Mutex
+	modelProbeSeq            map[string]uint64
+	modelProbeNext           uint64
+	accountTestMu            sync.Mutex
+	accountTests             map[string]bool
+	accountTestHTTP          *http.Client
+	remoteDiscoveryMu        sync.Mutex
+	remoteModeMu             sync.Mutex
+	remoteModeSeq            uint64
+	remoteDiscoverySeq       uint64
+	remoteDiscoveryLatest    map[string]uint64
+	launchModelProbe         func(context.Context, config.LocalAccount) ([]string, error)
+	pairMu                   sync.Mutex
+	pairPNG                  []byte
+	pairExpires              int64
+	pairIdentity             string
+	accountPool              *gateway.AccountPool
+	apiService               *apiservice.Service
+	apiNetwork               *apiListenerManager
+	officialUsageMaintenance *officialUsageMaintenance
+	usageLedger              *usageledger.Ledger
+	accountCostMu            sync.Mutex
+	accountCostSamples       map[string]accountCostSample
+	usageOverview            *usageOverviewCache
+	accountUsage             *accountUsageCache
+	managedLaunchMu          sync.Mutex
+	managedLaunchPreviews    map[string]managedLaunchPreview
+	codexProfileMu           sync.Mutex
+	codexProfile             *toolcfg.CodexServiceProfile
+	backgroundMu             sync.Mutex
+	proberStarted            bool
+	watchdogStarted          bool
+	watchdog                 *agentwatchdog.Watchdog
+
+	// Self-hosted Hub (optional embedded relay server)
+	hubMu             sync.RWMutex
+	embeddedHub       *HubManager
+	embeddedHubServer *http.Server
+
+	// P2P direct relay (optional LAN/VPN direct connection mode)
+	directLifecycleMu   sync.Mutex
+	directMu            sync.RWMutex
+	directRelay         *directrelay.Relay
+	directCommandCancel context.CancelFunc
+	directEventMu       sync.RWMutex
+	directEventTargets  map[string]directEventSubscription
+	// directSessionKeys is a process-lifetime privacy fence. A session that
+	// was ever created or opened through the authenticated P2P transport must
+	// never be mirrored through Hub later, even after the phone disconnects,
+	// switches sessions, or is revoked. directEventTargets routes live events
+	// per session; this set controls whether Hub may see them at all.
+	directSessionKeys map[string]struct{}
+	// directStartsInFlight closes the small window between admitting a direct
+	// session.start and learning its generated key. Events are suppressed from
+	// Hub while that window is open so a fast agent cannot leak its first frame.
+	// It is intentionally fail-closed and may briefly suppress unrelated live
+	// session events while the local start call is completing.
+	directStartsInFlight int
+	// directStartUnknown is set when a direct start returns an uncertain error.
+	// The newly-created key cannot be proven, so all session events remain
+	// Hub-private for the rest of this process rather than risking a leak.
+	directStartUnknown bool
+	directHTTP         *http.Server
+	directListeners    []net.Listener
+	directHosts        []string
+	directFingerprint  string
+	directStartedAt    time.Time
+	directLastError    string
+	directListenAddr   string // test seam; production uses the dedicated direct port
+	directHostProvider func() []string
 }
 
 // nativeStatusFlight coalesces the expensive local desktop probe. The cache is
@@ -123,15 +204,189 @@ func New(d Deps) *Server {
 	if d.ClaudeDesktop == nil {
 		d.ClaudeDesktop = launcher.NewClaudeDesktop3P(d.Local)
 	}
-	return &Server{
-		d:       d,
-		token:   config.RandomToken(24),
-		log:     d.Logger,
-		subs:    map[chan sseMsg]struct{}{},
-		pending: map[string]protocol.Event{},
-
-		byDesktop: map[string]time.Time{},
+	apiService := apiservice.New(func() config.Config {
+		if d.Store == nil {
+			return config.Config{}
+		}
+		return d.Store.Get()
+	})
+	apiService.Official = d.OfficialGateway
+	apiService.OfficialImages = d.OfficialImages
+	ledger := newUsageLedger(d)
+	if ledger != nil {
+		apiService.Observe = func(o usageledger.Observation) {
+			ledger.Append(o)
+			// Update LastUsedAt for the account that served this request.
+			// Fire-and-forget: a write failure here must never block the response path.
+			if o.AccountID != "" && o.HTTPStatus >= 200 && o.HTTPStatus < 300 && d.Store != nil {
+				go func(accountID string) {
+					now := time.Now().UnixMilli()
+					_ = d.Store.Update(func(c *config.Config) error {
+						for i := range c.LocalAccounts {
+							if c.LocalAccounts[i].ID == accountID {
+								c.LocalAccounts[i].LastUsedAt = now
+								return nil
+							}
+						}
+						return nil
+					})
+				}(o.AccountID)
+			}
+		}
+		apiService.BeginUsage = ledger.BeginAccountUsage
 	}
+	if d.Hub != nil {
+		apiService.ModelCatalog = d.Hub.OfficialModelCatalog
+	}
+	s := &Server{
+		d:                  d,
+		pluginHooks:        pluginhook.FromEnv(),
+		token:              config.RandomToken(24),
+		log:                d.Logger,
+		subs:               map[chan sseMsg]struct{}{},
+		pending:            map[string]protocol.Event{},
+		activeSessions:     map[string]string{},
+		accountPool:        gateway.NewAccountPool(),
+		apiService:         apiService,
+		usageLedger:        ledger,
+		usageOverview:      newUsageOverviewCache(d.Store),
+		accountUsage:       newAccountUsageCache(),
+		directSessionKeys:  map[string]struct{}{},
+		directEventTargets: map[string]directEventSubscription{},
+
+		byDesktop:     map[string]time.Time{},
+		modelProbeSeq: map[string]uint64{},
+	}
+	if s.d.Store != nil {
+		persisted := s.d.Store.Get()
+		for _, sessionKey := range persisted.DirectSessionKeys {
+			if strings.TrimSpace(sessionKey) != "" {
+				s.directSessionKeys[sessionKey] = struct{}{}
+			}
+		}
+		s.directStartUnknown = persisted.DirectSessionFenceUnknown || persisted.DirectSessionStartsPending > 0
+		if persisted.DirectSessionStartsPending > 0 && !persisted.DirectSessionFenceUnknown {
+			// A process restart during session.start leaves its generated session
+			// key unknowable. Persist the conservative fence before accepting new
+			// events so future restarts remain fail-closed too.
+			if err := s.d.Store.Update(func(c *config.Config) error {
+				c.DirectSessionFenceUnknown = true
+				c.DirectSessionStartsPending = 0
+				return nil
+			}); err != nil {
+				s.log.Printf("direct: failed to persist recovered unknown session-start fence: %v", err)
+			}
+		}
+	}
+	apiService.Plugins = s.pluginHooks
+	s.initAPINetwork()
+	s.initOfficialUsageMaintenance()
+	return s
+}
+
+// startProber launches the background account health prober. Call this once
+// after New() and after a context is available (e.g. from run() in main.go):
+//
+//	cons.StartProber(ctx)
+func (s *Server) StartProber(ctx context.Context) {
+	if s.apiService == nil || s.apiService.Health == nil {
+		return
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	s.backgroundMu.Lock()
+	if s.proberStarted {
+		s.backgroundMu.Unlock()
+		return
+	}
+	s.proberStarted = true
+	s.backgroundMu.Unlock()
+	p := prober.New(prober.Options{
+		Health: s.apiService.Health,
+		Accounts: func() []config.LocalAccount {
+			if s.d.Store == nil {
+				return nil
+			}
+			return s.d.Store.Get().LocalAccounts
+		},
+		Client:   s.apiService.Client,
+		Interval: 5 * time.Minute,
+		OnResult: func(accountID, baseURL string, kind accounthealth.ErrorKind, latency time.Duration) {
+			if kind != accounthealth.OK {
+				s.log.Printf("prober: account %s (%s) %s latency=%dms", accountID, baseURL, kind, latency.Milliseconds())
+			}
+		},
+	})
+	go p.Run(ctx)
+}
+
+// StartWatchdog launches the background stalled-agent watchdog. Call this once
+// after SetManager() and after a context is available:
+//
+//	cons.StartWatchdog(ctx)
+//
+// The watchdog detects agent processes that are alive but have stopped
+// producing events for longer than 10 minutes and requests an exact-turn
+// interrupt. The agent adapter publishes the terminal event only after it
+// confirms that turn stopped; uncertain outcomes are published as warnings.
+func (s *Server) StartWatchdog(ctx context.Context) {
+	m := s.manager()
+	if m == nil {
+		return
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	s.backgroundMu.Lock()
+	if s.watchdogStarted {
+		s.backgroundMu.Unlock()
+		return
+	}
+	s.watchdogStarted = true
+	s.backgroundMu.Unlock()
+	w := agentwatchdog.New(agentwatchdog.Options{
+		Manager: m,
+		Logger:  s.log,
+		EmitEvent: func(ev protocol.Event) {
+			s.Broadcast(ev)
+			s.PublishHubEvent(ev)
+		},
+	})
+	s.backgroundMu.Lock()
+	s.watchdog = w
+	s.backgroundMu.Unlock()
+	go w.Run(ctx)
+}
+
+// PublishHubEvent is the single outbound Hub event boundary. Direct P2P
+// session events must be kept on the authenticated direct socket even when an
+// event originates in a background producer such as the stalled-agent
+// watchdog. Keeping the guard here prevents future producers from bypassing
+// the privacy fence by calling Hub.Push directly.
+func (s *Server) PublishHubEvent(ev protocol.Event) {
+	if s.d.Hub == nil {
+		return
+	}
+	// Local write-conflict bookkeeping must see Direct completion too. This
+	// observation cannot enqueue, decorate, persist or upload the private event.
+	s.d.Hub.ObserveLocalEvent(ev)
+	// Hold the read lock through queue insertion. Registering a direct session
+	// takes the write lock, so a concurrent session.open/start cannot pass the
+	// fence check and then enqueue the same event to Hub afterward.
+	s.directEventMu.RLock()
+	if ev.SessionKey != "" {
+		if s.directStartsInFlight > 0 || s.directStartUnknown {
+			s.directEventMu.RUnlock()
+			return
+		}
+		if _, direct := s.directSessionKeys[ev.SessionKey]; direct {
+			s.directEventMu.RUnlock()
+			return
+		}
+	}
+	s.d.Hub.Push(ev)
+	s.directEventMu.RUnlock()
 }
 
 // SetManager attaches the agents manager.
@@ -189,28 +444,129 @@ func (s *Server) Handler() http.Handler {
 	}))
 	api := http.NewServeMux()
 	s.routes(api)
+	s.pluginRoutes(api)
+	s.usageLedgerRoutes(api)
+	s.usageLedgerQueryRoutes(api)
+	api.HandleFunc("GET /api/local/accounts/usage", s.handleAccountUsage)
+	api.HandleFunc("GET /api/local/accounts/health", s.handleAccountHealth)
+	api.HandleFunc("POST /api/local/accounts/health/reset", s.handleAccountHealthReset)
 	mux.Handle("/api/", s.requireAuth(api))
+	accountPool := s.accountPool
+	if accountPool == nil {
+		accountPool = gateway.NewAccountPool()
+		s.accountPool = accountPool
+	}
+	if accounts := s.d.CodexAccounts; accounts != nil {
+		accountPool.SetRoutingProbe(func(credentialRef string, identityEpoch uint64, model string) gateway.PoolRoutingObservation {
+			observation := accounts.PoolRouting(credentialRef, identityEpoch, model)
+			return gateway.PoolRoutingObservation{
+				Current: observation.Current, QuotaFresh: observation.QuotaFresh, QuotaAllowed: observation.QuotaAllowed,
+				RemainingPercent: observation.RemainingPercent, PlanFresh: observation.PlanFresh, PlanFamily: observation.PlanFamily,
+				SubscriptionKnown: observation.SubscriptionKnown, SubscriptionActiveUntil: observation.SubscriptionActiveUntil,
+			}
+		})
+	} else {
+		accountPool.SetRoutingProbe(nil)
+	}
+	s.apiService.Pool = accountPool
 	localGateway := gateway.New(func() string { return s.d.Store.Get().GatewayKey }, func(target string) (config.LocalAccount, bool) {
-		c := s.d.Store.Get()
-		if family, remote := strings.CutPrefix(target, "remote-"); remote {
-			// Phone-selected API for Bridge-run workers; never the applied desktop route.
-			return c.RemoteToolAccount(family)
-		}
-		return c.AppliedToolAccount(target)
+		return s.d.Store.Get().GatewaySourceAccount(target)
 	})
+	localGateway.Plugins = s.pluginHooks
+	localGateway.AuthorizationRevision = func(target string) string { return s.d.Store.Get().GatewayAuthorizationRevision(target) }
+	if s.usageLedger != nil {
+		localGateway.Observe = s.observeUsage
+		localGateway.BeginUsage = s.usageLedger.BeginAccountUsage
+	}
+	localGateway.KeyForTarget = func(target string) string {
+		c := s.d.Store.Get()
+		if strings.HasPrefix(target, "direct-") {
+			return c.DirectGatewayCredential(target)
+		}
+		if strings.HasPrefix(target, "remote-") {
+			return c.RemoteGatewayCredential(target)
+		}
+		// A gateway-backed local tool must present the lease minted by this
+		// Bridge process.  Do not accept the durable GatewayKey after restart:
+		// an old Codex/Claude profile or another local program must fail closed
+		// until the user explicitly reapplies/launches it through Salcara.
+		return c.LocalGatewayCredential(target)
+	}
+	localGateway.Pool = accountPool
+	localGateway.Official = s.d.OfficialGateway
+	localGateway.PoolEnabled = func(target string) bool {
+		c := s.d.Store.Get()
+		if strings.HasPrefix(target, "remote-") || strings.HasPrefix(target, "direct-") {
+			return false // A proof for A does not authorize substituting member B.
+		}
+		selected, ok := c.AuthorizedAppliedToolAccount(target)
+		return ok && selected.PoolEnabled
+	}
+	localGateway.Accounts = func(target string) []config.LocalAccount {
+		c := s.d.Store.Get()
+		family := target
+		family = strings.TrimPrefix(family, "direct-")
+		if strings.HasPrefix(family, "remote-") {
+			family = strings.TrimPrefix(family, "remote-")
+		}
+		accounts := make([]config.LocalAccount, 0, len(c.LocalAccounts))
+		for _, account := range c.LocalAccounts {
+			accounts = append(accounts, c.APIForTool(account, family))
+		}
+		return accounts
+	}
+	localGateway.PoolGroup = func(target string) string {
+		c := s.d.Store.Get()
+		family := target
+		if strings.HasPrefix(family, "direct-") {
+			if selected, ok := c.DirectToolAccount(strings.TrimPrefix(family, "direct-")); ok {
+				return selected.PoolGroup
+			}
+			return ""
+		}
+		if strings.HasPrefix(family, "remote-") {
+			family = strings.TrimPrefix(family, "remote-")
+			if selected, ok := c.RemoteToolAccount(family); ok {
+				return selected.PoolGroup
+			}
+			if selected, ok := c.AuthorizedAppliedToolAccount(family); ok {
+				return selected.PoolGroup
+			}
+			return ""
+		}
+		if selected, ok := c.AuthorizedAppliedToolAccount(target); ok {
+			return selected.PoolGroup
+		}
+		return ""
+	}
 	localGateway.RefreshModels = func(ctx context.Context, target string, applied config.LocalAccount) ([]string, error) {
 		models, err := launcher.Models(ctx, applied)
 		if err != nil {
 			return nil, err
 		}
+		models = visibleAccountModels(applied, models)
+		if len(models) == 0 {
+			return nil, errors.New("当前 API 的模型均被本卡的允许/拒绝规则过滤，请调整规则后刷新")
+		}
 		err = s.d.Store.Update(func(c *config.Config) error {
-			current, valid := c.AppliedToolAccount(target)
-			if !valid || current.ID != applied.ID || config.AccountFingerprint(current) != config.AccountFingerprint(applied) {
+			current, valid := c.LocalAccount(applied.ID)
+			if !valid {
 				return errors.New("API 已切换，未应用旧模型目录")
+			}
+			current = c.APIForTool(current, target)
+			if config.AccountFingerprint(current) != config.AccountFingerprint(applied) {
+				return errors.New("API 已切换，未应用旧模型目录")
+			}
+			if current.ModelsManual != applied.ModelsManual || strings.Join(current.Models, "\x00") != strings.Join(applied.Models, "\x00") {
+				return errors.New("模型目录已编辑，未应用旧结果")
 			}
 			for i := range c.LocalAccounts {
 				if c.LocalAccounts[i].ID == applied.ID {
-					c.LocalAccounts[i].Models = models
+					if current.ModelsManual {
+						models = visibleAccountModels(current, current.Models)
+					} else {
+						c.LocalAccounts[i].Models = models
+					}
 					return nil
 				}
 			}
@@ -219,6 +575,8 @@ func (s *Server) Handler() http.Handler {
 		return models, err
 	}
 	mux.Handle("/gateway/", localGateway)
+	mux.Handle("/codex-api/", s.apiService)
+	mux.Handle("/backend-api/codex/", s.apiService)
 
 	return s.hostGuard(securityHeaders(mux))
 }
@@ -292,18 +650,19 @@ func isLoopback(remote string) bool {
 
 // Broadcast forwards an agent event to every open console page and tracks pending approvals.
 func (s *Server) Broadcast(ev protocol.Event) {
+	s.backgroundMu.Lock()
+	watchdog := s.watchdog
+	s.backgroundMu.Unlock()
+	if watchdog != nil {
+		watchdog.ObserveEvent(ev)
+	}
 	if ev.TS == 0 {
 		ev.TS = time.Now().UnixMilli()
 	}
-	switch ev.Type {
-	case "approval.request":
-		s.pendMu.Lock()
-		s.pending[ev.ApprovalID] = ev
-		s.pendMu.Unlock()
-	case "approval.resolved":
-		s.pendMu.Lock()
-		delete(s.pending, ev.ApprovalID)
-		s.pendMu.Unlock()
+	s.publishPluginEvent(ev)
+	s.broadcastDirectEvent(ev)
+	if s.publishActivity(ev) {
+		return
 	}
 	b, _ := json.Marshal(ev)
 	s.publish(sseMsg{event: "event", data: b})

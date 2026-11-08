@@ -2,6 +2,7 @@ package console
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"os"
@@ -24,9 +25,11 @@ import (
 func (s *Server) routes(m *http.ServeMux) {
 	s.localRoutes(m)
 	s.setupRoutes(m)
+	s.mcpRoutes(m)
 	m.HandleFunc("GET /api/ping", func(w http.ResponseWriter, r *http.Request) { writeJSON(w, map[string]bool{"ok": true}) })
 	m.HandleFunc("GET /api/state", s.handleState)
 	m.HandleFunc("GET /api/stream", s.handleStream)
+	m.HandleFunc("GET /api/activity", s.handleActivity)
 	m.HandleFunc("GET /api/usage", s.handleUsage)
 	m.HandleFunc("GET /api/usage/overview", s.handleUsageOverview)
 	m.HandleFunc("POST /api/test", s.handleTest)
@@ -38,6 +41,8 @@ func (s *Server) routes(m *http.ServeMux) {
 	m.HandleFunc("GET /api/pair/qr", s.handlePairQR)
 	m.HandleFunc("POST /api/pair/revoke", s.handlePairRevoke)
 	m.HandleFunc("POST /api/remote/discover", s.handleRemoteDiscover)
+	m.HandleFunc("POST /api/remote/bot-bind", s.handleBotBind)
+	m.HandleFunc("POST /api/remote/mode", s.handleRemoteMode)
 	m.HandleFunc("GET /api/toolcfg", s.handleToolcfg)
 	m.HandleFunc("POST /api/toolcfg", s.handleToolcfgAction)
 	m.HandleFunc("GET /api/projects", s.handleProjects)
@@ -46,6 +51,7 @@ func (s *Server) routes(m *http.ServeMux) {
 	m.HandleFunc("GET /api/fs", s.handleFS)
 	m.HandleFunc("GET /api/sessions", s.handleSessions)
 	m.HandleFunc("GET /api/session", s.handleSession)
+	m.HandleFunc("POST /api/session/control", s.handleSessionControl)
 	m.HandleFunc("POST /api/session/send", s.handleSessionCmd("session.send"))
 	m.HandleFunc("POST /api/session/interrupt", s.handleSessionCmd("session.interrupt"))
 	m.HandleFunc("POST /api/session/start", s.handleSessionCmd("session.start"))
@@ -61,7 +67,10 @@ func (s *Server) routes(m *http.ServeMux) {
 	m.HandleFunc("POST /api/update/prepare", s.handleUpdatePrepare)
 	m.HandleFunc("POST /api/update/commit", s.handleUpdateCommit)
 	m.HandleFunc("POST /api/update/cancel", s.handleUpdateCancel)
+	m.HandleFunc("GET /api/update/policy", s.handleUpdatePolicyStatus)
+	m.HandleFunc("POST /api/update/policy", s.handleUpdatePolicy)
 	m.HandleFunc("POST /api/reveal", s.handleReveal)
+	s.registerSelfHostRoutes(m)
 }
 
 func (s *Server) handlePairStart(w http.ResponseWriter, r *http.Request) {
@@ -158,6 +167,9 @@ func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
 			"claudeKey":           mask(c.ClaudeKey),
 			"loggedIn":            c.LoggedIn(),
 			"remoteDeviceOnly":    c.RemoteDeviceOnly,
+			"activeRemoteMode":    c.ActiveRemoteMode,
+			"effectiveRemoteMode": c.EffectiveRemoteMode(),
+			"remoteModes":         remoteModeChoices(c),
 			"remoteConnections":   remoteConnectionChoices(c),
 			"projects":            c.Projects,
 			"configPath":          s.d.Store.Path(),
@@ -256,6 +268,9 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "请填写中转站地址和 API Key")
 		return
 	}
+	s.remoteModeMu.Lock()
+	modeSequence := s.remoteModeSeq
+	s.remoteModeMu.Unlock()
 	ctx, cancel := ctxTimeout(r, 20*time.Second)
 	defer cancel()
 	u, err := relay.Usage(ctx, root, key)
@@ -264,9 +279,16 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	enableAutostart := false
+	s.remoteModeMu.Lock()
+	defer s.remoteModeMu.Unlock()
+	if modeSequence != s.remoteModeSeq {
+		writeErr(w, http.StatusConflict, "远程方式已变化，请重新确认连接")
+		return
+	}
 	err = s.d.Store.Update(func(c *config.Config) error {
 		c.RelayRoot, c.AccountKey = root, key
 		c.RemoteDeviceOnly = false
+		c.ActivateRemoteMode("hub")
 		if in.HubURL != nil {
 			c.HubURL = strings.TrimRight(strings.TrimSpace(*in.HubURL), "/")
 		}
@@ -286,6 +308,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 500, err.Error())
 		return
 	}
+	s.finishRemoteModeSwitch()
 	if enableAutostart && s.d.Exe != "" {
 		if err := autostart.Enable(s.d.Exe); err != nil {
 			s.log.Printf("autostart: %v", err)
@@ -294,9 +317,6 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	s.usageMu.Lock()
 	s.usageAt = time.Time{}
 	s.usageMu.Unlock()
-	if s.d.Hub != nil {
-		s.d.Hub.Kick()
-	}
 	writeJSON(w, map[string]any{"ok": true, "usage": u, "autostartEnabled": enableAutostart})
 }
 
@@ -362,7 +382,50 @@ func (s *Server) handleToolcfg(w http.ResponseWriter, r *http.Request) {
 		"desktop":          toolcfg.DetectClaudeDesktop(),
 		"desktopConfigDir": toolcfg.ClaudeDesktopConfigDir(),
 		"envKeyName":       toolcfg.CodexEnvKey,
+		// The old one-click profile endpoint is deliberately only an
+		// unmanaged compatibility path. Once this Bridge has a process lease,
+		// callers must use the workbench so the native profile gets a
+		// route-scoped credential instead of an upstream secret.
+		"legacyToolcfg": map[string]any{
+			"managed": c.GatewayRuntimeKey != "",
+			"codex":   legacyToolcfgStatus(c, "codex"),
+			"claude":  legacyToolcfgStatus(c, "claude"),
+		},
 	})
+}
+
+func legacyToolcfgStatus(c config.Config, tool string) map[string]any {
+	blocked, reason := legacyToolcfgMutationBlock(c, tool)
+	_, selected := c.SelectedToolAccount(tool)
+	return map[string]any{
+		"managed":           c.GatewayRuntimeKey != "",
+		"selectedAccount":   selected,
+		"requiresWorkbench": blocked,
+		"reason":            reason,
+	}
+}
+
+// legacyToolcfgMutationBlock protects the compatibility /api/toolcfg writer.
+// It has no way to record an AppliedAPI lease or a service-owned profile
+// manifest, so accepting it while the Bridge is running would let a process
+// started independently of Salcara retain a durable upstream URL/key. The
+// workbench is the only managed writer. With no process lease this remains a
+// clearly unmanaged compatibility operation for callers/tests that explicitly
+// choose it; those callers do not get a Gateway authorization from it.
+func legacyToolcfgMutationBlock(c config.Config, tool string) (bool, string) {
+	if tool != "codex" && tool != "claude" {
+		return false, ""
+	}
+	if c.GatewayRuntimeKey != "" {
+		return true, "Bridge 已启用当前进程租约，请通过工具工作台应用或恢复；旧版一键配置不会写入原工具配置"
+	}
+	if _, ok := c.AppliedToolBinding(tool); ok {
+		return true, "该工具已有 Salcara 管理的连接，请通过工具工作台恢复；旧版一键配置不会覆盖托管连接"
+	}
+	if a, ok := c.SelectedToolAccount(tool); ok && config.NeedsGateway(a) {
+		return true, "此账号需要通过工具工作台和本机 Gateway，旧版一键配置不会写入反代或官方账号凭据"
+	}
+	return false, ""
 }
 
 func codexBase(c config.Config) string {
@@ -390,6 +453,24 @@ func (s *Server) handleToolcfgAction(w http.ResponseWriter, r *http.Request) {
 	if in.Action == "apply" && c.RemoteDeviceOnly {
 		writeErr(w, 400, "设备扫码连接不提供模型 Key，请使用工具工作台选择和应用 API")
 		return
+	}
+	if in.Action == "apply" || in.Action == "restore" {
+		if blocked, reason := legacyToolcfgMutationBlock(c, in.Tool); blocked {
+			writeErr(w, http.StatusConflict, reason)
+			return
+		}
+		if in.Tool == "codex" {
+			release, err := toolcfg.LockCodexProfile(r.Context(), filepath.Dir(toolcfg.CodexConfigPath()))
+			if err != nil {
+				writeErr(w, http.StatusConflict, "Codex 配置正在更新")
+				return
+			}
+			defer release()
+			if err := toolcfg.RequireCodexProfileUnowned(filepath.Dir(toolcfg.CodexConfigPath())); err != nil {
+				writeErr(w, http.StatusConflict, err.Error())
+				return
+			}
+		}
 	}
 	var err error
 	note := ""
@@ -606,7 +687,7 @@ func (s *Server) dispatch(r *http.Request, cmd map[string]any) (any, error) {
 	}
 	ctx, cancel := ctxTimeout(r, 45*time.Second)
 	defer cancel()
-	return s.d.Hub.Dispatch(ctx, cmd)
+	return s.d.Hub.Dispatch(hubclient.WithLocalExecution(ctx), cmd)
 }
 
 func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
@@ -633,6 +714,87 @@ func (s *Server) handleSessionCmd(typ string) http.HandlerFunc {
 		}
 		writeJSON(w, res)
 	}
+}
+
+// handleSessionControl exposes only the already implemented CLI-scoped
+// session controls to the authenticated local console. The local UI cannot
+// choose a different execution surface or smuggle an arbitrary command into
+// Dispatch; each protocol handler performs its own capability and revision
+// checks before touching an Agent.
+func (s *Server) handleSessionControl(w http.ResponseWriter, r *http.Request) {
+	var in map[string]any
+	if err := readJSON(r, &in); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	typ, _ := in["type"].(string)
+	fields := map[string]map[string]bool{
+		"features.list":                 {"tool": true, "sessionKey": true, "cwd": true, "force": true, "ifRevision": true},
+		"session.context":               {"tool": true, "sessionKey": true},
+		"session.compact":               {"tool": true, "sessionKey": true, "expectedRevision": true, "operationId": true},
+		"session.actions":               {"tool": true, "sessionKey": true},
+		"session.action":                {"tool": true, "sessionKey": true, "action": true, "name": true, "expectedRevision": true, "operationId": true},
+		"sessions.archived":             {"tool": true, "cursor": true, "limit": true},
+		"session.workflows":             {"tool": true, "sessionKey": true},
+		"session.workflow":              {"tool": true, "sessionKey": true, "kind": true, "expectedRevision": true, "operationId": true, "objective": true, "tokenBudget": true, "target": true},
+		"session.side-question.catalog": {"tool": true, "sessionKey": true},
+		"session.side-question.ask":     {"tool": true, "sessionKey": true, "question": true, "expectedRevision": true, "operationId": true, "previousOperationId": true, "selection": true, "model": true, "effort": true, "attachments": true},
+		"session.side-question.open":    {"tool": true, "sessionKey": true, "chainId": true},
+		"session.side-question.read":    {"tool": true, "sessionKey": true, "chainId": true, "cursor": true},
+		"session.side-question.send":    {"tool": true, "sessionKey": true, "chainId": true, "question": true, "expectedRevision": true, "operationId": true, "previousOperationId": true, "selection": true},
+		"session.side-question.delete":  {"tool": true, "sessionKey": true, "chainId": true, "operationId": true},
+	}
+	allowed, ok := fields[typ]
+	if !ok {
+		writeErr(w, http.StatusBadRequest, "不支持的会话操作")
+		return
+	}
+	for field := range in {
+		if field != "type" && field != "controlSurface" && !allowed[field] {
+			writeErr(w, http.StatusBadRequest, "会话操作参数无效")
+			return
+		}
+	}
+	tool, _ := in["tool"].(string)
+	key, _ := in["sessionKey"].(string)
+	if typ == "sessions.archived" || typ == "features.list" && key == "" {
+		if tool == "" || len(tool) > 64 {
+			writeErr(w, http.StatusBadRequest, "Agent 无效")
+			return
+		}
+		if typ == "features.list" {
+			cwd, _ := in["cwd"].(string)
+			if cwd == "" || len(cwd) > 4096 {
+				writeErr(w, http.StatusBadRequest, "项目目录无效")
+				return
+			}
+		}
+	} else {
+		prefix, _, valid := strings.Cut(key, ":")
+		if !valid || key == "" || len(key) > 512 {
+			writeErr(w, http.StatusBadRequest, "会话无效")
+			return
+		}
+		if tool != "" && tool != prefix {
+			writeErr(w, http.StatusBadRequest, "Agent 与会话不一致")
+			return
+		}
+		tool = prefix
+		in["tool"] = tool
+	}
+	in["type"] = typ
+	in["controlSurface"] = "cli"
+	encoded, err := json.Marshal(in)
+	if err != nil || len(encoded) > 512<<10 {
+		writeErr(w, http.StatusBadRequest, "会话操作参数过大")
+		return
+	}
+	res, err := s.dispatch(r, in)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, res)
 }
 
 // handleNavigate asks Codex Desktop to show an existing thread. It never sends a turn.
@@ -697,6 +859,7 @@ func (s *Server) handleApproval(w http.ResponseWriter, r *http.Request) {
 	// The agent emits approval.resolved itself; make sure the console list clears even if it doesn't.
 	s.pendMu.Lock()
 	delete(s.pending, in.ApprovalID)
+	s.activityRevision++
 	s.pendMu.Unlock()
 	writeJSON(w, map[string]bool{"ok": true})
 }

@@ -168,6 +168,9 @@ func TestPhoneQuestionClaudeMCPWithdrawalExpiryAndWorkerRotation(t *testing.T) {
 				cancel()
 			case "worker stop":
 				a.revokeElicitationHook("fixture-thread", lease)
+				if a.aps.countFor(ev.SessionKey) != 0 || len(a.aps.snapshot(ev.SessionKey)) != 0 {
+					t.Fatal("retired MCP helper remained busy or visible before cancellation drained")
+				}
 			case "interrupt":
 				a.aps.cancelSession(ev.SessionKey)
 			case "expire":
@@ -312,6 +315,12 @@ func TestPhoneQuestionClaudeMCPMockWorkerLaunchAndStop(t *testing.T) {
 			if err != nil {
 				t.Fatalf("ordinary launch broken: %v", err)
 			}
+			// The legacy helper must honor an explicit native prompt even under
+			// an old auto_all setting. This fixture grants only its one operation.
+			prompt := f.rec.wait(t, "mock permission", func(e protocol.Event) bool { return e.SessionKey == "claude:"+id && e.Type == "approval.request" })
+			if !a.Respond(prompt.ApprovalID, "allow", "") {
+				t.Fatal("mock native prompt not answerable")
+			}
 			f.rec.wait(t, "mock turn", func(e protocol.Event) bool {
 				return e.SessionKey == "claude:"+id && e.Type == "turn" && e.Status == "completed"
 			})
@@ -327,10 +336,18 @@ func TestPhoneQuestionClaudeMCPMockWorkerLaunchAndStop(t *testing.T) {
 					withSettings = true
 				}
 			}
-			if withSettings != supported || (p.elicitationHook != nil) != supported {
+			// API routing always uses a private per-worker settings file;
+			// only the Elicitation hook remains version-gated.
+			if !withSettings || (p.elicitationHook != nil) != supported {
 				t.Fatal("version gate changed ordinary process launch")
 			}
 			if supported {
+				// Keep an owned turn active while the synthetic MCP elicitation is
+				// waiting.  A terminal turn has no valid interrupt target; the
+				// production API intentionally rejects that stale shape.
+				if err := a.Send(context.Background(), id, "sleep please"); err != nil {
+					t.Fatal(err)
+				}
 				joinedArgs := strings.Join(p.cmd.Args, " ")
 				if strings.Contains(joinedArgs, p.elicitationHook.token) {
 					t.Fatal("capability in process arguments")
@@ -348,7 +365,14 @@ func TestPhoneQuestionClaudeMCPMockWorkerLaunchAndStop(t *testing.T) {
 				ev := f.rec.wait(t, "mock worker MCP request", func(e protocol.Event) bool {
 					return e.SessionKey == "claude:"+id && e.Type == "approval.request" && e.Kind == "question"
 				})
-				if err := a.Interrupt(context.Background(), id); err != nil {
+				rows, _ := a.Sessions(context.Background())
+				turnID := ""
+				for _, row := range rows {
+					if row.SessionKey == "claude:"+id {
+						turnID = row.ActiveTurnID
+					}
+				}
+				if _, err := a.InterruptTurn(context.Background(), id, turnID, "10000000-0000-4000-8000-000000000003"); err != nil {
 					t.Fatal(err)
 				}
 				questionFixtureWait(t, done)

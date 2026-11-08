@@ -86,7 +86,7 @@ func readTailRange(ctx context.Context, f *os.File, start, end int64) ([]byte, e
 
 func rootPrompt(line []byte) bool {
 	var value claudeLine
-	if json.Unmarshal(line, &value) != nil || value.Type != "user" || value.IsMeta || value.IsCompactSummary || value.IsSidechain || value.ParentTU != nil {
+	if json.Unmarshal(line, &value) != nil || value.Type != "user" || value.IsMeta || value.IsCompactSummary || value.IsSidechain || value.ParentTU != nil || !claudeUserOrigin(&value).human {
 		return false
 	}
 	var message claudeMessage
@@ -179,7 +179,8 @@ func readClaudeTail(ctx context.Context, f *os.File, st os.FileInfo, scope strin
 					return errors.New("转录与会话编号不匹配")
 				}
 			}
-			if desktop && value.UUID == "" {
+			setClaudePeerHistoryID(&value, scope, f.Name(), offset, line)
+			if desktop && value.UUID == "" && value.historyRecordID == "" {
 				hash := sha256.Sum256(line)
 				value.UUID = "desktop-byte-" + strconv.FormatInt(offset, 10) + "-" + hex.EncodeToString(hash[:])
 			}

@@ -255,6 +255,9 @@ details.adv[open] > summary .chev { transform: rotate(90deg); }
 .setting-row .txt { flex: 1; }
 .setting-row .t { font-weight: 650; }
 .setting-row .d { color: var(--muted); font-size: 12.5px; }
+.set-support { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+.set-support-copy { display: flex; align-items: center; gap: 12px; flex: 1 1 240px; min-width: 0; }
+.set-support .btn { flex: none; }
 .radio-cards { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
 .radio-card {
   border: 1.5px solid var(--border); border-radius: 14px; padding: 14px; cursor: pointer; display: flex; flex-direction: column; gap: 4px;

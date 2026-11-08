@@ -1,0 +1,59 @@
+.api-service-runtime, .api-service-toolbar { flex-wrap: wrap; gap: 7px; }
+.api-service-runtime .account-state { margin-right: 3px; }
+.api-service-runtime #apiServiceUpdated { font-size: 10px; }
+.api-service-clients { display: grid; gap: 7px; }
+#apiServiceSetup:empty { display: none; }
+#apiServiceLaunchActions .api-service-launch-buttons { display: flex; flex-wrap: wrap; gap: 6px; }
+#apiServiceLaunchActions .account-open-button { display: grid; place-items: center; width: 34px; height: 34px; min-height: 34px; padding: 0; border-radius: 9px; }
+#apiServiceLaunchActions .account-open-button img { display: block; width: 20px; height: 20px; border-radius: 5px; }
+.api-client-row { display: grid; grid-template-columns: minmax(0,1fr) auto; align-items: center; gap: 9px; padding: 11px 12px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface-2); }
+.api-client-info { min-width: 0; }
+.api-client-title, .api-client-sources, .api-client-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 5px 9px; }
+.api-client-title b { color: var(--text-2); font-size: 12px; overflow-wrap: anywhere; }
+.api-client-title code { color: var(--primary); font-size: 10px; }
+.api-client-title .account-state { font-size: 10px; }
+.api-client-sources { margin: 5px 0 4px; color: var(--text-2); font-size: 11px; }
+.api-client-sources span { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.api-client-info > small { color: var(--muted); font-size: 10px; }
+.api-client-actions { gap: 2px; flex-wrap: nowrap; }
+.api-client-actions .icon-btn { width: 27px; height: 29px; color: var(--muted); }
+.api-client-actions .icon-btn:hover { color: var(--primary); background: var(--primary-soft); }
+.api-client-actions .danger-text:hover { color: var(--danger); }
+.api-settings-section, #apiNetworkSettings { padding: 12px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface-2); }
+.api-settings-section > .row > b, #apiNetworkSettings > .row > b { font-size: 12px; }
+.api-effective-state { display: grid; gap: 4px; margin: 8px 0 12px; padding: 9px 11px; border-radius: 9px; background: var(--surface); font-size: 11px; color: var(--muted); }
+.api-effective-state b { color: var(--text-2); font-weight: 600; }
+.api-requests-overlay { z-index: 1200; }
+.modal.api-requests-modal { width: min(850px, calc(100vw - 32px)); max-height: min(800px, calc(100vh - 48px)); }
+.api-requests-modal .modal-body { overflow-y: auto; overscroll-behavior: contain; }
+.api-requests-modal #apiRequestsList { display: grid; gap: 7px; }
+.api-request-row { border: 1px solid var(--border); border-radius: 11px; background: var(--surface); }
+.api-request-row > summary { display: grid; grid-template-columns: minmax(0,1fr) auto; gap: 8px 16px; padding: 11px 12px; list-style: none; cursor: pointer; font-size: 11px; }
+.api-request-row > summary::-webkit-details-marker { display: none; }
+.api-request-row > summary > div { display: grid; gap: 4px; overflow-wrap: anywhere; }
+.api-request-row > summary > div:last-child { text-align: right; }
+.api-request-row > summary b { color: var(--text-2); font-size: 12px; }
+.api-request-row small { color: var(--muted); font-size: 10px; }
+.api-request-row > summary:focus-visible { outline: 2px solid var(--primary); border-radius: 11px; }
+.api-request-detail { border-top: 1px solid var(--border); padding: 10px 12px; background: var(--surface-2); border-radius: 0 0 11px 11px; }
+.api-request-detail dl { display: grid; grid-template-columns: repeat(3, minmax(0,1fr)); gap: 9px; margin: 0; font-size: 11px; }
+.api-request-detail dt { color: var(--muted); margin-bottom: 4px; }
+.api-request-detail dd { margin: 0; overflow-wrap: anywhere; }
+.api-request-attempts { display: grid; gap: 9px; padding-left: 20px; margin: 12px 0 0; }
+.api-request-attempts li { padding-left: 3px; font-size: 11px; }
+.api-request-attempts li > span, .api-request-attempts li > small { display: block; margin-top: 4px; overflow-wrap: anywhere; }
+.api-readiness-client { border: 1px solid var(--border); border-radius: 12px; padding: 10px 12px; margin-top: 8px; }
+.api-readiness-client > .row { gap: 7px; flex-wrap: wrap; font-size: 12px; }
+.api-readiness-client > .row .account-state { font-size: 10px; }
+.api-readiness-member { display: flex; align-items: center; justify-content: space-between; gap: 10px; border-top: 1px solid var(--border); margin-top: 7px; padding-top: 8px; }
+.api-readiness-member > div { display: flex; flex-wrap: wrap; gap: 4px 8px; min-width: 0; font-size: 11px; }
+.api-readiness-member b { font-weight: 600; overflow-wrap: anywhere; }
+.api-readiness-member small { width: 100%; color: var(--muted); }
+.api-readiness-member .btn { flex: none; }
+@media (max-width: 640px) {
+  .api-client-row { grid-template-columns: 1fr; }
+  .api-client-actions { justify-content: flex-end; }
+  .api-request-row > summary { grid-template-columns: 1fr; }
+  .api-request-row > summary > div:last-child { text-align: left; }
+  .api-request-detail dl { grid-template-columns: 1fr; }
+}

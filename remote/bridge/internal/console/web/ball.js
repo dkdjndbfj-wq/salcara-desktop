@@ -6,18 +6,20 @@
 const host = window.salcaraBall || null; // Electron preload; absent in a plain browser
 const $ = (s) => document.querySelector(s);
 const ICON = {
-  key: '<circle cx="8.5" cy="15.5" r="4.5"/><path d="M11.7 12.3 20 4M16.5 7.5l2.5 2.5M14.2 9.8l1.8 1.8"/>',
-  home: '<path d="M4 10.2 12 4l8 6.2V19a1 1 0 0 1-1 1h-4.5v-5.5h-5V20H5a1 1 0 0 1-1-1z"/>',
-  chart: '<path d="M4 19.5h16"/><path d="m5 15 4.5-4.5 3.5 3 6-6.5"/><path d="M15.5 7H19v3.5"/>',
-  spark: '<path d="M10.5 6Q11.4 12.6 18 13.5Q11.4 14.4 10.5 21Q9.6 14.4 3 13.5Q9.6 12.6 10.5 6Z"/><path d="M18.75 3.5v3.5M17 5.25h3.5"/>',
-  phone: '<rect x="6.5" y="3" width="11" height="18" rx="2.5"/><path d="M10.5 17.5h3"/>',
-  gear: '<path d="M4 7.5h9M17 7.5h3M4 16.5h3M11 16.5h9"/><circle cx="15" cy="7.5" r="2"/><circle cx="9" cy="16.5" r="2"/>',
+  home: '<path d="M4.5 10.5 12 4.5l7.5 6V18a2 2 0 0 1-2 2h-11a2 2 0 0 1-2-2z"/><path d="M10 20v-5h4v5"/>',
+  plug: '<path d="M9 4v4M15 4v4M6.5 8h11v3a5.5 5.5 0 0 1-11 0zM12 16.5V20"/>',
+  key: '<circle cx="8.5" cy="15.5" r="4"/><path d="M11.5 12.5 19.5 4.5M16.5 7.5l2.5 2.5"/>',
+  mcp: '<circle cx="6" cy="12" r="2.3"/><circle cx="18" cy="6" r="2.3"/><circle cx="18" cy="18" r="2.3"/><path d="M8.1 11 15.9 7M8.1 13l7.8 4"/>',
+  phone: '<path d="M8.5 3.5h7a2 2 0 0 1 2 2v13a2 2 0 0 1-2 2h-7a2 2 0 0 1-2-2v-13a2 2 0 0 1 2-2zM11 17.5h2"/>',
+  chart: '<path d="M4 19.5h16M5.5 15.5l4.5-5 3 2.5 4-5"/>',
+  gear: '<path d="M4 8h8.5M18.5 8H20M4 16h1.5M11.5 16H20"/><circle cx="15.5" cy="8" r="2.5"/><circle cx="8.5" cy="16" r="2.5"/>',
 };
 document.querySelectorAll('[data-i]').forEach((el) => {
-  el.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">${ICON[el.dataset.i]}</svg>`;
+  el.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">${ICON[el.dataset.i] || ""}</svg>`;
 });
 
 const float = $('#float'), ball = $('#ball'), face = $('#face'), bubble = $('#bubble');
+const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
 const sats = [...document.querySelectorAll('#sats button')];
 sats.forEach((b, i) => {
   const a = (360 / sats.length) * i;
@@ -27,8 +29,19 @@ sats.forEach((b, i) => {
 });
 
 /* ---------- mood ---------- */
-const drag = { active: false, moved: false, x: 0, y: 0 };
+const drag = { active: false, moved: false, x: 0, y: 0, pointerId: null };
 const STATE = { burnUntil: 0, hotUntil: 0, streamAt: [], fire: { lit: false, litAt: 0, activeSince: 0, idleSince: 0 }, lastTokens: null, approvals: 0, running: new Set(), error: false, lastActive: Date.now(), hover: false, open: false };
+const ballErrors = new Set(), ballErrorTimers = new Map();
+function setBallError(source, failed) {
+  if (!failed) {
+    clearTimeout(ballErrorTimers.get(source)); ballErrorTimers.delete(source); ballErrors.delete(source);
+  } else if (['stream', 'activity', 'usage'].includes(source)) {
+    if (!ballErrors.has(source) && !ballErrorTimers.has(source)) ballErrorTimers.set(source, setTimeout(() => {
+      ballErrorTimers.delete(source); ballErrors.add(source); STATE.error = true; render();
+    }, 8000));
+  } else ballErrors.add(source);
+  STATE.error = ballErrors.size > 0;
+}
 function mood() {
   if (STATE.approvals > 0) return 'alert';
   if (STATE.running.size) return 'working';
@@ -56,6 +69,7 @@ function burning() {
 }
 let wasBurning = false;
 function render() {
+  if (document.hidden) return;
   ball.dataset.mood = mood();
   const lit = burning();
   if (lit !== wasBurning) { wasBurning = lit; transitionFire(lit); }
@@ -80,6 +94,7 @@ function transitionFire(on) {
   }
   if (!on || matchMedia('(prefers-reduced-motion: reduce)').matches) return;
   setTimeout(() => {
+    if (document.hidden) return;
     const ring = document.createElement('span');
     ring.className = 'ring-burst';
     float.insertBefore(ring, ball);
@@ -110,24 +125,36 @@ addEventListener('mousemove', (e) => {
   const dx = e.clientX - (r.left + r.width / 2), dy = e.clientY - (r.top + r.height / 2), d = Math.hypot(dx, dy) || 1;
   const reach = Math.min(1, d / 120);
   eye.gx = (dx / d) * 8 * reach; eye.gy = (dy / d) * 6 * reach;
+  scheduleBallEyes();
 });
 const away = () => { eye.near = false; };
 addEventListener('mouseout', (e) => { if (!e.relatedTarget) away(); });
 document.addEventListener('mouseleave', away);
-(function tick() {
-  const k = eye.near ? 0.15 : 0.09; // wandering glances move a little softer than pointer tracking
+let ballEyeFrame = 0;
+function scheduleBallEyes() {
+  if (!ballEyeFrame && !document.hidden && !reduceMotion) ballEyeFrame = requestAnimationFrame(tickBallEyes);
+}
+function tickBallEyes() {
+  ballEyeFrame = 0;
+  if (document.hidden) return;
+  const k = eye.near ? 0.15 : 0.09;
   eye.x += (eye.gx - eye.x) * k; eye.y += (eye.gy - eye.y) * k;
   face.style.setProperty('--ex', `${eye.x.toFixed(2)}px`);
   face.style.setProperty('--ey', `${eye.y.toFixed(2)}px`);
   ball.style.setProperty('--hx', `${(34 - eye.x).toFixed(1)}%`);
   ball.style.setProperty('--hy', `${(28 - eye.y).toFixed(1)}%`);
-  requestAnimationFrame(tick);
-})();
+  if (Math.abs(eye.gx - eye.x) > .02 || Math.abs(eye.gy - eye.y) > .02) scheduleBallEyes();
+}
+document.addEventListener('visibilitychange', () => {
+  if (ballEyeFrame) cancelAnimationFrame(ballEyeFrame);
+  ballEyeFrame = 0; scheduleBallEyes();
+});
+scheduleBallEyes();
 
 // Random glances: a single look, a quick left–right scan, or back to centre.
 (function wander() {
   let next = rand(900, 3200);
-  if (!eye.near && !drag.active) {
+  if (!document.hidden && !reduceMotion && !eye.near && !drag.active) {
     const m = ball.dataset.mood;
     const range = m === 'sleepy' ? 0.35 : m === 'working' ? 0.5 : 1;
     const roll = Math.random();
@@ -135,7 +162,7 @@ document.addEventListener('mouseleave', away);
     else if (roll < 0.36 && m === 'idle') {
       const side = chance(0.5) ? 1 : -1, y = rand(-2, 2);
       eye.gx = 7 * side; eye.gy = y;
-      setTimeout(() => { if (!eye.near) { eye.gx = -7 * side; eye.gy = y; } }, rand(380, 650));
+      setTimeout(() => { if (!eye.near) { eye.gx = -7 * side; eye.gy = y; scheduleBallEyes(); } }, rand(380, 650));
       next = rand(1300, 2200);
     } else {
       const a = rand(0, Math.PI * 2), d = rand(0.35, 1) * range;
@@ -143,10 +170,11 @@ document.addEventListener('mouseleave', away);
       next = rand(700, 2600);
     }
   }
+  scheduleBallEyes();
   setTimeout(wander, next);
 })();
 
-function blinkOnce() { ball.classList.add('blink'); setTimeout(() => ball.classList.remove('blink'), 200); }
+function blinkOnce() { if (document.hidden || reduceMotion) return; ball.classList.add('blink'); setTimeout(() => ball.classList.remove('blink'), 200); }
 function doubleBlink() { blinkOnce(); setTimeout(blinkOnce, 300); }
 (function blinkLoop() {
   setTimeout(() => {
@@ -160,7 +188,7 @@ const QUIRKS = [['wink-l', 520], ['wink-r', 520], ['squint', 1200], ['wide', 900
 (function quirkLoop() {
   setTimeout(() => {
     const m = ball.dataset.mood;
-    if (!ball.dataset.quirk && !STATE.open && !drag.active) {
+    if (!document.hidden && !reduceMotion && !ball.dataset.quirk && !STATE.open && !drag.active) {
       let q = null;
       if (m === 'idle' && !STATE.hover) q = QUIRKS[Math.floor(Math.random() * QUIRKS.length)];
       else if (m === 'sleepy' && chance(0.4)) q = ['peek', 1100]; // half-wakes, then dozes again
@@ -169,161 +197,409 @@ const QUIRKS = [['wink-l', 520], ['wink-r', 520], ['squint', 1200], ['wide', 900
         setTimeout(() => { delete ball.dataset.quirk; }, q[1] * rand(0.8, 1.3));
       }
     }
-    if (m === 'working') ball.style.setProperty('--scan', `${rand(1.4, 3).toFixed(2)}s`);
+    if (!document.hidden && !reduceMotion && m === 'working') ball.style.setProperty('--scan', `${rand(1.4, 3).toFixed(2)}s`);
     quirkLoop();
   }, rand(3500, 9000));
 })();
 
 /* ---------- mouse: the window ignores clicks except on the ball, satellites and bubble ---------- */
-let interactive = false;
-function setInteractive(on) {
-  if (on === interactive) return;
+let interactive = null;
+const ballPointer = { x: 0, y: 0, inside: false };
+function setInteractive(on, force = false) {
+  if (!force && on === interactive) return;
   interactive = on;
   if (host) host.setInteractive(on);
 }
-const hot = (el) => el && (el.closest('.ball') || (STATE.open && el.closest('.sats button')));
-addEventListener('mousemove', (e) => setInteractive(!!hot(document.elementFromPoint(e.clientX, e.clientY)) || drag.active));
-document.addEventListener('mouseleave', () => { if (!drag.active) setInteractive(false); });
+const hot = (el) => el && (el.closest('.ball') || (STATE.open && (el.closest('.sats button') || el.closest('.plugin-ball-list'))) || (!STATE.open && float.classList.contains('peek') && el.closest('.bubble')));
+function reconcileBallPointer() {
+  setInteractive(!document.hidden && (drag.active || ballPointer.inside && !!hot(document.elementFromPoint(ballPointer.x, ballPointer.y))));
+}
+addEventListener('mousemove', e => { ballPointer.x = e.clientX; ballPointer.y = e.clientY; ballPointer.inside = true; reconcileBallPointer(); });
+document.addEventListener('mouseleave', () => { ballPointer.inside = false; if (!drag.active) setInteractive(false); });
 
 /* ---------- hover → usage bubble ---------- */
 let peekTimer = 0;
+function hidePeekSoon() {
+  clearTimeout(peekTimer);
+  peekTimer = setTimeout(() => {
+    if (bubble.contains(document.activeElement)) return;
+    float.classList.remove('peek'); STATE.hover = false; reconcileBallPointer(); render();
+  }, 150);
+}
 ball.addEventListener('mouseenter', () => {
+  setInteractive(true);
   STATE.hover = true; STATE.lastActive = Date.now(); render();
   clearTimeout(peekTimer);
   peekTimer = setTimeout(() => { placeBubble(); float.classList.add('peek'); refreshUsage(false); }, 180);
 });
 ball.addEventListener('mouseleave', () => {
-  STATE.hover = false; render();
-  clearTimeout(peekTimer);
-  float.classList.remove('peek');
+  hidePeekSoon();
 });
+bubble.addEventListener('mouseenter', () => { clearTimeout(peekTimer); STATE.hover = true; setInteractive(true); });
+bubble.addEventListener('mouseleave', hidePeekSoon);
+bubble.addEventListener('focusin', () => { clearTimeout(peekTimer); float.classList.add('peek'); setInteractive(true); });
+bubble.addEventListener('focusout', (event) => { if (!bubble.contains(event.relatedTarget)) hidePeekSoon(); });
 function placeBubble() {
   // Show the bubble on the side with more room on screen.
-  const right = window.screenX + innerWidth / 2 < (screen.availLeft || 0) + screen.availWidth / 2;
+  const right = window.salcaraBallLayout ? window.salcaraBallLayout.side === 'right' : window.screenX + innerWidth / 2 < (screen.availLeft || 0) + screen.availWidth / 2;
   bubble.classList.toggle('r', right);
   bubble.classList.toggle('l', !right);
+  if (window.salcaraBallLayout) bubble.style.maxWidth = window.salcaraBallLayout.bubbleMaxWidth + 'px';
 }
+if (host?.onLayout) host.onLayout(layout => {
+  if (!layout || !['left', 'right'].includes(layout.side) || !Number.isFinite(layout.maxWidth) || !Number.isFinite(layout.bubbleMaxWidth)) return;
+  window.salcaraBallLayout = { side: layout.side, maxWidth: Math.max(0, Math.min(174, layout.maxWidth)), bubbleMaxWidth: Math.max(0, Math.min(148, layout.bubbleMaxWidth)) };
+  placeBubble(); window.dispatchEvent(new Event('ball-layout')); reconcileBallPointer();
+});
 
 /* ---------- click → satellites; drag → move ---------- */
 ball.addEventListener('pointerdown', (e) => {
   if (e.button !== 0) return;
+  if (drag.active) return;
+  setInteractive(true);
   drag.active = true; drag.moved = false; drag.x = e.screenX; drag.y = e.screenY;
-  ball.setPointerCapture(e.pointerId);
+  drag.pointerId = e.pointerId;
+  try { ball.setPointerCapture(e.pointerId); } catch { cancelDrag(); return; }
   if (host) host.dragStart();
 });
 ball.addEventListener('pointermove', (e) => {
-  if (!drag.active) return;
+  if (!drag.active || e.pointerId !== drag.pointerId) return;
   if (!drag.moved && Math.hypot(e.screenX - drag.x, e.screenY - drag.y) > 4) {
     drag.moved = true;
+    clearTimeout(peekTimer);
     setOpen(false);
     float.classList.remove('peek');
   }
   if (drag.moved && host) host.drag();
 });
 ball.addEventListener('pointerup', (e) => {
-  if (!drag.active) return;
+  if (!drag.active || e.pointerId !== drag.pointerId) return;
+  const moved = drag.moved;
   drag.active = false;
-  ball.releasePointerCapture(e.pointerId);
+  drag.pointerId = null;
+  if (ball.hasPointerCapture(e.pointerId)) ball.releasePointerCapture(e.pointerId);
   if (host) host.dragEnd();
-  if (!drag.moved) setOpen(!STATE.open);
+  if (!moved) setOpen(!STATE.open);
 });
-ball.addEventListener('dblclick', () => go(''));
-ball.addEventListener('keydown', (e) => { if (e.key === 'Escape') setOpen(false); });
+function cancelDrag() {
+  if (!drag.active) return;
+  const id = drag.pointerId;
+  drag.active = false; drag.pointerId = null; drag.moved = false;
+  if (id !== null && ball.hasPointerCapture(id)) ball.releasePointerCapture(id);
+  if (host) { if (host.dragCancel) host.dragCancel(); else host.dragEnd(); }
+  setInteractive(false, true);
+}
+ball.addEventListener('pointercancel', (event) => { if (event.pointerId === drag.pointerId) cancelDrag(); });
+ball.addEventListener('lostpointercapture', (event) => { if (event.pointerId === drag.pointerId) cancelDrag(); });
+ball.addEventListener('click', (e) => { if (e.detail === 0) setOpen(!STATE.open); });
+ball.addEventListener('dblclick', () => { setOpen(false); go(''); });
+function closeShortcuts(e) {
+  if (e.key !== 'Escape') return;
+  const wasOpen = STATE.open;
+  setOpen(false);
+  if (wasOpen) { e.preventDefault?.(); ball.focus?.(); }
+}
+ball.addEventListener('keydown', closeShortcuts);
+$('#sats').addEventListener('keydown', closeShortcuts);
 
 function setOpen(open) {
   STATE.open = open;
+  if (!open && typeof window.closePluginBallMenu === 'function') window.closePluginBallMenu();
+  ball.setAttribute('aria-expanded', String(open));
+  $('#sats').inert = !open;
   float.classList.toggle('open', open);
-  if (open) float.classList.remove('peek');
+  if (open) { clearTimeout(peekTimer); float.classList.remove('peek'); }
   STATE.lastActive = Date.now();
-  render();
+  reconcileBallPointer(); render();
 }
 sats.forEach((b) => b.addEventListener('click', () => { setOpen(false); go(b.dataset.go); }));
 function go(route) {
   if (host) host.show(route);
   else window.open('/' + (route ? '#' + route : ''), '_blank');
 }
-addEventListener('blur', () => setOpen(false));
+addEventListener('blur', () => { cancelDrag(); setOpen(false); clearTimeout(peekTimer); STATE.hover = false; float.classList.remove('peek'); setInteractive(false, true); });
+if (host?.onDragFinished) host.onDragFinished((on) => setInteractive(on === true, true));
 
 /* ---------- data ---------- */
+let ballStream = null, ballStreamRetry = 0, ballStreamBackoff = 3000;
+const BALL_AUTH = { pending: null, controller: null, epoch: 0, attemptedAt: -Infinity };
+// The Bridge rotates its HttpOnly cookie on restart. Refresh it through the
+// same-origin entry page, once for concurrent failures; retry each read once.
+function renewBallSession(epoch = BALL_AUTH.epoch) {
+  if (document.hidden) return Promise.resolve(false);
+  if (epoch !== BALL_AUTH.epoch) return Promise.resolve(true);
+  if (BALL_AUTH.pending) return BALL_AUTH.pending;
+  if (Date.now() - BALL_AUTH.attemptedAt < 3000) return Promise.resolve(false);
+  BALL_AUTH.attemptedAt = Date.now();
+  const controller = new AbortController(); BALL_AUTH.controller = controller;
+  const timer = setTimeout(() => controller.abort(), 4000);
+  const pending = (async () => {
+    try {
+      const response = await fetch('/', { credentials: 'same-origin', cache: 'no-store', signal: controller.signal });
+      await response.body?.cancel();
+      if (!response.ok || controller.signal.aborted) return false;
+      BALL_AUTH.epoch++; return true;
+    } catch { return false; }
+    finally { clearTimeout(timer); if (BALL_AUTH.controller === controller) { BALL_AUTH.controller = null; BALL_AUTH.pending = null; } }
+  })();
+  BALL_AUTH.pending = pending;
+  return pending;
+}
+async function ballFetch(url, options) {
+  const epoch = BALL_AUTH.epoch;
+  const response = await fetch(url, options);
+  if (response.status !== 401 || options?.signal?.aborted || document.hidden) return response;
+  if (!await renewBallSession(epoch) || options?.signal?.aborted || document.hidden) return response;
+  return fetch(url, options);
+}
 let usageAt = 0;
+const BALL_USAGE = { source: '', identity: '', seq: 0, controller: null, sourceSeq: 0, sourceController: null, sourceAt: 0, stamp: '' };
+const ballEscape = (value) => String(value ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+function ballPreferredSource(local) {
+  const accounts = Array.isArray(local?.accounts) ? local.accounts : [];
+  const eligible = accounts.filter(a => a?.id && !a.libraryOnly && a.officialAccount?.mode !== 'chatgpt_web_session');
+  const requestAt = a => Math.max(0, Date.parse(a.poolState?.lastUsedAt || '') || 0);
+  const appliedAt = a => Number.isFinite(a.lastUsedAt) ? a.lastUsedAt : 0;
+  const newest = (list, time) => list.sort((a, b) => time(b) - time(a) || Number(b.id === BALL_USAGE.source) - Number(a.id === BALL_USAGE.source))[0]?.id || '';
+  const running = eligible.filter(a => Number.isSafeInteger(a.poolState?.inflight) && a.poolState.inflight > 0);
+  if (running.length) return newest(running, requestAt);
+  const available = new Set((local?.tools || []).filter(tool => tool?.available === true).map(tool => tool.id));
+  const bindings = Object.entries(local?.bindings || {}).filter(([tool, b]) => available.has(tool) && b?.pending === false && b.accountId && b.accountId === b.appliedId).map(([, b]) => b);
+  const applied = eligible.filter(a => bindings.some(b => b.accountId === a.id));
+  // Finished short requests still identify the actual pool account. A later
+  // successful tool switch supersedes that observation, even across tools.
+  return newest(eligible.filter(a => requestAt(a) > 0 || applied.includes(a)), a => Math.max(requestAt(a), applied.includes(a) ? appliedAt(a) : 0));
+}
+function ballUsageMessage(message) {
+  $('#bTok').textContent = '—';
+  $('#bSub').textContent = message; $('#bSub').title = message;
+}
+function cancelBallUsage() {
+  BALL_USAGE.seq++;
+  BALL_USAGE.controller?.abort(); BALL_USAGE.controller = null;
+}
 async function refreshUsage(force) {
-  if (!force && Date.now() - usageAt < 60000) return;
-  usageAt = Date.now();
+  if (document.hidden) return;
+  if (!force && (document.visibilityState !== 'visible' || BALL_USAGE.sourceController || Date.now() - BALL_USAGE.sourceAt < 1000)) return;
+  const sourceSeq = ++BALL_USAGE.sourceSeq;
+  BALL_USAGE.sourceController?.abort();
+  const controller = new AbortController();
+  BALL_USAGE.sourceController = controller; BALL_USAGE.sourceAt = Date.now();
+  const timer = setTimeout(() => controller.abort(), 10000);
+  if (force) { cancelBallUsage(); ballUsageMessage('读取中…'); }
+  let load = false;
   try {
-    const d = await USAGE.load(1, false);
-    const today = d.today || (d.series[0] && { tokens: d.series[0].tokens, cost: d.series[0].cost });
+    const response = await ballFetch('/api/local/accounts', { credentials: 'same-origin', signal: controller.signal });
+    if (!response.ok) throw new Error('当前来源读取失败');
+    const local = await response.json();
+    if (sourceSeq !== BALL_USAGE.sourceSeq) return;
+    if (!Array.isArray(local?.accounts)) throw new Error('当前来源读取失败');
+    const source = ballPreferredSource(local), account = local.accounts.find(a => a.id === source);
+    const identity = account ? JSON.stringify([source, account.sourceRevision || '', account.officialAccount?.id || '', account.officialAccount?.identityEpoch || 0]) : '';
+    const changed = identity !== BALL_USAGE.identity;
+    if (changed) {
+      cancelBallUsage(); BALL_USAGE.stamp = ''; STATE.lastTokens = null; STATE.burnUntil = 0; usageAt = 0;
+      ballUsageMessage(source ? '读取中…' : '暂无使用中的账号');
+    }
+    BALL_USAGE.source = source; BALL_USAGE.identity = identity;
+    $('#bName').textContent = account?.name || (source ? account?.host || source : '用量');
+    $('#bName').title = $('#bName').textContent;
+    if (!source) { ballUsageMessage('暂无使用中的账号'); setBallError('usage', false); render(); return; }
+    load = !BALL_USAGE.controller && (force || changed || Date.now() - usageAt >= 30000);
+  } catch (e) {
+    if (sourceSeq !== BALL_USAGE.sourceSeq) return;
+    cancelBallUsage(); BALL_USAGE.source = ''; BALL_USAGE.identity = ''; BALL_USAGE.stamp = ''; STATE.lastTokens = null;
+    $('#bName').textContent = '用量'; $('#bName').title = '';
+    ballUsageMessage(controller.signal.aborted ? '当前来源读取超时' : e.message || '当前来源读取失败');
+    setBallError('usage', true); render();
+  } finally {
+    clearTimeout(timer);
+    if (sourceSeq === BALL_USAGE.sourceSeq) BALL_USAGE.sourceController = null;
+  }
+  if (load && sourceSeq === BALL_USAGE.sourceSeq) return loadBallUsage(force);
+}
+async function loadBallUsage(force) {
+  const source = BALL_USAGE.source, identity = BALL_USAGE.identity;
+  if (!source) return;
+  usageAt = Date.now();
+  const seq = ++BALL_USAGE.seq, controller = new AbortController();
+  BALL_USAGE.controller = controller;
+  const timer = setTimeout(() => controller.abort(), 30000);
+  try {
+    const d = await USAGE.load(1, force, source, controller.signal);
+    if (seq !== BALL_USAGE.seq || identity !== BALL_USAGE.identity) return;
+    const today = d.today || (d.hasDaily && d.series[0]);
     $('#bTok').textContent = today ? USAGE.fmtTokens(today.tokens) : '—';
     const parts = [];
-    if (today) parts.push(USAGE.fmtMoney(today.cost));
-    if (d.balance) parts.push(`剩余 <em>${USAGE.fmtMoney(d.balance.value, d.balance.unit)}</em>`);
-    $('#bSub').innerHTML = parts.length ? parts.join(' · ') : (d.sources.length ? '服务商未提供用量' : '还没有保存 API');
-    STATE.error = !!(d.balance && d.balance.value !== null && d.balance.value < 1);
+    if (d.balance) parts.push(`剩余 <em>${ballEscape(USAGE.fmtMoney(d.balance.value, d.balance.unit))}</em>`);
+    else if (today?.requests != null) parts.push(`${USAGE.fmtTokens(today.requests)} 次请求`);
+    if (d.partial) parts.push('部分记录');
+    const failed = d.sources.find(s => s.localUsageError || s.error && !s.localUsage);
+    $('#bSub').innerHTML = parts.length ? parts.join(' · ') : (failed ? ballEscape(failed.localUsageError || failed.error) : '暂无 Token 记录');
+    $('#bSub').title = $('#bSub').textContent;
+    const observation = d.today ? (d.todayLocal ? 'local' : 'upstream') : (d.curveLocal ? 'local' : 'upstream');
+    const stamp = `${identity}:${d.series.at(-1)?.date || ''}:${observation}`, tokens = today?.tokens;
+    if (BALL_USAGE.stamp === stamp && typeof tokens === 'number' && typeof STATE.lastTokens === 'number' && tokens - STATE.lastTokens >= 2000) STATE.burnUntil = Math.max(STATE.burnUntil || 0, Date.now() + 40000);
+    BALL_USAGE.stamp = stamp; STATE.lastTokens = typeof tokens === 'number' ? tokens : null;
+    setBallError('usage', !!failed || !!(d.balance && d.balance.value !== null && d.balance.value < 1));
   } catch (e) {
-    $('#bSub').textContent = '读取失败';
-    STATE.error = true;
+    if (seq !== BALL_USAGE.seq) return;
+    ballUsageMessage(controller.signal.aborted ? '用量读取超时' : e.message || '用量读取失败');
+    STATE.lastTokens = null; BALL_USAGE.stamp = '';
+    setBallError('usage', true);
+  } finally {
+    clearTimeout(timer);
+    if (seq === BALL_USAGE.seq) BALL_USAGE.controller = null;
   }
-  render();
+  if (seq === BALL_USAGE.seq) render();
 }
+document.addEventListener('visibilitychange', () => {
+  float.classList.toggle('paused', document.hidden);
+  if (document.visibilityState === 'visible') { stream(); refreshUsage(true); refreshActivity(); render(); return; }
+  stopBallStream();
+  BALL_AUTH.controller?.abort();
+  for (const source of ['stream', 'activity', 'usage']) setBallError(source, false);
+  cancelDrag(); setOpen(false); clearTimeout(peekTimer);
+  STATE.hover = false; float.classList.remove('peek'); setInteractive(false, true);
+  BALL_USAGE.sourceSeq++; BALL_USAGE.sourceController?.abort(); BALL_USAGE.sourceController = null;
+  cancelBallUsage(); BALL_USAGE.sourceAt = 0;
+  cancelBallActivity();
+});
 
-async function refreshApprovals() {
+// A process-local snapshot observes only events already emitted by the Bridge.
+// Reading /api/sessions here would start agents and scan histories just to draw
+// a status indicator. Revisioned live changes win over a late snapshot instead.
+const BALL_ACTIVITY = { seq: 0, revision: 0, controller: null, changes: null, approvals: new Set() };
+const busySession = s => s.status === 'running' || s.status === 'waiting_approval';
+function applyActivityEvent(ev, running, approvals) {
+  if (ev.type === 'session.updated' && ev.session?.sessionKey) {
+    if (busySession(ev.session)) running.add(ev.session.sessionKey); else running.delete(ev.session.sessionKey);
+  } else if (ev.approvalId) {
+    if (ev.type === 'approval.request') approvals.add(ev.approvalId);
+    else if (ev.type === 'approval.resolved') approvals.delete(ev.approvalId);
+  }
+}
+function cancelBallActivity() {
+  BALL_ACTIVITY.seq++;
+  BALL_ACTIVITY.controller?.abort(); BALL_ACTIVITY.controller = null; BALL_ACTIVITY.changes = null;
+}
+async function refreshActivity() {
+  if (document.visibilityState !== 'visible' || BALL_ACTIVITY.controller) return;
+  const seq = ++BALL_ACTIVITY.seq, minimumRevision = BALL_ACTIVITY.revision;
+  const controller = new AbortController(), changes = new Map();
+  BALL_ACTIVITY.controller = controller; BALL_ACTIVITY.changes = changes;
+  const timer = setTimeout(() => controller.abort(), 10000);
   try {
-    const r = await fetch('/api/approvals', { credentials: 'same-origin' }).then((x) => x.json());
-    STATE.approvals = (r.approvals || []).length;
-  } catch (_) { /* keep last */ }
-  render();
+    const response = await ballFetch('/api/activity', { credentials: 'same-origin', signal: controller.signal });
+    if (!response.ok) throw new Error('任务状态读取失败');
+    const snapshot = await response.json();
+    if (seq !== BALL_ACTIVITY.seq) return;
+    if (controller.signal.aborted) throw new Error('任务状态读取超时');
+    if (!Number.isSafeInteger(snapshot?.revision) || snapshot.revision < minimumRevision || !Array.isArray(snapshot.sessions) || !Array.isArray(snapshot.approvalIds)) throw new Error('任务状态无效');
+    const running = new Set(snapshot.sessions.filter(s => typeof s?.sessionKey === 'string' && s.sessionKey && busySession(s)).map(s => s.sessionKey));
+    const approvals = new Set(snapshot.approvalIds.filter(id => typeof id === 'string' && id));
+    for (const ev of changes.values()) {
+      if (ev.activityRevision > snapshot.revision) applyActivityEvent(ev, running, approvals);
+    }
+    STATE.running = running; BALL_ACTIVITY.approvals = approvals; STATE.approvals = approvals.size;
+    BALL_ACTIVITY.revision = Math.max(BALL_ACTIVITY.revision, snapshot.revision);
+    setBallError('activity', false);
+  } catch (_) {
+    if (seq === BALL_ACTIVITY.seq) setBallError('activity', true);
+  } finally {
+    clearTimeout(timer);
+    if (seq === BALL_ACTIVITY.seq) { BALL_ACTIVITY.controller = null; BALL_ACTIVITY.changes = null; render(); }
+  }
+}
+function receiveActivity(ev) {
+  if (!Number.isSafeInteger(ev.activityRevision) || ev.activityRevision <= BALL_ACTIVITY.revision) return false;
+  BALL_ACTIVITY.revision = ev.activityRevision;
+  const key = ev.type === 'session.updated' ? 's:' + ev.session?.sessionKey : 'a:' + ev.approvalId;
+  BALL_ACTIVITY.changes?.set(key, ev);
+  applyActivityEvent(ev, STATE.running, BALL_ACTIVITY.approvals);
+  STATE.approvals = BALL_ACTIVITY.approvals.size;
+  STATE.lastActive = Date.now();
+  return true;
 }
 
+function stopBallStream() {
+  clearTimeout(ballStreamRetry); ballStreamRetry = 0;
+  const es = ballStream; ballStream = null; es?.close();
+}
 function stream() {
-  const es = new EventSource('/api/stream');
+  if (ballStream || document.hidden) return;
+  const es = ballStream = new EventSource('/api/stream');
   es.addEventListener('event', (m) => {
+    if (es !== ballStream || document.hidden) return;
     let ev; try { ev = JSON.parse(m.data); } catch (_) { return; }
+    if (!ev || typeof ev !== 'object') return;
     if (ev.type === 'message' || ev.type === 'reasoning' || ev.type === 'tool' || ev.type === 'turn') {
       STATE.streamAt.push(Date.now());
+      STATE.streamAt = STATE.streamAt.filter(t => Date.now() - t < FIRE.streamWindow).slice(-FIRE.streamMin);
       if (STATE.streamAt.length >= FIRE.streamMin) STATE.hotUntil = Date.now() + 2500; // steady streaming → the colours flow faster
     }
-    if (ev.type === 'approval.request' || ev.type === 'approval.resolved') { STATE.lastActive = Date.now(); refreshApprovals(); return; }
+    if (ev.type === 'approval.request' || ev.type === 'approval.resolved') { if (receiveActivity(ev)) render(); return; }
     if (ev.type === 'session.updated' && ev.session) {
       const s = ev.session, key = s.sessionKey;
-      const busy = s.status === 'running' || s.status === 'waiting_approval';
-      if (busy) STATE.running.add(key);
-      else if (STATE.running.delete(key)) {
-        if (s.status === 'failed') STATE.error = true;
-        else { STATE.error = false; doubleBlink(); }
+      const wasBusy = STATE.running.has(key);
+      if (!receiveActivity(ev)) return;
+      if (!busySession(s) && wasBusy) {
+        setBallError('task', s.status === 'failed');
+        if (s.status !== 'failed') doubleBlink();
         usageAt = 0;
       }
-      STATE.lastActive = Date.now();
+      refreshUsage(false);
     }
     render();
   });
-  es.onerror = () => { STATE.error = true; render(); };
-  es.onopen = () => { STATE.error = false; render(); };
+  es.onerror = () => {
+    if (es !== ballStream || document.hidden) return;
+    cancelBallActivity(); setBallError('stream', true); render();
+    // A 401 leaves EventSource CLOSED permanently. Recover with bounded
+    // backoff instead of relying on its network-only automatic reconnect.
+    if (es.readyState === EventSource.CLOSED && !ballStreamRetry) {
+      ballStreamRetry = setTimeout(async () => {
+        ballStreamRetry = 0;
+        await renewBallSession();
+        if (es !== ballStream || document.hidden) return;
+        es.close(); ballStream = null; stream();
+      }, ballStreamBackoff);
+      ballStreamBackoff = Math.min(30000, ballStreamBackoff * 2);
+    }
+  };
+  es.onopen = () => {
+    if (es !== ballStream || document.hidden) return;
+    clearTimeout(ballStreamRetry); ballStreamRetry = 0; ballStreamBackoff = 3000;
+    // Reconnection may reach a restarted Bridge whose process-local revision
+    // starts at zero. Invalidate reads from the prior connection first.
+    cancelBallActivity(); BALL_ACTIVITY.revision = 0;
+    setBallError('stream', false); refreshActivity(); render();
+  };
 }
 
-if (host && host.onShown) host.onShown(() => { refreshApprovals(); refreshUsage(true); doubleBlink(); render(); });
-refreshApprovals();
+if (host && host.onShown) host.onShown((initialInteractive) => {
+  cancelDrag(); setOpen(false); clearTimeout(peekTimer);
+  STATE.hover = false; float.classList.remove('peek');
+  setInteractive(initialInteractive === true, true);
+  stream(); refreshActivity(); refreshUsage(true); doubleBlink(); render();
+});
+refreshActivity();
 refreshUsage(true);
 stream();
-setInterval(refreshApprovals, 15000);
+setInterval(refreshActivity, 15000);
 
 // Tools that talk to the relay directly (not through the Bridge) still spend tokens:
 // watch today's total and light up while it keeps growing.
-async function watchSpend() {
-  if (document.visibilityState === 'visible') {
-    try {
-      const d = await USAGE.load(1, true);
-      const tokens = d.today ? d.today.tokens : (d.series[0] ? d.series[0].tokens : null);
-      if (tokens !== null && STATE.lastTokens !== null && tokens - STATE.lastTokens >= 2000) STATE.burnUntil = Math.max(STATE.burnUntil, Date.now() + 40000);
-      if (tokens !== null) STATE.lastTokens = tokens;
-      render();
-    } catch (_) { /* keep last */ }
-  }
-  setTimeout(watchSpend, 30000);
+function watchSpend() {
+  // Local activity follows quickly; the provider's usage is read at most every
+  // 30 seconds for an unchanged identity, without blocking source detection.
+  refreshUsage(false);
+  setTimeout(watchSpend, 5000);
 }
 setTimeout(watchSpend, 2000);
 
 /* ---------- sparks: a few tiny points of the brand colours drift up off the body ---------- */
 const EMBER = ['#7CC6FF', '#3D7BFA', '#A68BF7', '#F4A6CE'];
-const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
 (function emberLoop() {
   const on = float.classList.contains('burning') && !STATE.open && !reduceMotion && document.visibilityState === 'visible';
   const hotNow = float.classList.contains('hot');
@@ -341,6 +617,7 @@ const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
       { transform: `translate(${x + drift}px, ${y - lift}px) scale(.4)`, opacity: 0 },
     ], { duration: rand(1100, 1800), easing: 'cubic-bezier(.25,.6,.4,1)' }).onfinish = () => e.remove();
   }
-  setTimeout(emberLoop, on ? rand(hotNow ? 120 : 260, hotNow ? 260 : 520) : 400);
+  setTimeout(emberLoop, on ? rand(hotNow ? 120 : 260, hotNow ? 260 : 520) : document.hidden ? 3000 : 400);
 })();
 render();
+float.classList.toggle('paused', document.hidden);

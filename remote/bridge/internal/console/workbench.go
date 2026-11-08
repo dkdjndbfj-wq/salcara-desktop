@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"salcara/bridge/internal/agents"
 	"salcara/bridge/internal/config"
 	"salcara/bridge/internal/desktopcompanion"
 	"salcara/bridge/internal/hubclient"
@@ -38,9 +39,10 @@ func toolBindings(c config.Config, tools []launcher.Tool, hubState string, nativ
 	out := map[string]toolBinding{}
 	for _, t := range tools {
 		a, _ := c.SelectedToolAPI(t.ID)
-		applied, valid := c.AppliedToolAccount(t.ID)
+		applied, valid := c.AuthorizedAppliedToolAccount(t.ID)
 		b := toolBinding{AccountID: a.ID, AppliedID: applied.ID, Model: a.Model, Protocol: a.Protocol, Pending: !valid || applied.ID != a.ID || config.AccountFingerprint(a) != config.AccountFingerprint(applied), Override: a.CatalogOverride}
-		// Remote tasks work with the tool's own login; choosing/applying an API is optional.
+		// Connectivity and an executable API are separate conditions. Claude
+		// workers never fall back to the native application's subscription login.
 		lamp := remoteLamp{State: "off", Label: "手机远程未连接", Detail: "在「手机远程」连接中转站并扫码绑定手机", Supported: true}
 		backend := t.Kind
 		if !installed[backend] {
@@ -57,6 +59,20 @@ func toolBindings(c config.Config, tools []launcher.Tool, hubState string, nativ
 			lamp.State, lamp.Label, lamp.Detail = "connecting", "远程连接中", "正在连接中转站"
 		} else {
 			lamp.State, lamp.Label, lamp.Detail = "connected", "手机可继续", "已配对的手机可以查看并继续这台电脑上的对话"
+			settings := agents.SettingsWithGateway(c, 47831)
+			root, key := settings.ClaudeRoot, settings.ClaudeKey
+			if t.Kind == "codex" {
+				root, key = settings.CodexRoot, settings.CodexKey
+			} else if config.IsAdditionalTool(t.Kind) {
+				root, key = settings.Extensions[t.Kind].Root, settings.Extensions[t.Kind].Key
+			}
+			if root == "" && !config.IsAdditionalTool(t.Kind) {
+				root = settings.RelayRoot
+			}
+			_, _, apiErr := config.APIBase(root)
+			if (t.Kind == "claude" || config.IsAdditionalTool(t.Kind) || c.RemoteExecutionArmed) && (strings.TrimSpace(key) == "" || apiErr != nil) {
+				lamp.State, lamp.Label, lamp.Detail = "pending", "已连接 · API 待配置", "手机通道已连接；请为此 Agent 选择并应用有效 API，再继续任务"
+			}
 		}
 		if !t.Available {
 			lamp.State, lamp.Label, lamp.Detail, lamp.Supported = "unsupported", "工具未安装", "先安装此工具或填写程序路径", false
@@ -102,11 +118,12 @@ func toolBindings(c config.Config, tools []launcher.Tool, hubState string, nativ
 
 func (s *Server) handleLocalBind(w http.ResponseWriter, r *http.Request) {
 	var in struct {
-		Target   string  `json:"target"`
-		ID       string  `json:"id"`
-		Model    *string `json:"model"`
-		Protocol *string `json:"protocol"`
-		Override *bool   `json:"override"`
+		Target                 string  `json:"target"`
+		ID                     string  `json:"id"`
+		Model                  *string `json:"model"`
+		Protocol               *string `json:"protocol"`
+		Override               *bool   `json:"override"`
+		ExpectedSourceRevision *string `json:"expectedSourceRevision,omitempty"`
 	}
 	if err := readJSON(r, &in); err != nil {
 		writeErr(w, 400, err.Error())
@@ -118,10 +135,15 @@ func (s *Server) handleLocalBind(w http.ResponseWriter, r *http.Request) {
 	}
 	err := s.d.Store.Update(func(c *config.Config) error {
 		if in.ID != "" {
-			_, ok := c.LocalAccount(in.ID)
+			a, ok := c.LocalAccount(in.ID)
 			if !ok {
 				return errors.New("密钥条目不存在")
 			}
+			if err := checkLocalSourceRevision(*c, a, in.ExpectedSourceRevision); err != nil {
+				return err
+			}
+		} else if in.ExpectedSourceRevision != nil {
+			return errLocalSourceChanged
 		}
 		if c.ToolAPISelections == nil {
 			c.ToolAPISelections = map[string]string{}
@@ -160,6 +182,10 @@ func (s *Server) handleLocalBind(w http.ResponseWriter, r *http.Request) {
 		return nil
 	})
 	if err != nil {
+		if errors.Is(err, errLocalSourceChanged) {
+			writeErr(w, http.StatusConflict, errLocalSourceChanged.Error())
+			return
+		}
 		writeErr(w, 400, err.Error())
 		return
 	}
@@ -171,6 +197,10 @@ func (s *Server) handleLocalBind(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleLocalResume(w http.ResponseWriter, r *http.Request) {
+	if !s.admitUpdateWork(w) {
+		return
+	}
+	launcher.LaunchResumePlan(r.Context())
 	var in struct {
 		Target     string `json:"target"`
 		SessionKey string `json:"sessionKey"`
@@ -189,10 +219,14 @@ func (s *Server) handleLocalResume(w http.ResponseWriter, r *http.Request) {
 	if target == "claude-desktop" {
 		target = "claude"
 	}
-	kind := strings.Split(target, "-")[0]
+	kind := strings.TrimSuffix(target, "-desktop")
+	if kind != "codex" && kind != "claude" {
+		writeErr(w, 409, "这个 Agent 的手机会话请在 Bridge「对话」中查看和继续；暂不支持从这里恢复到原生终端")
+		return
+	}
 	c := s.d.Store.Get()
 	a, selected := c.SelectedToolAPI(target)
-	applied, valid := c.AppliedToolAccount(target)
+	applied, valid := c.AuthorizedAppliedToolAccount(target)
 	if !selected || !valid || applied.ID != a.ID || config.AccountFingerprint(a) != config.AccountFingerprint(applied) {
 		message := "请先在工具卡片重启应用当前 API，再恢复会话"
 		if in.Target == "claude-desktop" {
@@ -208,9 +242,16 @@ func (s *Server) handleLocalResume(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := ctxTimeout(r, 45*time.Second)
 	defer cancel()
+	release, err := s.beginLocalToolChange(ctx, kind)
+	if err != nil {
+		writeErr(w, http.StatusConflict, err.Error())
+		return
+	}
+	defer release()
+	launcher.LaunchPhase(ctx, "session", "读取并核对原会话")
 	list, err := hubclient.ListSessions(ctx, m, kind)
 	if err != nil {
-		writeErr(w, 400, "读取原会话失败，请刷新会话列表")
+		writeErr(w, 400, "读取原会话失败："+launcher.RedactLaunchError(err, a.Key).Error())
 		return
 	}
 	// Never accept arbitrary session paths or IDs from the browser.
@@ -219,8 +260,8 @@ func (s *Server) handleLocalResume(w http.ResponseWriter, r *http.Request) {
 		if session.SessionKey != in.SessionKey {
 			continue
 		}
-		if session.Status == "running" || session.Status == "waiting_approval" {
-			writeErr(w, 409, "原会话仍在运行，请先结束原任务，避免两个进程同时续写")
+		if !nativeSessionIdle(session.Status, session.ActiveTurnID) {
+			writeErr(w, 409, "原会话仍在运行或状态未确认，请先核对原任务，避免两个进程同时续写")
 			return
 		}
 		if session.Cwd == "" {
@@ -228,6 +269,9 @@ func (s *Server) handleLocalResume(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		connection := c.ToolConnection(applied, target, s.d.Port)
+		if !s.admitUpdateWork(w) {
+			return
+		}
 		result, err := s.d.Local.Resume(ctx, connection, kind, strings.TrimPrefix(in.SessionKey, kind+":"), session.Cwd, c.LocalToolPaths)
 		if err != nil {
 			writeErr(w, 400, err.Error())

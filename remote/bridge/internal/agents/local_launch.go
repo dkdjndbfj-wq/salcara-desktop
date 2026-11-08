@@ -10,6 +10,11 @@ func LocalExecutable(name, override string) (string, bool) {
 			p = native
 		}
 	}
+	if ok && name == "claude" {
+		if native := nativeClaudeExe(p); native != "" {
+			return native, true
+		}
+	}
 	return p, ok
 }
 
