@@ -1,0 +1,95 @@
+{
+  "mobile": {
+    "repository": "dkdjndbfj-wq/salcara-image-mobile",
+    "tag": "v1.8.3",
+    "sourceSHA": "d4f93bce4e3f264009604ed85f73a9f896369047",
+    "assets": {
+      "salcara-image-android-v1.8.3.apk": {
+        "digest": "sha256:52ad02df9a45f3e66aa1d626c9be1a0557acf924ec11a948ec6b7f3507328465",
+        "bytes": 117227282
+      },
+      "salcara-image-android-v1.8.3.apk.sha256": {
+        "digest": "sha256:ee738123f39bab4ad8efd7a492c6e1570f3bc8527cb6be3e52ade22fe9a07960",
+        "bytes": 99
+      }
+    }
+  },
+  "desktop": {
+    "repository": "dkdjndbfj-wq/salcara-desktop",
+    "tag": "v1.6.5",
+    "sourceSHA": "6add9977aa94836d888bd850e24585f1d4672e20",
+    "assets": {
+      "latest.json": {
+        "digest": "sha256:73d05df8afa513df3fa438ccde27f5992f206bbeae6d02ab822d801241ec30b2",
+        "bytes": 3532
+      },
+      "latest.json.sig": {
+        "digest": "sha256:d55b5bac5f34abdd7f555d53db6115943802a2b91dd9ad8af507bce3fbdfcb0a",
+        "bytes": 89
+      },
+      "Salcara-Bridge-1.6.5-win32-x64.tar.gz": {
+        "digest": "sha256:58e7313a158bce65ca849ef3ff5f7e56bf2ea0760115d2e052b5dcbda9409387",
+        "bytes": 214186007
+      },
+      "Salcara-Bridge-1.6.5-win32-x64.zip": {
+        "digest": "sha256:768ce2cf155a13daac45b4eccc2d28a1d2f214ee941df502bb2510332c7b2d0b",
+        "bytes": 220472785
+      },
+      "Salcara-Desktop-1.6.5-win32-x64-setup.exe": {
+        "digest": "sha256:06ed78dae73f80266b76551a86ff00d871073fa833058bb6b46c84772f126c2c",
+        "bytes": 152303145
+      },
+      "SHA256SUMS.txt": {
+        "digest": "sha256:29c39928ca8ee9e2a248aaf8bffd402fe7ef4dacd00fe8ba4fc9ba06975a626b",
+        "bytes": 478
+      }
+    }
+  },
+  "hub": {
+    "repository": "dkdjndbfj-wq/salcara-hub-plugin",
+    "tag": "standalone-v0.5.3",
+    "sourceSHA": "8aa7c351e9d0018fca0e19778d6ad1af0690dfb5",
+    "assets": {
+      "image-receipt.json": {
+        "digest": "sha256:d5e070136129a3a4a9976009463141de083b9e363f130b1fa17aad27f35b4a33",
+        "bytes": 814
+      },
+      "RELEASE-0.5.3.md": {
+        "digest": "sha256:6bf1c4466cea772624c783626d67f575ca43c724ca7b8d0880745a8aab3ef0f1",
+        "bytes": 2567
+      },
+      "salcara-hub-launcher_0.5.3_linux_amd64": {
+        "digest": "sha256:a85cadec5d46025c1319e8bb3ac6d887780c171ade5a99af8172917f1c930398",
+        "bytes": 12136572
+      },
+      "salcara-hub-launcher_0.5.3_linux_arm64": {
+        "digest": "sha256:cd7423fba383fdba1432beeae602ca49e2aeb6ce8b983e6abcb0d43941c8311b",
+        "bytes": 11468924
+      },
+      "salcara-hub_0.5.3_linux_amd64": {
+        "digest": "sha256:8ae390a8b9991f8c59eb9011fb88a7a839e335a0abf6b8c9e933bc6e51529905",
+        "bytes": 15122556
+      },
+      "salcara-hub_0.5.3_linux_arm64": {
+        "digest": "sha256:1c6921880f992a97c6de0b97dbee510fa65ba50b85071f726160c7ec39737faa",
+        "bytes": 14155900
+      },
+      "SHA256SUMS": {
+        "digest": "sha256:1597f63ff853750fc231f0b3d9a14aa7fd2eeaf34eca016b5fb52943c95a0350",
+        "bytes": 402
+      },
+      "standalone-account.json": {
+        "digest": "sha256:ffb4ca0f6cfc94bc951949962a6eb1234cd46941cc862b1fa30850eeef790783",
+        "bytes": 1246
+      },
+      "STANDALONE-DOCKER.zh.md": {
+        "digest": "sha256:2432693d0d5850599675470d70d0a73b6e35cd89e83d9db8832783c7d508ffc8",
+        "bytes": 25298
+      },
+      "standalone-payload.json": {
+        "digest": "sha256:e2e67f0549554852ed9ccadcdd1303786787684999e3ae06c650e6ef7da06696",
+        "bytes": 784
+      }
+    }
+  }
+}

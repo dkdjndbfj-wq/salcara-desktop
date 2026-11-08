@@ -1,12 +1,12 @@
-name: Desktop source checks (manual)
+name: Verify all coordinated public release downloads
 on:
   workflow_dispatch:
 permissions:
   contents: read
 jobs:
-  source-checks:
+  public-downloads:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
         with:
@@ -14,21 +14,20 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-      - uses: actions/setup-go@v5
+      - name: Download every public asset anonymously and verify exact source and hashes
+        run: python3 -u .release-verification/verify-public.py
+      - name: Verify public desktop Ed25519 manifest, USTAR archive and portable inventory
+        run: node remote/bridge/desktop/scripts/verify-release-artifact.cjs verified-public-assets/desktop verified-portable
+      - name: Verify public Hub publisher signature and both binaries
+        run: node .release-verification/verify-hub.mjs verified-public-assets/hub 0.5.3 verified-public-assets/hub/standalone-account.json .release-verification/publisher-public.json
+      - uses: actions/upload-artifact@v4
         with:
-          go-version: '1.27.1'
-          cache-dependency-path: remote/bridge/go.sum
-      - name: Desktop tests (includes POSIX synthetic updater fixture)
-        run: node --test remote/bridge/desktop/test/*.test.cjs
-      - name: Companion tests (synthetic host)
-        run: node --test remote/desktop-companion/tests/*.test.mjs
-      - name: Bridge unit tests (short excludes cross-component Hub e2e)
-        working-directory: remote/bridge
-        run: go test -short ./... -count=1
-      - name: Bridge vet
-        working-directory: remote/bridge
-        run: go vet ./...
-      - name: Bridge unit race
-        working-directory: remote/bridge
-        run: go test -short -race ./... -count=1
-      # No credentials, signing, package upload, or Release.
+          name: coordinated-public-release-verification
+          path: |
+            verified-public-assets/verification.json
+            verified-public-assets/*/latest.json
+            verified-public-assets/*/latest.json.sig
+            verified-public-assets/hub/standalone-account.json
+            verified-public-assets/hub/image-receipt.json
+          if-no-files-found: error
+          retention-days: 30
