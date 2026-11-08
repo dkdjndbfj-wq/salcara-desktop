@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"io"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
@@ -46,7 +47,7 @@ func (terminal *testTerminal) waitReady(t *testing.T) {
 		// Wait for the interactive host before sending typeahead. In particular,
 		// PSReadLine startup on CI must finish before testing Enter or Ctrl+C.
 		// ConPTY may encode the trailing prompt space as cursor movement.
-		terminal.waitText(t, "PS "+terminal.root+">")
+		terminal.waitText(t, "PS "+filepath.Clean(terminal.root)+">")
 	}
 }
 func readTestTerminal(t *testing.T, c *Client, root, id string, cursor int64) terminalReply {
@@ -86,9 +87,7 @@ func TestWorkspaceTerminalPersistentPTYAndInputDeduplication(t *testing.T) {
 	sendTestTerminal(t, c, root, first.TerminalID, 1, assignment)
 	// The marker is assembled by the shell, so input echo cannot satisfy it.
 	first.waitText(t, "READY_MARKER")
-	if runtime.GOOS == "windows" {
-		first.waitText(t, "PS "+root+">")
-	}
+	first.waitReady(t)
 	sendTestTerminal(t, c, root, first.TerminalID, 2, query)
 	first.waitText(t, "VALUE_persisted_END_1")
 	resize := terminalCommand(root, "resize")

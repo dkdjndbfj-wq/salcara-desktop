@@ -17,7 +17,6 @@ func TestEconomyInFlightAckKeepsNewFinalSnapshot(t *testing.T) {
 	batches := make(chan []protocol.Event, 3)
 	firstAck := make(chan struct{})
 	var acknowledge sync.Once
-	defer acknowledge.Do(func() { close(firstAck) })
 	requests := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var body struct {
@@ -43,8 +42,20 @@ func TestEconomyInFlightAckKeepsNewFinalSnapshot(t *testing.T) {
 	}
 	c.setState(StateConnected, "")
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go c.flushLoop(ctx)
+	done := make(chan struct{})
+	defer func() {
+		// Cancel signals shutdown but an acknowledged upload may still be
+		// persisting the outbox. Join the writer before TempDir cleanup, also
+		// releasing the first response if an earlier assertion failed.
+		acknowledge.Do(func() { close(firstAck) })
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Error("flush loop did not stop")
+		}
+	}()
+	go func() { defer close(done); c.flushLoop(ctx) }()
 	c.Push(snapshot("a", false))
 	var first []protocol.Event
 	select {
