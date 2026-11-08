@@ -1,0 +1,23 @@
+# Copy the external folder into terminal-diagnostic/ on the temporary branch.
+terminal:
+  runs-on: windows-2025
+  timeout-minutes: 15
+  permissions:
+    contents: read
+  steps:
+    - uses: actions/checkout@v4
+      with:
+        persist-credentials: false
+    - uses: actions/setup-go@v5
+      with:
+        go-version: '1.27.1'
+        cache: false
+    - name: Probe ConPTY inputs independently of Bridge dependencies
+      shell: pwsh
+      run: ./terminal-diagnostic/terminal-diagnostic.ps1 -RepositoryRoot $PWD -OutputDirectory "$PWD/terminal-diagnostic-output"
+    - uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: terminal-diagnostic-windows2025
+        path: terminal-diagnostic-output
+        retention-days: 7

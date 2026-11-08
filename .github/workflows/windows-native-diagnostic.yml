@@ -1,0 +1,74 @@
+name: Windows native diagnostics (temporary)
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: windows-2025
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.1'
+          cache: false
+      - name: Match release fixture temporary directory
+        shell: pwsh
+        run: |
+          $fixtureTemp = Join-Path $env:RUNNER_TEMP 'salcara-fixtures'
+          New-Item -ItemType Directory -Path $fixtureTemp -Force | Out-Null
+          $fixtureTemp = node -e "console.log(require('node:fs').realpathSync(process.argv[1]))" $fixtureTemp
+          "TEMP=$fixtureTemp" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "TMP=$fixtureTemp" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          New-Item -ItemType Directory -Path (Join-Path $env:RUNNER_TEMP 'launcher-probe-results') -Force | Out-Null
+      - name: Diagnose first cmdlet with a 15 second deadline per process
+        working-directory: remote/bridge
+        shell: pwsh
+        env:
+          SALCARA_PROBE_OUTPUT: ${{ runner.temp }}/launcher-probe-results
+        run: |
+          $logPath = Join-Path $env:RUNNER_TEMP 'launcher-probe-results/probe-console.log'
+          go run ./tools/launcher-runner-probe 2>&1 | Tee-Object -FilePath $logPath
+          exit $LASTEXITCODE
+      - name: Run actual launcher tests with finer phase markers
+        if: always()
+        working-directory: remote/bridge
+        shell: pwsh
+        run: |
+          $logPath = Join-Path $env:RUNNER_TEMP 'launcher-probe-results/actual-launcher-tests.log'
+          go test -short ./internal/launcher -run '^(TestClaudePinSurvivesWaiterReceiptFailuresUntilChildExit|TestWindowsLaunchScriptsProduceTargetReceiptsWithoutRealTools|TestWindowsClaudeAPIPinLifetimeAndExactCleanup)$' -count=1 -timeout=5m -v 2>&1 | Tee-Object -FilePath $logPath
+          exit $LASTEXITCODE
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: launcher-powershell-probe
+          path: ${{ runner.temp }}/launcher-probe-results
+          retention-days: 3
+
+  # Copy the external folder into terminal-diagnostic/ on the temporary branch.
+  terminal:
+    runs-on: windows-2025
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.1'
+          cache: false
+      - name: Probe ConPTY inputs independently of Bridge dependencies
+        shell: pwsh
+        run: ./terminal-diagnostic/terminal-diagnostic.ps1 -RepositoryRoot $PWD -OutputDirectory "$PWD/terminal-diagnostic-output"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: terminal-diagnostic-windows2025
+          path: terminal-diagnostic-output
+          retention-days: 7
+  

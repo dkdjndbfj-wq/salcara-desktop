@@ -291,6 +291,11 @@ func syntheticWindowsLaunchCommand(t *testing.T, ctx context.Context, script str
 	script = strings.ReplaceAll(script, "$psi.UseShellExecute = $false", "$psi.UseShellExecute = $false\n  $psi.CreateNoWindow = $true")
 	script = strings.ReplaceAll(script, "$psi.CreateNoWindow = $false", "$psi.CreateNoWindow = $true")
 	script = "$ProgressPreference = 'SilentlyContinue'\n[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)\n[Console]::Error.WriteLine('fixture: script entered')\n" + script
+	// Use only .NET calls for markers: the first cmdlet can itself block in
+	// Windows PowerShell command discovery, before Process.Start is reached.
+	script = strings.ReplaceAll(script, "$child = $null", "[Console]::Error.WriteLine('fixture: CLI initialization')\n$child = $null")
+	script = strings.ReplaceAll(script, "$d = Get-Content", "[Console]::Error.WriteLine('fixture: reading packaged JSON')\n  $d = Get-Content")
+	script = strings.ReplaceAll(script, "$psi = New-Object System.Diagnostics.ProcessStartInfo", "[Console]::Error.WriteLine('fixture: resolving New-Object')\n  $psi = New-Object System.Diagnostics.ProcessStartInfo\n  [Console]::Error.WriteLine('fixture: process info created')")
 	script = strings.ReplaceAll(script, "$child = [System.Diagnostics.Process]::Start($psi)", "[Console]::Error.WriteLine('fixture: starting child')\n  $child = [System.Diagnostics.Process]::Start($psi)\n  [Console]::Error.WriteLine('fixture: child started')")
 	script = strings.ReplaceAll(script, "function Write-LaunchReceipt($value) {", "function Write-LaunchReceipt($value) {\n  [Console]::Error.WriteLine('fixture: receipt ' + $value.state)\n")
 	if err := os.WriteFile(path, append([]byte{0xef, 0xbb, 0xbf}, []byte(script)...), 0600); err != nil {
