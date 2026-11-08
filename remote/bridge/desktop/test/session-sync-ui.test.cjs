@@ -6,7 +6,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 
-const source = fs.readFileSync(path.resolve(__dirname, '../../internal/console/web/app.js'), 'utf8');
+const source = fs.readFileSync(path.resolve(__dirname, '../../internal/console/web/app.js'), 'utf8').replace(/\r\n/g, '\n');
 const start = source.indexOf('let localConversationSyncPending = false;');
 const end = source.indexOf('\n}\n\nconst ACTIONS = {', start) + 2;
 assert.ok(start >= 0 && end > start, 'settings sync action exists in the console');

@@ -84,10 +84,17 @@ test('end to end: check, download, verify, unpack, swap and relaunch (POSIX)', {
     });
     // Tampered archive is refused.
     served[name] = Buffer.concat([bytes.subarray(0, -1), Buffer.from([bytes.at(-1) ^ 1])]);
-    const u2 = createUpdater({ app: { getVersion: () => '1.5.1', quit() {} }, shell: {}, platform: process.platform, arch: process.arch,
-      execPath: path.join(appDir, 'salcara'), isPackaged: true, repo: 'o/r', publicKey: k.pub, userData: path.join(tmp, 'ud2'), onChange() {}, beforeInstall: async () => {} });
+    let rejectedQuit = 0, rejectedPrepare = 0, rejectedHelpers = 0;
+    const u2 = createUpdater({ app: { getVersion: () => '1.5.1', quit() { rejectedQuit++; } }, shell: {}, platform: process.platform, arch: process.arch,
+      execPath: path.join(appDir, 'salcara'), isPackaged: true, repo: 'o/r', publicKey: k.pub, userData: path.join(tmp, 'ud2'), onChange() {},
+      beforeInstall: async () => { rejectedPrepare++; },
+      spawnHelper: () => { rejectedHelpers++; throw new Error('A tampered archive must never start an installer'); } });
     await u2.check(true); const r2 = await u2.download();
-    assert.equal(r2.phase, 'error'); assert.match(r2.error, /校验不通过/);
+    assert.equal(r2.phase, 'error'); assert.match(r2.error, /安装包校验失败/);
+    await u2.install();
+    assert.deepEqual([rejectedPrepare, rejectedHelpers, rejectedQuit], [0, 0, 0], 'a rejected archive cannot stop the core, launch an installer or quit the app');
+    assert.equal(fs.readFileSync(path.join(appDir, 'VERSION'), 'utf8'), '1.5.1', 'rejection must preserve the installed version');
+    assert.equal(fs.existsSync(path.join(tmp, 'launched')), false, 'rejection must not launch another version');
     served[name] = bytes;
     assert.equal((await u.check(true)).phase, 'available');
     assert.equal(u.state().canInstall, true);

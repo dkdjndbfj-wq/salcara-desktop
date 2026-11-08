@@ -4,7 +4,7 @@ const assert = require('node:assert/strict');
 const vm = require('node:vm');
 const { setup } = require('./helpers/workbench.cjs');
 
-test('additional Agent cards preserve full IDs and expose configuration and session viewing', async () => {
+test('additional Agent cards preserve configuration without session shortcuts and settings keep history', async () => {
   for (const id of ['deepseek-harness', 'hermes']) {
     const f = setup();
     const tool = {id, name:id, available:true};
@@ -13,7 +13,7 @@ test('additional Agent cards preserve full IDs and expose configuration and sess
     f.S.local.bindings[id] = {...binding}; f.backend.bindings[id] = {...binding};
     const html = f.wbCard(tool);
     assert.ok(html.includes(`data-family="${id}"`));
-    assert.match(html, new RegExp(`data-act="toolRestore" data-target="${id}"[^>]*>.*查看会话`));
+    assert.doesNotMatch(html, /data-act="toolRestore"|查看会话/);
     await f.wbOpenAccount(id,'api-shared');
     const button = f.button('wbApplyGo');
     assert.ok(button);
@@ -27,6 +27,12 @@ test('additional Agent cards preserve full IDs and expose configuration and sess
     assert.equal(switches[0].body.applyOnly,true);
     assert.equal(switches[0].body.confirmed,true);
     assert.ok(f.toasts.some(x => x.message.includes('未启动工具')));
+    f.context.loadLogs = () => {};
+    const settings = { innerHTML: '' };
+    f.context.renderSettingsPage(settings, { config: {}, version: 'test', os: 'linux' });
+    const historyLink = settings.innerHTML.match(/<a\b[^>]*href="#sessions"[^>]*>([\s\S]*?)<\/a>/);
+    assert.ok(historyLink, 'settings must retain the conversation history route');
+    assert.match(historyLink[1], />对话记录</);
   }
 });
 
