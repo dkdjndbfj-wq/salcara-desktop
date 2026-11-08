@@ -16,7 +16,18 @@ import (
 func terminalCommand(root, typ string) map[string]any {
 	return map[string]any{"type": "workspace.terminal." + typ, "sessionKey": workspaceTestKey, "controlSurface": "cli", "expectedCwd": root}
 }
-func openTestTerminal(t *testing.T, c *Client, root string) terminalReply {
+
+type testTerminal struct {
+	terminalReply
+	client          *Client
+	root            string
+	cursor          int64
+	output          strings.Builder
+	matched         int
+	answeredQueries int
+}
+
+func openTestTerminal(t *testing.T, c *Client, root string) *testTerminal {
 	t.Helper()
 	cmd := terminalCommand(root, "open")
 	cmd["operationId"] = "test-terminal-open-0001"
@@ -26,7 +37,17 @@ func openTestTerminal(t *testing.T, c *Client, root string) terminalReply {
 		t.Fatal(err)
 	}
 	t.Cleanup(c.closeWorkspaceTerminals)
-	return r.(terminalReply)
+	return &testTerminal{terminalReply: r.(terminalReply), client: c, root: root}
+}
+
+func (terminal *testTerminal) waitReady(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		// Wait for the interactive host before sending typeahead. In particular,
+		// PSReadLine startup on CI must finish before testing Enter or Ctrl+C.
+		// ConPTY may encode the trailing prompt space as cursor movement.
+		terminal.waitText(t, "PS "+terminal.root+">")
+	}
 }
 func readTestTerminal(t *testing.T, c *Client, root, id string, cursor int64) terminalReply {
 	t.Helper()
@@ -54,17 +75,22 @@ func TestWorkspaceTerminalPersistentPTYAndInputDeduplication(t *testing.T) {
 	if again.TerminalID != first.TerminalID {
 		t.Fatal("open retry created another shell")
 	}
-	assignment := "export SALCARA_PTY_TEST='persisted'; printf '\\nREADY_MARKER\\n'\r"
-	query := "printf '\\nVALUE_%s_END\\n' \"$SALCARA_PTY_TEST\"\r"
+	first.waitReady(t)
+	assignment := "SALCARA_PTY_COUNT=$((${SALCARA_PTY_COUNT:-0}+1)); export SALCARA_PTY_TEST='persisted'; printf '\\n%s_%s\\n' 'READY' 'MARKER'\r"
+	query := "printf '\\nVALUE_%s_END_%s\\n' \"$SALCARA_PTY_TEST\" \"$SALCARA_PTY_COUNT\"\r"
 	if runtime.GOOS == "windows" {
-		assignment = "$env:SALCARA_PTY_TEST='persisted'; Write-Output 'READY_MARKER'\r"
-		query = "Write-Output ('VALUE_' + $env:SALCARA_PTY_TEST + '_END')\r"
+		assignment = "$env:SALCARA_PTY_COUNT=[string]([int]$env:SALCARA_PTY_COUNT+1); $env:SALCARA_PTY_TEST='persisted'; Write-Output ('READY_' + 'MARKER')\r"
+		query = "Write-Output ('VALUE_' + $env:SALCARA_PTY_TEST + '_END_' + $env:SALCARA_PTY_COUNT)\r"
 	}
 	sendTestTerminal(t, c, root, first.TerminalID, 1, assignment)
 	sendTestTerminal(t, c, root, first.TerminalID, 1, assignment)
-	waitTerminalText(t, c, root, first.TerminalID, "READY_MARKER")
+	// The marker is assembled by the shell, so input echo cannot satisfy it.
+	first.waitText(t, "READY_MARKER")
+	if runtime.GOOS == "windows" {
+		first.waitText(t, "PS "+root+">")
+	}
 	sendTestTerminal(t, c, root, first.TerminalID, 2, query)
-	waitTerminalText(t, c, root, first.TerminalID, "VALUE_persisted_END")
+	first.waitText(t, "VALUE_persisted_END_1")
 	resize := terminalCommand(root, "resize")
 	resize["terminalId"], resize["cols"], resize["rows"] = first.TerminalID, 100, 30
 	if _, err := c.dispatchWorkspaceTerminal(context.Background(), resize); err != nil {
@@ -77,29 +103,51 @@ func TestWorkspaceTerminalPersistentPTYAndInputDeduplication(t *testing.T) {
 	}
 }
 
-func waitTerminalText(t *testing.T, c *Client, root, id, want string) {
+func (terminal *testTerminal) waitText(t *testing.T, want string) {
 	t.Helper()
-	deadline := time.Now().Add(15 * time.Second)
-	var output strings.Builder
-	var cursor int64
+	terminal.waitTextWithin(t, want, 15*time.Second)
+}
+
+func (terminal *testTerminal) waitTextWithin(t *testing.T, want string, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		r := readTestTerminal(t, c, root, id, cursor)
-		cursor = r.Cursor
+		r := readTestTerminal(t, terminal.client, terminal.root, terminal.TerminalID, terminal.cursor)
+		terminal.cursor = r.Cursor
 		b, err := base64.StdEncoding.DecodeString(r.Data)
 		if err != nil {
 			t.Fatal(err)
 		}
-		output.Write(b)
-		// ConPTY asks the renderer for the cursor position before starting its shell.
-		if strings.Contains(string(b), "\x1b[6n") {
-			c.terminals[id].process.Write([]byte("\x1b[1;1R"))
+		terminal.output.Write(b)
+		output := terminal.output.String()
+		// Act as the renderer for cursor queries, even when a VT sequence spans
+		// read chunks. Never replay an already answered query on the next wait.
+		queries := strings.Count(output, "\x1b[6n")
+		for terminal.answeredQueries < queries {
+			terminal.client.terminalMu.Lock()
+			process := terminal.client.terminals[terminal.TerminalID]
+			terminal.client.terminalMu.Unlock()
+			if process == nil {
+				t.Fatal("terminal disappeared while answering cursor query")
+			}
+			process.writeMu.Lock()
+			n, err := process.process.Write([]byte("\x1b[1;1R"))
+			process.writeMu.Unlock()
+			if err != nil || n != len("\x1b[1;1R") {
+				t.Fatalf("cursor query response failed: n=%d err=%v", n, err)
+			}
+			terminal.answeredQueries++
 		}
-		if strings.Contains(output.String(), want) {
+		if index := strings.Index(output[terminal.matched:], want); index >= 0 {
+			terminal.matched += index + len(want)
 			return
+		}
+		if r.Exited {
+			t.Fatalf("PTY exited with code %d before %q; output %q", r.ExitCode, want, output)
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	t.Fatalf("PTY did not emit %q; output %q", want, output.String())
+	t.Fatalf("PTY did not emit %q; output %q", want, terminal.output.String())
 }
 
 func TestWorkspaceTerminalScopeAndRevocation(t *testing.T) {
@@ -143,17 +191,21 @@ func TestWorkspaceTerminalBoundedReplay(t *testing.T) {
 func TestWorkspaceTerminalInterruptForegroundProcess(t *testing.T) {
 	c, _, root := workspaceFixture(t)
 	first := openTestTerminal(t, c, root)
-	command := "sleep 30\r"
+	first.waitReady(t)
+	command := "PS1='SALCARA_TERMINAL_READY> '; printf '\\n%s_%s\\n' 'FOREGROUND' 'STARTED'; sleep 30\r"
 	after := "printf '\\n%s_%s\\n' 'INTERRUPT' 'RECOVERED'\r"
 	if runtime.GOOS == "windows" {
-		command = "Start-Sleep -Seconds 30\r"
+		command = "function prompt { 'SALCARA_TERMINAL_READY> ' }; Write-Output ('FOREGROUND_' + 'STARTED'); Start-Sleep -Seconds 30\r"
 		after = "Write-Output ('INTERRUPT' + '_RECOVERED')\r"
 	}
 	sendTestTerminal(t, c, root, first.TerminalID, 1, command)
-	time.Sleep(500 * time.Millisecond)
+	first.waitText(t, "FOREGROUND_STARTED")
 	sendTestTerminal(t, c, root, first.TerminalID, 2, "\x03")
+	// Wait for the interrupted pipeline to release the shell before typing the
+	// next command; a fixed delay can interrupt PSReadLine startup instead.
+	first.waitText(t, "SALCARA_TERMINAL_READY>")
 	sendTestTerminal(t, c, root, first.TerminalID, 3, after)
-	waitTerminalText(t, c, root, first.TerminalID, "INTERRUPT_RECOVERED")
+	first.waitText(t, "INTERRUPT_RECOVERED")
 }
 
 func TestWorkspaceTerminalEnvironmentDoesNotInheritCredentials(t *testing.T) {

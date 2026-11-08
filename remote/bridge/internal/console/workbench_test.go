@@ -85,14 +85,13 @@ for (const tool of tools) {
   const main = html.match(new RegExp('<div id="lamp-' + tool.id + '">([\\s\\S]*?)<\\/div>'))?.[1];
   assert(main, 'main lamp missing');
   assert(main.includes('lamp-connected'), tool.id + ' incorrect initial lamp');
-  if (desktop) assert(html.includes('CLI 恢复会话'), 'desktop CLI restore missing');
+  assert(!html.includes('data-act="toolRestore"'), 'opening an Agent must not offer a history step');
   assert(!html.includes('desktopProbe'), 'experimental desktop plugin controls must not be shown');
   if (tool.id === 'claude-desktop') {
     const button = html.match(/<button[^>]*data-act="toolRestart"[^>]*>([\s\S]*?)<\/button>/)?.[0];
     assert(button?.includes('disabled') && button.includes('自动应用暂不可用'), 'Claude Desktop auto apply was enabled');
     assert(html.includes('Developer → Configure Third-Party Inference') && html.includes('聊天库的可见性'), 'manual desktop compatibility warning missing');
     assert(!html.includes('已应用 saved API') && !html.includes('应用并重启'), 'old applied payload claimed supported desktop API application');
-    assert(html.includes('data-act="toolRestore" data-target="claude"'), 'desktop restore must use the Code card');
   }
   for (const dirty of [false, true]) {
     elements.set('toolAPI-' + tool.id, { value: 'a' });
@@ -127,7 +126,7 @@ vm.runInContext('globalThis.testActions = ({' + section('  toolRestart: async (b
   context.api = async path => { assert(path === '/api/sessions?tool=claude', 'wrong restore backend'); return { sessions: [] }; };
   await context.openRestore('claude-desktop');
   assert(context.S.restoreTarget === 'claude', 'restore used the disabled desktop binding');
-  assert(modal.innerHTML.includes('使用 Claude Code 卡片已应用的 API') && !modal.innerHTML.includes('callout warn'), 'an unapplied desktop binding blocked an applied Code API');
+  assert(modal.innerHTML.includes('Claude Code 卡片已应用的 API') && !modal.innerHTML.includes('callout warn'), 'an unapplied desktop binding blocked an applied Code API');
   console.log('desktop and CLI rendering / draft / blocked action / Code restore assertions passed');
 })().catch(error => { console.error(error); process.exitCode = 1; });
 `

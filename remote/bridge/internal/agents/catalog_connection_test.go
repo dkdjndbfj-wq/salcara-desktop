@@ -53,7 +53,7 @@ func TestRefreshedAppliedAndPhoneCatalogsAdaptWorkersWithoutEditingOriginalConfi
 					t.Fatal("worker inherited a retired upstream default")
 				}
 				if family == "codex" {
-					provider := "salcara"
+					provider := "openai"
 					if source == "applied" {
 						provider = "original-fixture-provider"
 					}
@@ -61,7 +61,16 @@ func TestRefreshedAppliedAndPhoneCatalogsAdaptWorkersWithoutEditingOriginalConfi
 						t.Fatalf("Codex conversion settings incorrect: %+v", after)
 					}
 					args := strings.Join(codexArgs("codex.exe", after), " ")
-					for _, expected := range []string{"app-server", `model_provider="` + provider + `"`, `base_url="` + root + `/v1"`, `wire_api="responses"`} {
+					expectedArgs := []string{"app-server", `model_provider="` + provider + `"`}
+					if source == "phone" {
+						expectedArgs = append(expectedArgs, `openai_base_url="`+root+`/v1"`, `cli_auth_credentials_store="ephemeral"`, `forced_login_method="api"`)
+						if strings.Contains(args, "model_providers") {
+							t.Fatal("phone API replaced the original built-in provider")
+						}
+					} else {
+						expectedArgs = append(expectedArgs, `base_url="`+root+`/v1"`, `wire_api="responses"`)
+					}
+					for _, expected := range expectedArgs {
 						if !strings.Contains(args, expected) {
 							t.Fatalf("backend process still uses original direct provider: missing %q in %s", expected, args)
 						}

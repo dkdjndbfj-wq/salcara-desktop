@@ -259,37 +259,76 @@ func TestWindowsLaunchSyntheticChild(t *testing.T) {
 	}
 }
 
-func syntheticWindowsLaunchEnvironment() []string {
+func syntheticWindowsLaunchEnvironment(t *testing.T) []string {
+	t.Helper()
 	values := []string{"GORACE=atexit_sleep_ms=0"}
-	for _, key := range []string{"SystemRoot", "WINDIR", "TEMP", "TMP", "PATH", "COMSPEC"} {
+	for _, key := range []string{"SystemRoot", "WINDIR", "TEMP", "TMP", "PATH", "COMSPEC", "ProgramFiles", "ProgramFiles(x86)", "ProgramW6432", "ProgramData", "PROCESSOR_ARCHITECTURE"} {
 		if value := os.Getenv(key); value != "" {
 			values = append(values, key+"="+value)
 		}
 	}
-	return values
+	// Give Windows PowerShell a valid, isolated profile and restrict module
+	// discovery to its inbox modules. Hosted runners can have many unrelated
+	// modules installed; these fixtures only need Utility and Management.
+	profile := t.TempDir()
+	roaming := filepath.Join(profile, "AppData", "Roaming")
+	local := filepath.Join(profile, "AppData", "Local")
+	for _, path := range []string{roaming, local} {
+		if err := os.MkdirAll(path, 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return append(values, "USERPROFILE="+profile, "APPDATA="+roaming, "LOCALAPPDATA="+local,
+		"PSModulePath="+filepath.Join(filepath.Dir(powershell()), "Modules"))
 }
 
-func runSyntheticWindowsLaunchScript(t *testing.T, script, status, mode string) windowsLaunchReceipt {
+func syntheticWindowsLaunchCommand(t *testing.T, ctx context.Context, script string, environment ...string) (*exec.Cmd, func() string) {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "synthetic-launch.ps1")
+	dir := t.TempDir()
+	path := filepath.Join(dir, "synthetic-launch.ps1")
 	// Production inherits the visible terminal's console handles. These tests
 	// hide the synthetic child and verify only the process/receipt protocol.
 	script = strings.ReplaceAll(script, "$psi.UseShellExecute = $false", "$psi.UseShellExecute = $false\n  $psi.CreateNoWindow = $true")
 	script = strings.ReplaceAll(script, "$psi.CreateNoWindow = $false", "$psi.CreateNoWindow = $true")
+	script = "$ProgressPreference = 'SilentlyContinue'\n[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)\n[Console]::Error.WriteLine('fixture: script entered')\n" + script
+	script = strings.ReplaceAll(script, "$child = [System.Diagnostics.Process]::Start($psi)", "[Console]::Error.WriteLine('fixture: starting child')\n  $child = [System.Diagnostics.Process]::Start($psi)\n  [Console]::Error.WriteLine('fixture: child started')")
+	script = strings.ReplaceAll(script, "function Write-LaunchReceipt($value) {", "function Write-LaunchReceipt($value) {\n  [Console]::Error.WriteLine('fixture: receipt ' + $value.state)\n")
 	if err := os.WriteFile(path, append([]byte{0xef, 0xbb, 0xbf}, []byte(script)...), 0600); err != nil {
 		t.Fatal(err)
 	}
+	logPath := filepath.Join(dir, "powershell.log")
+	output, err := os.Create(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = output.Close() })
+	cmd := exec.CommandContext(ctx, powershell(), "-NoLogo", "-NoProfile", "-NonInteractive", "-OutputFormat", "Text", "-ExecutionPolicy", "Bypass", "-File", path)
+	cmd.Env = append(syntheticWindowsLaunchEnvironment(t), environment...)
+	// Use files instead of pipes: a synthetic child's inherited output handle
+	// must not keep cmd.Wait blocked after a supervisor timeout. Reading this
+	// file for diagnostics is also safe while the supervisor is still running.
+	cmd.Stdout, cmd.Stderr = output, output
+	configureProcess(cmd, false)
+	return cmd, func() string {
+		data, err := os.ReadFile(logPath)
+		if err != nil {
+			return err.Error()
+		}
+		return string(data)
+	}
+}
+
+func runSyntheticWindowsLaunchScript(t *testing.T, script, status, mode string) windowsLaunchReceipt {
+	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, powershell(), "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", path)
-	cmd.Env = append(syntheticWindowsLaunchEnvironment(), "SALCARA_SYNTHETIC_LAUNCH_CHILD="+mode)
-	configureProcess(cmd, false)
+	cmd, diagnostics := syntheticWindowsLaunchCommand(t, ctx, script, "SALCARA_SYNTHETIC_LAUNCH_CHILD="+mode)
 	if err := cmd.Run(); err != nil {
-		t.Fatalf("synthetic launcher script failed: %v", err)
+		t.Fatalf("synthetic launcher script failed: %v; context: %v\n%s", err, ctx.Err(), diagnostics())
 	}
 	data, err := os.ReadFile(status)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("missing launch receipt: %v\n%s", err, diagnostics())
 	}
 	if strings.Contains(string(data), "synthetic-private") || strings.Contains(string(data), "ProcessStartInfo") {
 		t.Fatal("receipt leaked private input or source")

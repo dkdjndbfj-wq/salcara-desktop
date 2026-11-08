@@ -286,7 +286,10 @@ func (c *rpcConn) rootProcessExitConfirmed() bool {
 	}
 	select {
 	case <-c.processWaitDone:
-		return c.cmd != nil && c.cmd.ProcessState != nil && c.cmd.ProcessState.Exited()
+		// Wait also reaps signal-terminated Unix processes. Exited() is false
+		// for those, even though the OS has confirmed termination. The wait
+		// publication and separate process-tree fence are still required.
+		return c.cmd != nil && c.cmd.ProcessState != nil
 	default:
 		return false
 	}

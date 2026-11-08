@@ -6,7 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"os"
+
+	"salcara/bridge/internal/atomicfile"
 )
+
+func writeDirectTLSIdentityFile(path string, bundle []byte) error {
+	return atomicfile.WriteFile(path, bundle, 0o600)
+}
 
 func protectDirectTLSIdentityFile(path string) error {
 	info, err := os.Lstat(path)

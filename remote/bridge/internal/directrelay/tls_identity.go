@@ -19,8 +19,6 @@ import (
 	"sort"
 	"strings"
 	"time"
-
-	"salcara/bridge/internal/atomicfile"
 )
 
 // TLSIdentity is the local server identity advertised by a direct-pairing QR.
@@ -67,7 +65,7 @@ func LoadOrCreateTLSIdentity(bundlePath string, hosts []string) (TLSIdentity, er
 	if err != nil {
 		return TLSIdentity{}, err
 	}
-	if err := atomicfile.WriteFile(bundlePath, bundle, 0o600); err != nil {
+	if err := writeDirectTLSIdentityFile(bundlePath, bundle); err != nil {
 		// Another process may have created the identity between our read and
 		// write. Load the winner only if it is a valid, compatible identity.
 		if permissionErr := verifyDirectTLSIdentityFile(bundlePath); permissionErr == nil {

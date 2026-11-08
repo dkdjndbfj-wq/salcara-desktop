@@ -3,13 +3,77 @@
 package directrelay
 
 import (
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
+
+// An elevated token can default new files to the Administrators group owner.
+// Set the exact user and private DACL at creation, before writing any key bytes.
+// Existing identities are never adopted or overwritten by this creation path.
+func writeDirectTLSIdentityFile(path string, bundle []byte) error {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	user, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil {
+		return fmt.Errorf("read current user for direct TLS creation: %w", err)
+	}
+	sid := user.User.Sid.String()
+	sd, err := windows.SecurityDescriptorFromString("O:" + sid + "D:P(A;;FA;;;SY)(A;;FA;;;" + sid + ")")
+	if err != nil {
+		return fmt.Errorf("create direct TLS private security descriptor: %w", err)
+	}
+	sa := windows.SecurityAttributes{SecurityDescriptor: sd}
+	sa.Length = uint32(unsafe.Sizeof(sa))
+	target, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		return err
+	}
+	for range 10 {
+		tmp := filepath.Join(dir, "."+filepath.Base(path)+"-"+rand.Text()+".tmp")
+		name, err := windows.UTF16PtrFromString(tmp)
+		if err != nil {
+			return err
+		}
+		handle, err := windows.CreateFile(name, windows.GENERIC_WRITE|windows.READ_CONTROL, 0, &sa,
+			windows.CREATE_NEW, windows.FILE_ATTRIBUTE_NORMAL, 0)
+		if errors.Is(err, windows.ERROR_FILE_EXISTS) || errors.Is(err, windows.ERROR_ALREADY_EXISTS) {
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("create direct TLS private file: %w", err)
+		}
+		file := os.NewFile(uintptr(handle), tmp)
+		defer os.Remove(tmp)
+		defer file.Close()
+		created, err := windows.GetSecurityInfo(handle, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
+		if err != nil {
+			return fmt.Errorf("inspect newly created direct TLS private file: %w", err)
+		}
+		if err := verifyDirectTLSIdentitySecurity(created, user.User.Sid); err != nil {
+			return err
+		}
+		if _, err := file.Write(bundle); err != nil {
+			return err
+		}
+		if err := file.Sync(); err != nil {
+			return err
+		}
+		if err := file.Close(); err != nil {
+			return err
+		}
+		// No REPLACE_EXISTING: a concurrent creator's pinned identity wins.
+		return windows.MoveFileEx(name, target, windows.MOVEFILE_WRITE_THROUGH)
+	}
+	return errors.New("could not allocate a unique direct TLS private file")
+}
 
 func protectDirectTLSIdentityFile(path string) error {
 	if err := checkDirectTLSIdentityPath(path); err != nil {
@@ -67,8 +131,12 @@ func verifyDirectTLSIdentityFile(path string) error {
 	if err != nil {
 		return fmt.Errorf("read direct TLS private ACL: %w", err)
 	}
+	return verifyDirectTLSIdentitySecurity(sd, user.User.Sid)
+}
+
+func verifyDirectTLSIdentitySecurity(sd *windows.SECURITY_DESCRIPTOR, userSID *windows.SID) error {
 	owner, _, err := sd.Owner()
-	if err != nil || owner == nil || !owner.Equals(user.User.Sid) {
+	if err != nil || owner == nil || !owner.Equals(userSID) {
 		return errors.New("direct TLS identity file is not owned by current user")
 	}
 	control, _, err := sd.Control()
@@ -90,7 +158,7 @@ func verifyDirectTLSIdentityFile(path string) error {
 			return errors.New("direct TLS identity ACL contains an invalid principal")
 		}
 		switch {
-		case sid.Equals(user.User.Sid) && !seenUser:
+		case sid.Equals(userSID) && !seenUser:
 			seenUser = true
 		case sid.IsWellKnown(windows.WinLocalSystemSid) && !seenSystem:
 			seenSystem = true
