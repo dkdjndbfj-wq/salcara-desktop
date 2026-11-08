@@ -14,6 +14,21 @@ import (
 	"golang.org/x/sys/windows"
 )
 
+func TestWorkspaceTerminalWindowsInboxCommands(t *testing.T) {
+	c, _, root := workspaceFixture(t)
+	first := openTestTerminal(t, c, root)
+	first.waitReady(t)
+	jsonFile := strings.ReplaceAll(filepath.Join(root, "inbox.json"), "'", "''")
+	// Exercise ordinary inbox commands in the production terminal's isolated
+	// environment. The output markers are
+	// assembled at execution time, so echoed input cannot satisfy the test.
+	line := "[IO.File]::WriteAllText('" + jsonFile + "', '{\"value\":\"ready\"}'); $value = Get-Content -LiteralPath '" + jsonFile + "' -Raw | ConvertFrom-Json; $text = New-Object System.Text.StringBuilder; [void]$text.Append($value.value); Write-Output ('INBOX_' + $text.ToString() + '_OUTPUT'); Write-Host ('INBOX_' + 'HOST')\r"
+	sendTestTerminal(t, c, root, first.TerminalID, 1, line)
+	first.waitText(t, "INBOX_ready_OUTPUT")
+	first.waitText(t, "INBOX_HOST")
+	first.waitReady(t)
+}
+
 func TestWorkspaceTerminalCloseKillsWindowsChildren(t *testing.T) {
 	c, _, root := workspaceFixture(t)
 	first := openTestTerminal(t, c, root)

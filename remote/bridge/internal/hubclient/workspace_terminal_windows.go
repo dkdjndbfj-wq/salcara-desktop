@@ -68,7 +68,12 @@ func startTerminalProcess(cwd string, cols, rows int, env []string) (terminalPro
 		return nil, err
 	}
 	shell := filepath.Join(system, "WindowsPowerShell", "v1.0", "powershell.exe")
-	args := []string{shell, "-NoLogo", "-NoProfile", "-NoExit"}
+	// The terminal uses an allowlisted environment. On Windows Server 2025,
+	// discovering an unqualified inbox cmdlet in that environment can stall
+	// after the command has already started. Load the exact system manifests
+	// before the first prompt, keeping the user's input and PSReadLine intact.
+	args := []string{shell, "-NoLogo", "-NoProfile", "-NoExit", "-Command",
+		`Import-Module -Name ($PSHOME + '\Modules\Microsoft.PowerShell.Utility\Microsoft.PowerShell.Utility.psd1') -ErrorAction Stop; Import-Module -Name ($PSHOME + '\Modules\Microsoft.PowerShell.Management\Microsoft.PowerShell.Management.psd1') -ErrorAction Stop; Import-Module -Name ($PSHOME + '\Modules\Microsoft.PowerShell.Host\Microsoft.PowerShell.Host.psd1') -ErrorAction Stop`}
 	if _, err = os.Stat(shell); err != nil {
 		shell = filepath.Join(system, "cmd.exe")
 		args = []string{shell, "/D"}

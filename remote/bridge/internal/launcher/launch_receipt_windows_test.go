@@ -267,9 +267,9 @@ func syntheticWindowsLaunchEnvironment(t *testing.T) []string {
 			values = append(values, key+"="+value)
 		}
 	}
-	// Give Windows PowerShell a valid, isolated profile and restrict module
-	// discovery to its inbox modules. Hosted runners can have many unrelated
-	// modules installed; these fixtures only need Utility and Management.
+	// Keep the profile and agent credentials isolated. Windows PowerShell can
+	// append other module paths at startup; the command bootstrap below loads
+	// the two required inbox modules by absolute manifest path.
 	profile := t.TempDir()
 	roaming := filepath.Join(profile, "AppData", "Roaming")
 	local := filepath.Join(profile, "AppData", "Local")
@@ -290,7 +290,26 @@ func syntheticWindowsLaunchCommand(t *testing.T, ctx context.Context, script str
 	// hide the synthetic child and verify only the process/receipt protocol.
 	script = strings.ReplaceAll(script, "$psi.UseShellExecute = $false", "$psi.UseShellExecute = $false\n  $psi.CreateNoWindow = $true")
 	script = strings.ReplaceAll(script, "$psi.CreateNoWindow = $false", "$psi.CreateNoWindow = $true")
-	script = "$ProgressPreference = 'SilentlyContinue'\n[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)\n[Console]::Error.WriteLine('fixture: script entered')\n" + script
+	// Production preserves the Windows runtime environment via LocalEnvironment.
+	// Our deliberately reduced fixture environment makes unqualified cmdlet
+	// discovery hang on Windows 2025. Importing these exact inbox manifests
+	// avoids that discovery without inheriting the host's agent configuration
+	// or changing the production script's commands and receipt/pin behavior.
+	script = `$ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
+[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
+[Console]::Error.WriteLine('fixture: script entered')
+[Console]::Error.WriteLine('fixture: importing system Utility module')
+Import-Module -Name ($PSHOME + '\Modules\Microsoft.PowerShell.Utility\Microsoft.PowerShell.Utility.psd1') -ErrorAction Stop
+[Console]::Error.WriteLine('fixture: importing system Management module')
+Import-Module -Name ($PSHOME + '\Modules\Microsoft.PowerShell.Management\Microsoft.PowerShell.Management.psd1') -ErrorAction Stop
+[Console]::Error.WriteLine('fixture: system modules initialized')
+` + script
+	// Use only .NET calls for markers: the first cmdlet can itself block in
+	// Windows PowerShell command discovery, before Process.Start is reached.
+	script = strings.ReplaceAll(script, "$child = $null", "[Console]::Error.WriteLine('fixture: CLI initialization')\n$child = $null")
+	script = strings.ReplaceAll(script, "$d = Get-Content", "[Console]::Error.WriteLine('fixture: reading packaged JSON')\n  $d = Get-Content")
+	script = strings.ReplaceAll(script, "$psi = New-Object System.Diagnostics.ProcessStartInfo", "[Console]::Error.WriteLine('fixture: resolving New-Object')\n  $psi = New-Object System.Diagnostics.ProcessStartInfo\n  [Console]::Error.WriteLine('fixture: process info created')")
 	script = strings.ReplaceAll(script, "$child = [System.Diagnostics.Process]::Start($psi)", "[Console]::Error.WriteLine('fixture: starting child')\n  $child = [System.Diagnostics.Process]::Start($psi)\n  [Console]::Error.WriteLine('fixture: child started')")
 	script = strings.ReplaceAll(script, "function Write-LaunchReceipt($value) {", "function Write-LaunchReceipt($value) {\n  [Console]::Error.WriteLine('fixture: receipt ' + $value.state)\n")
 	if err := os.WriteFile(path, append([]byte{0xef, 0xbb, 0xbf}, []byte(script)...), 0600); err != nil {
@@ -315,6 +334,33 @@ func syntheticWindowsLaunchCommand(t *testing.T, ctx context.Context, script str
 			return err.Error()
 		}
 		return string(data)
+	}
+}
+
+func TestWindowsLaunchFixtureKeepsAgentEnvironmentIsolated(t *testing.T) {
+	for _, key := range []string{"OPENAI_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "CODEX_HOME", "CLAUDE_CONFIG_DIR"} {
+		t.Setenv(key, "synthetic-host-value")
+	}
+	script := `foreach ($key in @('OPENAI_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'CLAUDE_CODE_OAUTH_TOKEN', 'CODEX_HOME', 'CLAUDE_CONFIG_DIR')) {
+  if ($null -ne [Environment]::GetEnvironmentVariable($key)) { throw ('host agent environment inherited: ' + $key) }
+}
+foreach ($entry in @(@{name='New-Object'; module='Microsoft.PowerShell.Utility'}, @{name='ConvertTo-Json'; module='Microsoft.PowerShell.Utility'}, @{name='Get-Content'; module='Microsoft.PowerShell.Management'}, @{name='Remove-Item'; module='Microsoft.PowerShell.Management'})) {
+  $command = $ExecutionContext.SessionState.InvokeCommand.GetCommand($entry.name, [System.Management.Automation.CommandTypes]::Cmdlet)
+  if ($null -eq $command) { throw ('missing inbox cmdlet: ' + $entry.name) }
+  if ($command.ModuleName -ne $entry.module) {
+    throw ('cmdlet did not come from inbox module: ' + $entry.name)
+  }
+}
+[Console]::Error.WriteLine('fixture: isolated inbox commands verified')
+`
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	cmd, diagnostics := syntheticWindowsLaunchCommand(t, ctx, script)
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("isolated inbox initialization failed: %v; context: %v\n%s", err, ctx.Err(), diagnostics())
+	}
+	if !strings.Contains(diagnostics(), "fixture: isolated inbox commands verified") {
+		t.Fatalf("inbox environment was not verified\n%s", diagnostics())
 	}
 }
 
