@@ -148,8 +148,12 @@ func TestTerminalDiagnostic(t *testing.T) {
 	for _, ending := range []string{"cr", "lf", "crlf", "separate-cr", "win32-enter"} {
 		t.Run(ending, func(t *testing.T) {
 			root := t.TempDir()
+			promptSuffix := filepath.Base(root) + ">"
+			t.Logf("requestedRoot=%q startupPromptSuffix=%q", root, promptSuffix)
 			d := startDiagnosticTerminal(t, root)
-			if !d.waitText("PS "+filepath.Clean(root)+">", 10*time.Second) {
+			// Before any input, match the directory suffix because PowerShell can
+			// expand a short Windows temp path into its long form in the prompt.
+			if !d.waitText(promptSuffix, 10*time.Second) {
 				d.mu.Lock()
 				t.Logf("startup output=%q", d.output)
 				d.mu.Unlock()

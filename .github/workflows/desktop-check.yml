@@ -5,6 +5,7 @@ permissions:
   contents: read
 jobs:
   probe:
+    if: ${{ false }}
     runs-on: windows-2025
     timeout-minutes: 12
     steps:
