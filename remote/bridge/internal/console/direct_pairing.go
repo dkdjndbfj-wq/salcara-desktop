@@ -146,6 +146,7 @@ const directCommandConcurrency = 4
 
 var directCommandTypes = map[string]struct{}{
 	"workspace.projects":         {},
+	"workspace.explorer":         {},
 	"computer.management.status": {}, "computer.api.create": {}, "computer.agent.install": {},
 	"workspace.project.preview": {},
 	"workspace.artifacts":       {},

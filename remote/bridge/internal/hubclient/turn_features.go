@@ -187,9 +187,17 @@ func (c *Client) dispatchFeatures(ctx context.Context, m agents.Manager, cfg con
 		if c.isManagedCwd(str(cmd, "cwd")) {
 			return empty, ErrNotAllowed
 		}
-		cwd, err = CheckCwd(str(cmd, "cwd"), cfg.Projects)
-		if errors.Is(err, ErrNotAllowed) {
-			cwd, err = CheckCwd(str(cmd, "cwd"), allowedProjects(ctx, m, cfg.Projects))
+		grant, grantErr := explorerGrantForCwd(cfg, str(cmd, "cwd"))
+		if grantErr != nil {
+			return empty, grantErr
+		}
+		if grant {
+			cwd, err = workspaceConfiguredRoot(cfg, str(cmd, "cwd"))
+		} else {
+			cwd, err = CheckCwd(str(cmd, "cwd"), cfg.Projects)
+			if errors.Is(err, ErrNotAllowed) {
+				cwd, err = CheckCwd(str(cmd, "cwd"), allowedProjects(ctx, m, cfg.Projects))
+			}
 		}
 		if err != nil {
 			return empty, err
@@ -197,6 +205,9 @@ func (c *Client) dispatchFeatures(ctx context.Context, m agents.Manager, cfg con
 		if c.isManagedCwd(cwd) {
 			return empty, ErrNotAllowed
 		}
+	}
+	if _, err := explorerGrantForCwd(cfg, cwd); err != nil {
+		return empty, err
 	}
 	key := featureCatalogScope(ctx, cfg, a, str(cmd, "accountId"), cwd, id)
 	var out protocol.AgentFeatures

@@ -84,6 +84,9 @@ type Config struct {
 	DeviceSecret string             `json:"deviceSecret"`
 	DeviceName   string             `json:"deviceName"`
 	Projects     []protocol.Project `json:"projects"`
+	// Explorer grants bind explicitly created directories to their filesystem
+	// identity. They do not authorize the disk or parent used by the picker.
+	ExplorerGrants []ExplorerGrant `json:"explorerGrants,omitempty"`
 
 	Approval string `json:"approval"`
 	// AllowPhoneAutoAll lets a paired phone start tasks with the "全部自动"
@@ -141,6 +144,11 @@ type Config struct {
 	DirectAPI map[string]RemoteAPI `json:"directApi,omitempty"`
 }
 
+type ExplorerGrant struct {
+	Path        string `json:"path"`
+	DirectoryID string `json:"directoryId"`
+}
+
 // Clone returns a deep copy.
 func (c Config) Clone() Config {
 	if c.AccountTags != nil {
@@ -189,6 +197,7 @@ func (c Config) Clone() Config {
 	}
 	c.PendingPhoneRevokes = append([]PendingPhoneRevoke(nil), c.PendingPhoneRevokes...)
 	c.Projects = append([]protocol.Project(nil), c.Projects...)
+	c.ExplorerGrants = append([]ExplorerGrant(nil), c.ExplorerGrants...)
 	c.LocalAccounts = append([]LocalAccount(nil), c.LocalAccounts...)
 	for i := range c.LocalAccounts {
 		c.LocalAccounts[i].Models = append([]string(nil), c.LocalAccounts[i].Models...)

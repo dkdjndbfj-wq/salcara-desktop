@@ -191,6 +191,9 @@ func (c *Client) Dispatch(ctx context.Context, cmd map[string]any) (result any, 
 	if err := c.validateManagedSession(ctx, cfg, str(cmd, "sessionKey")); err != nil {
 		return nil, err
 	}
+	if err := c.validateExplorerSession(ctx, cfg, str(cmd, "sessionKey"), commandSurface(typ, cmd)); err != nil {
+		return nil, err
+	}
 	finish, replayed, previous, ledgerErr := c.beginDurableExecution(ctx, cfg, cmd)
 	if ledgerErr != nil || replayed {
 		if ledgerErr == nil && replayed && typ == "session.revert" {
@@ -417,6 +420,9 @@ func (c *Client) Dispatch(ctx context.Context, cmd map[string]any) (result any, 
 	if typ == "workspace.projects" {
 		return c.dispatchWorkspaceProjects(ctx, cmd)
 	}
+	if typ == "workspace.explorer" {
+		return c.dispatchWorkspaceExplorer(ctx, cmd)
+	}
 	if typ == "workspace.project.preview" {
 		return c.dispatchWorkspaceProjectPreview(ctx, cmd)
 	}
@@ -587,18 +593,29 @@ func (c *Client) Dispatch(ctx context.Context, cmd map[string]any) (result any, 
 		projectless := cmd["projectless"] == true
 		cwd := ""
 		if !projectless {
+			explorerGrant, grantErr := explorerGrantForCwd(cfg, str(cmd, "cwd"))
+			if grantErr != nil {
+				return nil, grantErr
+			}
 			if c.isManagedCwd(str(cmd, "cwd")) {
 				return nil, ErrNotAllowed
 			}
-			cwd, err = CheckCwd(str(cmd, "cwd"), cfg.Projects)
-			if errors.Is(err, ErrNotAllowed) {
-				cwd, err = CheckCwd(str(cmd, "cwd"), allowedProjects(ctx, m, cfg.Projects))
+			if explorerGrant {
+				cwd, err = workspaceConfiguredRoot(cfg, str(cmd, "cwd"))
+			} else {
+				cwd, err = CheckCwd(str(cmd, "cwd"), cfg.Projects)
+				if errors.Is(err, ErrNotAllowed) {
+					cwd, err = CheckCwd(str(cmd, "cwd"), allowedProjects(ctx, m, cfg.Projects))
+				}
 			}
 			if err != nil {
 				return nil, err
 			}
 			if c.isManagedCwd(cwd) {
 				return nil, ErrNotAllowed
+			}
+			if _, err := explorerGrantForCwd(cfg, cwd); err != nil {
+				return nil, err
 			}
 		}
 		if !projectless && workspaceGuardedAgent(a) {
@@ -696,6 +713,10 @@ func (c *Client) Dispatch(ctx context.Context, cmd map[string]any) (result any, 
 		defer finishWorkspaceStart("", "")
 		if projectless {
 			if err := c.markProjectlessStarting(ctx, managedKey); err != nil {
+				return nil, err
+			}
+		} else if c.o.Store != nil {
+			if _, err := explorerGrantForCwd(c.o.Store.Get(), cwd); err != nil {
 				return nil, err
 			}
 		}

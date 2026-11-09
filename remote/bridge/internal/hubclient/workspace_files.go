@@ -290,7 +290,11 @@ func workspaceSamePath(a, b string) bool {
 }
 
 func workspaceConfiguredRoot(cfg config.Config, cwd string) (string, error) {
-	if !filepath.IsAbs(cwd) || !workspaceLocalRoot(cwd) {
+	if !filepath.IsAbs(cwd) {
+		return "", errWorkspaceFiles
+	}
+	exact, err := explorerGrantForCwd(cfg, cwd)
+	if err != nil || !workspaceLocalRoot(cwd) && !exact {
 		return "", errWorkspaceFiles
 	}
 	st, err := os.Lstat(cwd)
@@ -314,7 +318,11 @@ func workspaceConfiguredRoot(cfg config.Config, cwd string) (string, error) {
 		return "", errWorkspaceFiles
 	}
 	real, err := filepath.EvalSymlinks(cwd)
-	if err != nil || !workspaceLocalRoot(real) || workspaceBroadRoot(real) {
+	if err != nil {
+		return "", errWorkspaceFiles
+	}
+	exact, err = explorerGrantForCwd(cfg, real)
+	if err != nil || !workspaceLocalRoot(real) && !exact || workspaceBroadRoot(real) && !exact {
 		return "", errWorkspaceFiles
 	}
 	return real, nil
