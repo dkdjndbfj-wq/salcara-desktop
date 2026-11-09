@@ -756,7 +756,7 @@ func (c *Client) Device(ctx context.Context) protocol.Device {
 		d.Capabilities = append(d.Capabilities, "durable.execution.v1", "durable.events.v1", "attachment.blobs.v1")
 	}
 	if runtime.GOOS == "windows" || runtime.GOOS == "linux" {
-		d.Capabilities = append(d.Capabilities, "workspace.files.v1", "workspace.project.files.v1", "workspace.files.write.v1", "workspace.files.manage.v1", "workspace.terminal.v1", "workspace.artifacts.v1", "workspace.artifacts.write.v1", "workspace.project.preview.v1")
+		d.Capabilities = append(d.Capabilities, "workspace.projects.v1", "workspace.files.v1", "workspace.project.files.v1", "workspace.files.write.v1", "workspace.files.manage.v1", "workspace.terminal.v1", "workspace.artifacts.v1", "workspace.artifacts.write.v1", "workspace.project.preview.v1")
 		if _, err := exec.LookPath("git"); err == nil {
 			d.Capabilities = append(d.Capabilities, "workspace.git.v1", "workspace.git.review.v1", "workspace.git.repositories.v1")
 		}

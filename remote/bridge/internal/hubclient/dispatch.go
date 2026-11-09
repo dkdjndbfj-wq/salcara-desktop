@@ -408,6 +408,9 @@ func (c *Client) Dispatch(ctx context.Context, cmd map[string]any) (result any, 
 		// This does not select/apply an API, start a tool, or certify upstream health.
 		return c.agentStatus(ctx), nil
 	}
+	if typ == "workspace.projects" {
+		return c.dispatchWorkspaceProjects(ctx, cmd)
+	}
 	if typ == "workspace.project.preview" {
 		return c.dispatchWorkspaceProjectPreview(ctx, cmd)
 	}

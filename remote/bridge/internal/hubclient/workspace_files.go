@@ -444,6 +444,15 @@ func workspaceDirectoryRevision(scope workspaceFileScope, rel string, st os.File
 }
 
 func workspaceList(ctx context.Context, root *os.Root, rootHandle *os.File, scope workspaceFileScope, rel, cursor string) (workspaceFilesPage, error) {
+	return workspaceListFiltered(ctx, root, rootHandle, scope, rel, cursor, func(child string, entry os.DirEntry) bool {
+		_, err := workspaceRelativePath(child)
+		return err == nil && (entry.IsDir() || workspaceTextName(entry.Name()))
+	})
+}
+
+// The project picker lists only directory names; file readers retain their
+// separate content restrictions. Both use identical paging and handle checks.
+func workspaceListFiltered(ctx context.Context, root *os.Root, rootHandle *os.File, scope workspaceFileScope, rel, cursor string, include func(string, os.DirEntry) bool) (workspaceFilesPage, error) {
 	page := workspaceFilesPage{Path: rel, Entries: []workspaceFileEntry{}}
 	dir, err := workspaceOpen(root, rootHandle, scope.root, rel, false)
 	if err != nil {
@@ -486,13 +495,10 @@ func workspaceList(ctx context.Context, root *os.Root, rootHandle *os.File, scop
 		position.Offset++
 		e := entries[0]
 		child := path.Join(rel, e.Name())
-		if _, err = workspaceRelativePath(child); err != nil || e.Type()&(os.ModeSymlink|os.ModeIrregular) != 0 {
+		if e.Type()&(os.ModeSymlink|os.ModeIrregular) != 0 || !include(child, e) {
 			continue
 		}
 		isDir := e.IsDir()
-		if !isDir && !workspaceTextName(e.Name()) {
-			continue
-		}
 		f, err := workspaceOpen(root, rootHandle, scope.root, child, !isDir)
 		if err != nil {
 			continue

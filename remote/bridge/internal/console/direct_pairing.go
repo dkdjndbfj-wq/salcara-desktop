@@ -145,6 +145,7 @@ func (s *Server) startDirectRelayLocked(c config.Config) error {
 const directCommandConcurrency = 4
 
 var directCommandTypes = map[string]struct{}{
+	"workspace.projects":         {},
 	"computer.management.status": {}, "computer.api.create": {}, "computer.agent.install": {},
 	"workspace.project.preview": {},
 	"workspace.artifacts":       {},

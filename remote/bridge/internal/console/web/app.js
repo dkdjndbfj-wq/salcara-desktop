@@ -1556,6 +1556,12 @@ function renderSettingsPage(view, st) {
     <span class="li-main"><span class="li-title">对话记录</span><span class="li-sub">查看四种 Agent 的对话与手机任务记录，进入后加载</span></span>
     ${pending ? `<span class="chip bad">${pending} 个待批准</span>` : ''}<span class="set-link-chev">${icon('chev')}</span>
   </a>
+  <div class="card" id="remoteDirectoryGrants">
+    <h3 class="card-title">${icon('folder')}远程目录授权</h3>
+    <p class="card-sub">允许手机浏览与创建项目的目录范围。新建项目和会话请在手机中操作。</p>
+    ${(c.projects || []).map(p => `<div class="setting-row"><div class="txt"><div class="t">${esc(p.name)}</div><div class="d mono">${esc(p.path)}</div></div><button class="btn sm" data-act="rmProj" data-path="${esc(p.path)}">撤销授权</button></div>`).join('')}
+    <div class="row" style="gap:8px;margin-top:12px"><input class="input" id="projPath" aria-label="远程允许目录" placeholder="选择允许手机访问的目录"><button class="btn" data-act="browse">浏览…</button><button class="btn primary" data-act="addProj">允许目录</button></div>
+  </div>
   <div class="card" id="localConversationSync">
     <div class="row"><div class="li-main"><div class="li-title">本机对话同步</div><div class="li-sub">重新读取 Codex、Claude Code 和 Claude Desktop 的会话列表；当前打开的对话会一并刷新</div></div><button class="btn sm" data-act="syncLocalConversations">${icon('refresh')}重新同步</button></div>
     <div class="muted small" id="localSyncStatus" role="status" aria-live="polite" style="margin-top:8px">仅读取本机记录，不修改原应用数据；未打开的对话正文会在进入时读取。</div>
