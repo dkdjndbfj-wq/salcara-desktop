@@ -244,14 +244,14 @@ func TestCodexCatalogRestoreKeepsOriginalUserFile(t *testing.T) {
 	}
 }
 
-func TestSwitchCLIResumesOriginalHistoryAndPreservesNewSettings(t *testing.T) {
+func TestSwitchCLIStartsDirectlyAndPreservesOriginalHistoryAndSettings(t *testing.T) {
 	for _, kind := range []string{"codex", "claude"} {
 		t.Run(kind, func(t *testing.T) {
 			s, root, _ := switchFixture(t, kind, kind)
 			a := account(kind, "a", "key")
 			s.Start = func(_ context.Context, p Plan) (int, error) {
-				if p.ProfileDir != root || !strings.Contains(strings.Join(p.Args, " "), "resume") {
-					t.Fatal("CLI starts new history")
+				if p.ProfileDir != root || strings.Contains(strings.Join(p.Args, " "), "resume") {
+					t.Fatal("normal launch must open the Agent directly in the original profile")
 				}
 				return 101, nil
 			}

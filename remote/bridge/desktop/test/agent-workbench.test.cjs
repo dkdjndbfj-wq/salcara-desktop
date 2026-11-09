@@ -84,11 +84,10 @@ test('all ordinary Agent dialogs have no default-model input and an empty catalo
     const ui = setup({ onModels: () => { throw new Error('Catalog unavailable fixture'); } });
     await ui.change(target, 'api-empty');
     assert.doesNotMatch(ui.modal.innerHTML, /默认模型|id="(?:toolModel|wbModel)|<select[^>]*(?:model|Model)|<input[^>]*(?:model|Model)/);
-    assert.equal(ui.document.getElementById('wbReady').checked, false);
-    ui.document.getElementById('wbReady').checked = true;
+    assert.equal(ui.document.getElementById('wbReady'), null);
     await ui.ACTIONS.wbOpenGo(ui.button('wbOpenGo'));
-    const request = ui.calls.find((call) => call.url === '/api/local/switch');
-    assert.equal(request.body.keepModel, true); assert.equal('model' in request.body, false);
+    const request = ui.calls.find((call) => call.url === '/api/local/agent-change/v1');
+    assert.equal(request.body.protocol, 'safe-agent-change.v1'); assert.equal(request.body.model, '');
   }
 });
 
@@ -102,7 +101,7 @@ test('selecting a saved API only verifies a draft; cancelling preserves the prio
   assert.equal(ui.calls.filter(call => call.body).length, 0);
   gate.resolve(); await selecting;
   assert.match(ui.modal.innerHTML, /Shared test API/);
-  assert.equal(ui.document.getElementById('wbReady').checked, false);
+  assert.equal(ui.document.getElementById('wbReady'), null);
   assert.equal(ui.backend.bindings['codex-desktop'].accountId, 'api-empty');
   ui.ACTIONS.closeModal(ui.button('closeModal'), { target: { closest: () => null } });
   assert.equal(ui.modal.innerHTML, '');
@@ -119,15 +118,14 @@ test('empty selection is a placeholder and never silently changes the tools logi
   ui.assertNoLaunch();
 });
 
-test('bind failure appears in the owned dialog and offers recheck without launching', async () => {
-  const ui = setup({ onBind: () => { throw new Error('Synthetic bind failure'); } });
+test('stop failure appears in the owned dialog and offers recheck without launching', async () => {
+  const ui = setup({ onChange: () => { throw new Error('Synthetic bind failure'); } });
   await ui.change('claude', 'api-shared');
-  ui.document.getElementById('wbReady').checked = true;
   await ui.ACTIONS.wbOpenGo(ui.button('wbOpenGo'));
   assert.match(ui.modal.innerHTML, /Synthetic bind failure/);
   assert.match(ui.modal.innerHTML, /重新检查/);
-  assert.equal(ui.document.getElementById('wbReady').checked, false);
-  ui.assertNoLaunch();
+  assert.equal(ui.document.getElementById('wbReady'), null);
+  assert.equal(ui.backend.bindings.claude.accountId, '');
 });
 
 test('Claude default stays native and all named API keys remain shared between tool cards', async () => {
@@ -159,20 +157,17 @@ test('empty model catalog shows the dialog before loading and preserves the expl
   ui.assertNoLaunch();
 });
 
-test('only the original explicit Open confirmation can switch, and its task checkbox is still enforced', async () => {
+test('the bottom Open action stops and applies with one safe request without loading history', async () => {
   const ui = setup();
   await ui.change('codex-desktop', 'api-shared');
-  const open = ui.button('wbOpenGo');
-  ui.document.getElementById('wbReady').checked = false;
-  await ui.ACTIONS.wbOpenGo(open);
-  ui.assertNoLaunch();
-  ui.document.getElementById('wbReady').checked = true;
-  await ui.ACTIONS.wbOpenGo(open);
-  const switches = ui.calls.filter((call) => call.url === '/api/local/switch');
-  assert.equal(switches.length, 1);
-  assert.equal(ui.calls.filter(call => /^\/api\/sessions?\b/.test(call.url)).length, 0, 'opening an Agent must not load history');
-  assert.doesNotMatch(ui.modal.innerHTML, /data-act="toolRestore"|查看会话/);
-  assert.deepEqual(switches[0].body, { id: 'api-shared', target: 'codex-desktop', confirmed: true, keepModel: true, expectedSourceRevision: 'src-v1-' + 'a'.repeat(64) });
+  assert.equal(ui.document.getElementById('wbReady'), null);
+  await ui.ACTIONS.wbOpenGo(ui.button('wbOpenGo'));
+  const writes = ui.calls.filter(call => call.url === '/api/local/agent-change/v1');
+  assert.equal(writes.length, 1);
+  assert.equal(writes[0].body.target, 'codex-desktop');
+  assert.equal(writes[0].body.expectedSourceRevision, 'src-v1-' + 'a'.repeat(64));
+  assert.equal(writes[0].body.protocol, 'safe-agent-change.v1');
+  assert.equal(ui.calls.some(call => /session|history/.test(call.url)), false);
 });
 
 test('add API from a tool card saves the shared key then returns to the original open dialog without launch', async () => {

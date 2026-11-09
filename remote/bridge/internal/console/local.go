@@ -20,6 +20,7 @@ import (
 )
 
 func (s *Server) localRoutes(m *http.ServeMux) {
+	m.HandleFunc("POST /api/local/agent-change/v1", launchProgressEndpoint(s.handleSafeAgentChange))
 	s.officialAccountRoutes(m)
 	s.codexAPIRoutes(m)
 	s.claudeDesktop3PRoutes(m)

@@ -11,7 +11,7 @@ import (
 // BeginLocalToolChange holds the same admission lock as remote sends without
 // changing any remote API or pretending that a pooled client is one source.
 func (c *Client) BeginLocalToolChange(ctx context.Context) (func(), error) {
-	return c.beginLocalToolChange(ctx, "")
+	return c.beginLocalToolChange(ctx, "", false)
 }
 
 // BeginLocalAgentChange fences a native API change against the corresponding
@@ -21,10 +21,24 @@ func (c *Client) BeginLocalAgentChange(ctx context.Context, target string) (func
 	if !config.ValidAgentFamily(family) {
 		return nil, errors.New("无效的 Agent")
 	}
-	return c.beginLocalToolChange(ctx, family)
+	return c.beginLocalToolChange(ctx, family, false)
 }
 
-func (c *Client) beginLocalToolChange(ctx context.Context, family string) (func(), error) {
+// BeginLocalAgentStopChange retains the send/approval admission lock until the
+// caller finishes applying/opening. Adapter calls must be direct: Dispatch
+// would recursively acquire the same mutex.
+func (c *Client) BeginLocalAgentStopChange(ctx context.Context, target string) (func(), error) {
+	family := config.ToolFamily(target)
+	if !config.ValidAgentFamily(family) {
+		return nil, errors.New("无效的 Agent")
+	}
+	return c.beginLocalToolChange(ctx, family, true)
+}
+
+func (c *Client) beginLocalToolChange(ctx context.Context, family string, stop bool) (func(), error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if err := c.CheckUpdateAdmission(); err != nil {
 		return nil, err
 	}
@@ -51,6 +65,13 @@ func (c *Client) beginLocalToolChange(ctx context.Context, family string) (func(
 	for _, a := range m.Agents() {
 		if family != "" && agents.Describe(a).APIFamily != family {
 			continue
+		}
+		if stop {
+			if stopper, ok := a.(agents.APIChangeStopper); ok {
+				if err := stopper.StopForAPIChange(ctx); err != nil {
+					return nil, err
+				}
+			}
 		}
 		active, known := a.(interface{ ActiveRemoteTurns() bool })
 		if !known || active.ActiveRemoteTurns() {

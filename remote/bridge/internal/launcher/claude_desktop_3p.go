@@ -129,6 +129,14 @@ func (s *ClaudeDesktop3PService) Switch(ctx context.Context, a config.LocalAccou
 // SwitchAuthorized saves authorization before starting the configured app.
 // The caller retires a published lease on any returned error.
 func (s *ClaudeDesktop3PService) SwitchAuthorized(ctx context.Context, a config.LocalAccount, paths map[string]string, allowModeChange bool, authorize func() error) (result Result, launchErr error) {
+	return s.configureAuthorized(ctx, a, paths, allowModeChange, authorize, true)
+}
+
+func (s *ClaudeDesktop3PService) ApplyAuthorized(ctx context.Context, a config.LocalAccount, paths map[string]string, allowModeChange bool, authorize func() error) (Result, error) {
+	return s.configureAuthorized(ctx, a, paths, allowModeChange, authorize, false)
+}
+
+func (s *ClaudeDesktop3PService) configureAuthorized(ctx context.Context, a config.LocalAccount, paths map[string]string, allowModeChange bool, authorize func() error, start bool) (result Result, launchErr error) {
 	defer func() { launchErr = RedactLaunchError(launchErr, a.Key) }()
 	if err := lockLaunch(ctx, &s.Local.mu); err != nil {
 		return Result{}, err
@@ -192,7 +200,7 @@ func (s *ClaudeDesktop3PService) SwitchAuthorized(ctx context.Context, a config.
 		}
 	}
 	p := s.plan(tool, platform.Root)
-	if s.Local.Stop == nil || s.Local.Start == nil {
+	if s.Local.Stop == nil || start && s.Local.Start == nil {
 		return Result{}, errors.New("没有可用的安全退出与启动方式")
 	}
 	if err := os.MkdirAll(p.RuntimeDir, 0o700); err != nil {
@@ -205,6 +213,11 @@ func (s *ClaudeDesktop3PService) SwitchAuthorized(ctx context.Context, a config.
 		}
 	}
 	LaunchPhase(ctx, "stop", "等待原工具退出")
+	if safeConfigurationChange(ctx) {
+		if err := stopManagedConfigurationCLI(ctx, p); err != nil {
+			return Result{}, err
+		}
+	}
 	if err := s.Local.Stop(ctx, p); err != nil {
 		if first {
 			_ = os.Remove(s.backupPath())
@@ -262,7 +275,13 @@ func (s *ClaudeDesktop3PService) SwitchAuthorized(ctx context.Context, a config.
 		return Result{}, err
 	}
 	LaunchPhase(ctx, "profile", "写入 API 与模型配置", "写入连接与模型配置")
+	if err := configurationGuard(ctx); err != nil {
+		return Result{}, err
+	}
 	if err := write.Apply(); err != nil {
+		return rollback(err)
+	}
+	if err := configurationGuard(ctx); err != nil {
 		return rollback(err)
 	}
 	backup.Applied, err = captureClaude3P(write.Paths())
@@ -284,7 +303,13 @@ func (s *ClaudeDesktop3PService) SwitchAuthorized(ctx context.Context, a config.
 	if err := ctx.Err(); err != nil {
 		return rollback(err)
 	}
+	if !start {
+		return Result{Target: "claude-desktop", ProfileDir: platform.Root, Workspace: p.Workspace, Message: "Claude Desktop API 配置已应用；聊天仍保留在原 Claude-3p 本地库。"}, nil
+	}
 	LaunchPhase(ctx, "start", "创建工具进程")
+	if err := configurationGuard(ctx); err != nil {
+		return rollback(err)
+	}
 	pid, err := s.Local.Start(ctx, p)
 	if err != nil {
 		return rollback(err)

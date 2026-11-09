@@ -111,3 +111,47 @@ func TestManagedClaudeMessagesUsesExistingGatewayTranslation(t *testing.T) {
 		t.Fatalf("messages translation failed: %d %s", w.Code, w.Body)
 	}
 }
+
+func TestAdditionalManagedLaunchCredentialsRemainTargetScoped(t *testing.T) {
+	for _, target := range []string{"deepseek-harness", "hermes"} {
+		t.Run(target, func(t *testing.T) {
+			s, live := fixtureService(t)
+			live.change(func(c *config.Config) {
+				c.GatewayRuntimeKey = "synthetic-additional-runtime"
+				c.CodexAPI.RuntimeLease = c.GatewayRuntimeKey
+				c.CodexAPI.AuthEpoch = "service-epoch"
+				c.CodexAPI.Clients[0].AuthEpoch = "client-epoch"
+				c.RecordManagedAPI(target, c.CodexAPI.Clients[0], "synthetic-target-lease", true, []string{"gpt-fixture"})
+			})
+			key := live.get().ManagedAPICredential(target)
+			if key == "" {
+				t.Fatal("extension target has no scoped credential")
+			}
+			s.Official = func(context.Context, config.LocalAccount, []byte, bool, bool, func() bool) (*http.Response, error) {
+				return successfulResponse(io.NopCloser(strings.NewReader(fixtureResponse)), false), nil
+			}
+			request := func(path, credential string) int {
+				r := apiRequest(context.Background(), credential, strings.NewReader(`{"model":"gpt-fixture","input":"synthetic"}`))
+				r.URL.Path = path
+				w := httptest.NewRecorder()
+				s.ServeHTTP(w, r)
+				return w.Code
+			}
+			path := "/codex-api/managed/" + target + "/v1/responses"
+			if code := request(path, key); code != 200 {
+				t.Fatal("scoped extension dispatch failed", code)
+			}
+			for _, route := range []string{"/codex-api/v1/responses", "/codex-api/managed/codex/v1/responses", "/codex-api/managed/claude/v1/responses"} {
+				if code := request(route, key); code != 401 {
+					t.Fatal("credential escaped target", route, code)
+				}
+			}
+			if code := request(path, syntheticClientKey); code != 401 {
+				t.Fatal("manual client bypassed managed lease", code)
+			}
+			if _, _, ok := managedAPIPath("/codex-api/managed/arbitrary-agent/v1/responses"); ok {
+				t.Fatal("arbitrary target admitted")
+			}
+		})
+	}
+}

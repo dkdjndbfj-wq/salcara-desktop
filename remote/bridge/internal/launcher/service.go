@@ -28,6 +28,8 @@ type Plan struct {
 }
 
 type Result struct {
+	Uncertain  bool   `json:"uncertain,omitempty"`
+	Submitted  bool   `json:"submitted,omitempty"`
 	Target     string `json:"target"`
 	PID        int    `json:"pid"`
 	ProfileDir string `json:"profileDir"`
@@ -106,7 +108,7 @@ func (s *Service) Prepare(a config.LocalAccount, t Tool, workspace string) (p Pl
 	if err != nil {
 		return Plan{}, err
 	}
-	p = Plan{Tool: t, Workspace: filepath.Clean(workspace), ProfileDir: filepath.Join(root, a.Kind), AppData: filepath.Join(root, t.ID+"-app")}
+	p = Plan{Tool: t, Workspace: filepath.Clean(workspace), ProfileDir: filepath.Join(root, a.Kind), AppData: filepath.Join(root, t.ID+"-app"), RuntimeDir: filepath.Join(s.Dir, "launch-scratch", t.ID)}
 	// Both Codex and Claude preparations can fail after writing credentials
 	// (for example while resolving an npm shim). Restore the exact previous
 	// Bridge-owned files, including their absence, on every failed preparation.
@@ -301,7 +303,10 @@ func (s *Service) LaunchAuthorized(ctx context.Context, a config.LocalAccount, t
 	if err != nil {
 		return Result{}, err
 	}
-	return Result{Target: target, PID: pid, ProfileDir: p.ProfileDir, Workspace: p.Workspace, Message: "已启动独立账号实例；不会替换系统默认配置。API 请求是否成功取决于服务商对所选模型及协议的支持。"}, nil
+	if !isDesktop(target) && pid == 0 {
+		return Result{Target: target, Submitted: true, Uncertain: true, ProfileDir: p.ProfileDir, Workspace: p.Workspace, Message: "独立账号实例启动请求已提交；进程状态尚未确认，请先核对原工具，不会自动重发。"}, nil
+	}
+	return Result{Target: target, Submitted: true, PID: pid, ProfileDir: p.ProfileDir, Workspace: p.Workspace, Message: "已启动独立账号实例；不会替换系统默认配置。API 请求是否成功取决于服务商对所选模型及协议的支持。"}, nil
 }
 
 // A successful spawn is not proof that an upstream model can answer a request.

@@ -3,6 +3,7 @@ package launcher
 import (
 	"context"
 	"encoding/json"
+	"path/filepath"
 
 	"salcara/bridge/internal/agents"
 	"salcara/bridge/internal/config"
@@ -16,6 +17,9 @@ import (
 func (s *Service) startWithClaudeAPIPin(ctx context.Context, p Plan, a config.LocalAccount) (int, error) {
 	if err := ctx.Err(); err != nil {
 		return 0, err
+	}
+	if p.RuntimeDir == "" {
+		p.RuntimeDir = filepath.Join(s.Dir, "launch-scratch", p.Tool.ID)
 	}
 	if p.Tool.ID == "claude" {
 		env := toolcfg.ClaudeAPIEnvironment(a.BaseURL, a.Key, a.AuthMode)

@@ -11,7 +11,7 @@ import (
 // ManagedAPIClient resolves only an explicitly launched, current local service.
 // This is not a LocalAccount: pooling must never masquerade as one remote source.
 func (c Config) ManagedAPIClient(target string) (NamedAPIClient, bool) {
-	if target != "codex" && target != "codex-desktop" && target != "claude" && target != "claude-desktop" {
+	if target != "codex" && target != "codex-desktop" && target != "claude" && target != "claude-desktop" && !IsAdditionalTool(target) {
 		return NamedAPIClient{}, false
 	}
 	b, ok := c.ToolAPIApplied[ToolFamily(target)]

@@ -130,6 +130,7 @@ route = async function () {
       return;
     }
   }
+  if (typeof WB !== 'undefined') WB.cancelPending?.();
   S.routeRevision = (S.routeRevision || 0) + 1;
   homeCancelLoad();
   if (typeof cancelSessionReads === 'function') cancelSessionReads();

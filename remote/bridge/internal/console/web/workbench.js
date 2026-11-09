@@ -17,6 +17,7 @@ Object.assign(ICONS, {
 });
 
 const WB = { query: '', target: null, manual: {}, poll: 0, discoveryDelay: 500, cardSignature: '', accountOpen: null, launchPending: false, launchGeneration: 0 };
+WB.cancelPending = () => WB.activeOperation?.controller.abort();
 const NATIVE = { codex: 'responses', claude: 'anthropic', 'deepseek-harness': 'chat', hermes: 'chat' };
 const WIRE_LABEL = { responses: 'Responses', chat: 'Chat Completions', anthropic: 'Claude Messages' };
 
@@ -155,10 +156,10 @@ function wbOpenModal(target, error, draft) {
         <span><b>覆盖 Codex 的模型选择栏</b></span></label>` : ''}
       <p class="wb-hint">${icon('route')}模型在原软件内选，使用期间请保持 Bridge 运行。${converts ? '当前 API 包含需要转换接口的模型。' : ''}Bridge 重启后请重新应用配置。</p>
       <p class="wb-hint">${icon('info')}${t.id === 'deepseek-harness' || t.id === 'hermes' ? '使用所选 API 启动原生 Agent，保留已有记录。' : desktop ? '重启原应用，保留聊天和项目。' : '打开终端，可在原工具选择会话。'}</p>
-      <label class="wb-check-row"><input type="checkbox" id="wbReady" ${draft?.ready ? 'checked' : ''}>同系列工具任务已经结束</label>
+      <p class="wb-hint">会先停止该 Agent 的当前任务，再应用所选 API。</p>
       ${wbLaunchFeedback(draft, error)}
     </div>
-    <div class="modal-foot"><button class="btn ghost" data-act="closeModal">取消</button><span class="spacer"></span><button class="btn" data-act="wbApplyGo" data-apply-only="true" data-id="${esc(a.id)}" data-target="${esc(t.id)}" ${!draft?.verified || !draft.ready || draft.loading ? 'disabled' : ''}>仅应用配置</button><button class="btn primary" data-act="wbOpenGo" data-id="${esc(a.id)}" data-target="${esc(t.id)}" ${!draft?.verified || !draft.ready || draft.loading ? 'disabled' : ''}>${icon('external')}确认并打开</button></div>
+    <div class="modal-foot"><button class="btn ghost" data-act="closeModal">取消</button><span class="spacer"></span><button class="btn" data-act="wbApplyGo" data-apply-only="true" data-id="${esc(a.id)}" data-target="${esc(t.id)}" ${!draft?.verified || WB.launchPending || draft.loading ? 'disabled' : ''}>仅应用配置</button><button class="btn primary" data-act="wbOpenGo" data-id="${esc(a.id)}" data-target="${esc(t.id)}" ${!draft?.verified || WB.launchPending || draft.loading ? 'disabled' : ''}>${icon('external')}应用并打开</button></div>
   </div></div>`;
 }
 
@@ -175,15 +176,16 @@ function wbAccountCurrent(draft) {
   return !!draft && WB.accountOpen === draft && draft.generation === WB.launchGeneration && S.route === draft.route && S.routeRevision === draft.routeRevision && (draft.node ? $(draft.title) === draft.node : $('#modalRoot')?.innerHTML === draft.anchorHTML);
 }
 function wbLaunchFeedback(draft, error) {
-  const status = draft?.verifying ? '正在检查账号与工具…' : draft?.loading ? '正在读取模型目录…' : draft?.verified ? '确认后才会保存选择并配置工具，取消会保留当前配置。' : '';
-  return `<div id="switchError" aria-live="polite">${status ? `<p class="wb-hint" role="status">${esc(status)}</p>` : ''}${draft?.catalogError ? `<p class="wb-hint">${esc(draft.catalogError)} · 可重新加载，或沿用原工具的模型设置。</p>` : ''}${error ? `<div class="callout warn"><div>${esc(error)}${draft?.executionUnknown ? '<br>请先查看原工具的启动状态；本次不会自动再次启动。' : !draft?.verified ? '<br><button class="btn sm" data-act="wbRecheck">重新检查</button>' : ''}</div></div>` : ''}</div>`;
+  const status = draft?.operationStage || (draft?.verifying ? '正在检查账号与工具…' : draft?.loading ? '正在读取模型目录…' : draft?.verified ? '点击下方按钮后开始执行。' : '');
+  return `<div id="switchError" aria-live="polite">${status ? `<p class="wb-hint" role="status">${esc(status)}</p>` : ''}${draft?.catalogError ? `<p class="wb-hint">${esc(draft.catalogError)} · 可重新加载，或沿用原工具的模型设置。</p>` : ''}${error ? `<div class="callout warn"><div>${esc(error)}${draft?.executionUnknown ? '<br>请在原工具核对配置与任务状态；本次不会自动重试。' : !draft?.verified ? '<br><button class="btn sm" data-act="wbRecheck">重新检查</button>' : ''}</div></div>` : ''}</div>`;
 }
 function wbUpdateLaunchControls(draft) {
   if (!wbAccountCurrent(draft)) return;
   const go = $('#modalRoot')?.querySelector(`[data-act="${draft.target === 'claude-desktop' ? 'cdGo' : 'wbOpenGo'}"]`);
-  if (go) go.disabled = WB.launchPending || !draft.verified || !draft.ready || draft.loading || draft.target === 'claude-desktop' && (!draft.status?.supported || draft.status.managed);
+  const disabled = WB.launchPending || !draft.verified || draft.loading || draft.target === 'claude-desktop' && (!draft.status?.supported || draft.status.managed);
+  if (go) go.disabled = disabled;
   const apply = $('#modalRoot')?.querySelector('[data-act="wbApplyGo"]');
-  if (apply) apply.disabled = WB.launchPending || !draft.verified || !draft.ready || draft.loading;
+  if (apply) apply.disabled = disabled;
 }
 function wbAccountRender(draft, error) {
   if (WB.accountOpen !== draft || S.route !== draft.route) return;
@@ -221,7 +223,7 @@ async function wbOpenAccount(target, id, button) {
   if (target === 'claude-desktop' && typeof cdModal !== 'function') throw new Error('Claude Desktop 配置组件尚未就绪');
   if (wbAccountCurrent(WB.accountOpen) && WB.accountOpen.target === target && WB.accountOpen.id === id && (WB.accountOpen.verifying || WB.accountOpen.verified)) return;
   const binding = tool ? bindingFor(tool) : {};
-  const draft = { target, id, route: S.route, routeRevision: S.routeRevision, generation: ++WB.launchGeneration, title: target === 'claude-desktop' ? '#cdTitle' : '#wbOpenTitle', node: null, anchorHTML: $('#modalRoot')?.innerHTML, ready: false, override: target === 'claude-desktop' ? binding.override !== false : !!binding.override, status: null, loading: false, verifying: true, verified: false };
+  const draft = { target, id, route: S.route, routeRevision: S.routeRevision, generation: ++WB.launchGeneration, title: target === 'claude-desktop' ? '#cdTitle' : '#wbOpenTitle', node: null, anchorHTML: $('#modalRoot')?.innerHTML, override: target === 'claude-desktop' ? binding.override !== false : !!binding.override, status: null, loading: false, verifying: true, verified: false };
   WB.accountOpen = draft;
   if (tool) wbAccountRender(draft);
   const revision = S.localAccountsRevision = (S.localAccountsRevision || 0) + 1;
@@ -236,8 +238,6 @@ async function wbOpenAccount(target, id, button) {
     S.local = fresh;
     draft.sourceRevision = currentAccount.sourceRevision;
     draft.sourceStamp = wbAccountStamp(currentAccount);
-    // Confirmation on the cached summary must never carry into a newly read source.
-    draft.ready = false;
     draft.verified = true;
     draft.verifying = false;
     wbAccountRender(draft);
@@ -256,7 +256,7 @@ async function wbAccountStatus(draft) {
     draft.status = status;
     wbAccountRender(draft);
   } catch (error) {
-    if (wbAccountCurrent(draft)) { draft.status = { supported: false }; draft.verified = false; draft.ready = false; wbAccountRender(draft, error.message); }
+    if (wbAccountCurrent(draft)) { draft.status = { supported: false }; draft.verified = false; wbAccountRender(draft, error.message); }
   }
 }
 async function wbAccountModels(draft, quiet) {
@@ -272,7 +272,7 @@ async function wbAccountModels(draft, quiet) {
     if (!wbAccountCurrent(draft) || revision !== S.localAccountsRevision) return;
     S.local = local;
     if (!wbAccountAllowed(accountFor(draft.id), draft.target) || wbAccountStamp(accountFor(draft.id)) !== draft.sourceStamp) {
-      draft.verified = false; draft.ready = false;
+      draft.verified = false;
       wbAccountRender(draft, '账号已变化，请重新打开后确认');
       return;
     }
@@ -285,50 +285,51 @@ async function wbAccountModels(draft, quiet) {
 }
 async function wbAccountGo(button) {
   const draft = WB.accountOpen;
-  if (!wbAccountCurrent(draft) || !draft.verified || WB.launchPending || draft.loading || button?.isConnected === false || button?.dataset.id !== draft.id || (button.dataset.target && button.dataset.target !== draft.target)) return;
-  const ready = $(draft.target === 'claude-desktop' ? '#cdReady' : '#wbReady')?.checked;
-  if (!ready) { toast('请先结束正在进行的任务', 'bad'); return; }
+  if (!wbAccountCurrent(draft) || !draft.verified || WB.launchPending || draft.loading || draft.executionUnknown || button?.isConnected === false || button?.dataset.id !== draft.id || (button.dataset.target && button.dataset.target !== draft.target)) return;
   if (draft.target === 'claude-desktop' && (!draft.status?.supported || draft.status.managed)) return;
-  draft.ready = true;
-  const override = draft.override;
-  const applyOnly = draft.target !== 'claude-desktop' && button.dataset.applyOnly === 'true';
-  const progress = typeof beginLaunchProgress === 'function' ? beginLaunchProgress(draft.target, accountFor(draft.id)?.name, draft.target === 'claude-desktop' ? ['检查账号与工具', '提交启动请求'] : ['检查账号与工具', '保存工具选择', applyOnly ? '应用配置' : '提交启动请求'], applyOnly ? '应用配置' : '启动') : null;
+  const applyOnly = button.dataset.applyOnly === 'true', override = draft.override;
+  const operationId = safeAgentOperationId(), controller = new AbortController();
+  const operation = { operationId, controller };
+  WB.activeOperation = operation;
   WB.launchPending = true;
+  draft.operationStage = '正在检查账号与工具…';
+  const progress = inlineAgentProgress(draft, () => {
+    if (wbAccountCurrent(draft)) {
+      const output = $('#switchError');
+      if (output) output.innerHTML = wbLaunchFeedback(draft).replace(/^<div[^>]*>|<\/div>$/g, '');
+    }
+  }, applyOnly);
+  wbUpdateLaunchControls(draft);
   S.localAccountsRevision = (S.localAccountsRevision || 0) + 1;
   try {
-    await busy(button, async () => {
-      const fresh = await api('/api/local/accounts');
-      if (!wbAccountCurrent(draft)) { progress?.cancel(); return; }
-      const account = fresh.accounts?.find(item => item.id === draft.id), tool = fresh.tools?.find(item => item.id === draft.target);
-      if (!tool?.available || !wbAccountAllowed(account, draft.target) || wbAccountStamp(account) !== draft.sourceStamp) {
-        draft.verified = false; draft.ready = false;
-        throw new Error('账号或工具已变化，请重新打开后确认');
-      }
-      if (draft.target === 'claude-desktop') {
-        progress?.step(1);
-        const result = await (typeof launchAPI === 'function' ? launchAPI : ((path, body) => api(path, body)))('/api/local/claude-desktop/switch', { id: draft.id, confirmed: true, allowModeChange: true, catalogOverride: override, expectedSourceRevision: draft.sourceRevision }, progress);
-        if (result?.ok !== true) throw new Error('启动结果待确认，请检查原工具');
-      } else {
-        progress?.step(1);
-        const binding = fresh.bindings?.[draft.target] || {}, model = (binding.accountId === draft.id ? binding.model : '') || account.model || defaultModel(account, toolKind(tool));
-        const bound = await api('/api/local/bind', { target: draft.target, id: draft.id, model: model || '', protocol: inferProtocol(model, account.wire) || NATIVE[toolKind(tool)], ...(toolKind(tool) === 'codex' ? { override } : {}), expectedSourceRevision: draft.sourceRevision });
-        if (bound?.ok !== true) throw new Error('保存结果待确认，请重新打开');
-        // A close/navigation while the binding is saved cancels the launch.
-        // It remains a pending selection; no rollback can overwrite another actor.
-        if (!wbAccountCurrent(draft)) { progress?.cancel(); return; }
-        progress?.step(2);
-        const result = await (typeof launchAPI === 'function' ? launchAPI : ((path, body) => api(path, body)))('/api/local/switch', { id: draft.id, target: draft.target, confirmed: true, keepModel: true, ...(applyOnly ? { applyOnly: true } : {}), expectedSourceRevision: draft.sourceRevision }, progress);
-        if (result?.ok !== true) throw new Error('启动结果待确认，请检查原工具');
-      }
-      progress?.finish();
-      if (wbAccountCurrent(draft)) { $('#modalRoot').innerHTML = ''; WB.accountOpen = null; toast(applyOnly ? '配置已应用，未启动工具；已打开的工具请重新打开后使用' : '已打开', 'ok'); }
-    });
+    const fresh = await api('/api/local/accounts', undefined, undefined, { signal: controller.signal });
+    if (!wbAccountCurrent(draft) || controller.signal.aborted) { progress.cancel(); return; }
+    const account = fresh.accounts?.find(item => item.id === draft.id), tool = fresh.tools?.find(item => item.id === draft.target);
+    if (!tool?.available || !wbAccountAllowed(account, draft.target) || wbAccountStamp(account) !== draft.sourceStamp) {
+      draft.verified = false;
+      throw new Error('账号或工具已变化，请重新打开后确认');
+    }
+    const binding = fresh.bindings?.[draft.target] || {};
+    const model = (binding.accountId === draft.id ? binding.model : '') || account.model || defaultModel(account, toolKind(tool));
+    const body = { protocol: SAFE_AGENT_CHANGE_PROTOCOL, operationId, target: draft.target, id: draft.id,
+      model: model || '', wireProtocol: inferProtocol(model, account.wire) || NATIVE[toolKind(tool)], override, applyOnly, expectedSourceRevision: draft.sourceRevision };
+    const result = await launchAPI('/api/local/agent-change/v1', body, progress, { signal: controller.signal });
+    requireSafeAgentReceipt(result, operationId);
+    progress.finish();
+    if (wbAccountCurrent(draft)) {
+      $('#modalRoot').innerHTML = ''; WB.accountOpen = null;
+      toast(applyOnly ? '配置已应用' : '已打开', 'ok');
+    }
   } catch (error) {
-    progress?.fail(error);
-    if (wbAccountCurrent(draft)) { draft.verified = false; draft.ready = false; draft.executionUnknown = error.uncertain === true || error.started === true; wbAccountRender(draft, error.message); }
+    progress.fail(error);
+    if (wbAccountCurrent(draft)) {
+      draft.verified = false;
+      draft.executionUnknown = error.uncertain === true || error.started === true || error.applied === true;
+      wbAccountRender(draft, error.message);
+    }
   } finally {
-    WB.launchPending = false;
-    try { await wbRefreshLaunchCards(); } catch (_) { /* A completed launch never becomes an automatic retry when the display refresh fails. */ }
+    if (WB.activeOperation === operation) { WB.activeOperation = null; WB.launchPending = false; }
+    try { await wbRefreshLaunchCards(); } catch (_) { /* Display errors never replay the transaction. */ }
     wbUpdateLaunchControls(draft);
   }
 }
@@ -468,9 +469,6 @@ document.addEventListener('change', async (event) => {
     if (el.dataset.wbOverride && draft.target === el.dataset.wbOverride) {
       if (WB.launchPending) { el.checked = draft.override; return; }
       draft.override = el.checked;
-    } else if (el.id === 'wbReady') {
-      draft.ready = el.checked;
-      wbUpdateLaunchControls(draft);
     }
   } catch (error) { toast(error.message, 'bad'); renderAgentCards(); }
 });

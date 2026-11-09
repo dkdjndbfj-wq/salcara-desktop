@@ -2,7 +2,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { setup, deferred } = require('./helpers/workbench.cjs');
-const checkReady = f => { f.document.getElementById('wbReady').checked = true; };
 const close = f => f.ACTIONS.closeModal(f.button('closeModal'), { target: { closest: () => null } });
 
 test('Agent and API-card entry points produce the same uncommitted confirmation', async () => {
@@ -11,14 +10,14 @@ test('Agent and API-card entry points produce the same uncommitted confirmation'
   await fromAPI.ACTIONS.accountOpen({ dataset: { target: 'codex', id: 'api-shared' } });
   assert.equal(fromCard.modal.innerHTML, fromAPI.modal.innerHTML);
   for (const f of [fromCard, fromAPI]) {
-    assert.equal(f.document.getElementById('wbReady').checked, false);
+    assert.equal(f.document.getElementById('wbReady'), null);
     assert.equal(f.calls.filter(call => call.body).length, 0);
   }
 });
 
 test('API edit after verification invalidates the confirmation before binding or launching', async () => {
   const f = setup();
-  await f.change('codex', 'api-shared'); checkReady(f);
+  await f.change('codex', 'api-shared');
   f.backend.accounts[0].sourceRevision = 'src-v1-' + 'c'.repeat(64);
   await f.ACTIONS.wbOpenGo(f.button('wbOpenGo'));
   assert.equal(f.calls.filter(call => call.url === '/api/local/bind').length, 0);
@@ -26,30 +25,30 @@ test('API edit after verification invalidates the confirmation before binding or
   f.assertNoLaunch();
   await f.ACTIONS.wbRecheck();
   assert.equal(f.WB.accountOpen.sourceRevision, 'src-v1-' + 'c'.repeat(64));
-  assert.equal(f.document.getElementById('wbReady').checked, false);
+  assert.equal(f.document.getElementById('wbReady'), null);
 });
 
-test('duplicate confirmation commits one bind and one launch', async () => {
-  const gate = deferred(), f = setup({ onBind: () => gate.promise });
-  await f.change('codex', 'api-shared'); checkReady(f);
+test('duplicate clicks submit exactly one safe change', async () => {
+  const gate = deferred(), f = setup({ onChange: () => gate.promise });
+  await f.change('codex', 'api-shared');
   const button = f.button('wbOpenGo');
   const first = f.ACTIONS.wbOpenGo(button);
   await Promise.resolve(); await Promise.resolve();
   const second = f.ACTIONS.wbOpenGo(button);
   gate.resolve(); await Promise.all([first, second]);
-  assert.equal(f.calls.filter(c => c.url === '/api/local/bind').length, 1);
-  assert.equal(f.calls.filter(c => c.url === '/api/local/switch').length, 1);
+  assert.equal(f.calls.filter(c => c.url === '/api/local/bind').length, 0);
+  assert.equal(f.calls.filter(c => c.url === '/api/local/agent-change/v1').length, 1);
 });
 
-test('closing after bind submission leaves an accurate pending selection and does not launch', async () => {
-  const gate = deferred(), entered = deferred(), f = setup({ onBind: () => { entered.resolve(); return gate.promise; } });
-  await f.change('codex', 'api-shared'); checkReady(f);
+test('closing during stop aborts before any binding changes', async () => {
+  const gate = deferred(), entered = deferred(), f = setup({ onChange: () => { entered.resolve(); return gate.promise; } });
+  await f.change('codex', 'api-shared');
   const request = f.ACTIONS.wbOpenGo(f.button('wbOpenGo'));
   await entered.promise; close(f); gate.resolve(); await request;
-  assert.equal(f.backend.bindings.codex.accountId, 'api-shared');
-  assert.equal(f.backend.bindings.codex.pending, true);
+  assert.equal(f.backend.bindings.codex.accountId, '');
+  assert.equal(f.backend.bindings.codex.pending, false);
   assert.equal(f.modal.innerHTML, '');
-  f.assertNoLaunch();
+  assert.equal(f.calls.filter(c => c.url === '/api/local/agent-change/v1').length, 1);
 });
 
 test('leaving and re-entering the same route cannot revive a stale verification', async () => {
@@ -65,14 +64,14 @@ test('leaving and re-entering the same route cannot revive a stale verification'
 });
 
 test('unconfirmed launch does not turn a read-only recheck into another launch', async () => {
-  const f = setup({ onSwitch: () => { throw Object.assign(new Error('response lost'), { uncertain: true }); } });
-  await f.change('codex', 'api-shared'); checkReady(f);
+  const f = setup({ onChange: () => { throw Object.assign(new Error('response lost'), { uncertain: true }); } });
+  await f.change('codex', 'api-shared');
   await f.ACTIONS.wbOpenGo(f.button('wbOpenGo'));
-  assert.match(f.modal.innerHTML, /请先查看原工具的启动状态/);
+  assert.match(f.modal.innerHTML, /请在原工具核对配置与任务状态/);
   assert.doesNotMatch(f.modal.innerHTML, /data-act="wbRecheck"/);
   await f.ACTIONS.wbRecheck();
   assert.equal(f.WB.accountOpen.executionUnknown, true);
-  assert.equal(f.calls.filter(c => c.url === '/api/local/switch').length, 1);
+  assert.equal(f.calls.filter(c => c.url === '/api/local/agent-change/v1').length, 1);
 });
 
 test('first discovery failure becomes a visible retry state instead of an endless skeleton', async () => {

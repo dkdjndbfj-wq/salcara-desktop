@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"salcara/bridge/internal/agents"
 	"salcara/bridge/internal/config"
 	"salcara/bridge/internal/launcher"
 )
@@ -26,6 +27,9 @@ type managedLaunchPreview struct {
 	Expires                         time.Time
 }
 type managedLaunchRequest struct {
+	Protocol        string `json:"protocol,omitempty"`
+	OperationID     string `json:"operationId,omitempty"`
+	ApplyOnly       bool   `json:"applyOnly,omitempty"`
 	ClientID        string `json:"clientId"`
 	Target          string `json:"target"`
 	Revision        string `json:"revision"`
@@ -38,6 +42,7 @@ type managedLaunchRequest struct {
 func (s *Server) managedAPILaunchRoutes(m *http.ServeMux) {
 	m.HandleFunc("POST /api/local/codex-api/launch/preview", s.handleManagedAPILaunchPreview)
 	m.HandleFunc("POST /api/local/codex-api/launch", launchProgressEndpoint(s.handleManagedAPILaunch))
+	m.HandleFunc("POST /api/local/codex-api/launch/safe-v1", launchProgressEndpoint(s.handleSafeManagedAPILaunch))
 }
 
 func managedClientMembers(client config.NamedAPIClient) []string {
@@ -263,12 +268,31 @@ func (s *Server) handleManagedAPILaunchPreview(w http.ResponseWriter, r *http.Re
 }
 
 func (s *Server) handleManagedAPILaunch(w http.ResponseWriter, r *http.Request) {
+	s.handleManagedAPILaunchTransaction(w, r, false)
+}
+
+func (s *Server) handleSafeManagedAPILaunch(w http.ResponseWriter, r *http.Request) {
+	s.handleManagedAPILaunchTransaction(w, r, true)
+}
+
+func (s *Server) handleManagedAPILaunchTransaction(w http.ResponseWriter, r *http.Request, safe bool) {
 	var in managedLaunchRequest
-	if readReverseJSON(r, &in, 8192) != nil || !in.Confirmed || !launcher.ValidTarget(in.Target) || !config.ValidAccountID(in.ClientID) || len(in.Revision) != 71 {
+	if readReverseJSON(r, &in, 8192) != nil || !safe && !in.Confirmed || !launcher.ValidTarget(in.Target) || !config.ValidAccountID(in.ClientID) || len(in.Revision) != 71 {
 		writeErr(w, 400, "请确认任务已结束后再打开")
 		return
 	}
-	launcher.LaunchPlan(r.Context(), in.Target, true, false)
+	if safe && (in.Protocol != safeAgentChangeProtocol || !agents.ValidControlOperationID(in.OperationID)) {
+		safeAgentChangeError(w, 400, "invalid", errors.New("安全切换协议或操作标识无效"))
+		return
+	}
+	if !s.admitUpdateWork(w) {
+		return
+	}
+	if in.ApplyOnly {
+		launcher.LaunchApplyPlan(r.Context())
+	} else {
+		launcher.LaunchPlan(r.Context(), in.Target, true, false)
+	}
 	if !s.managedLaunchMu.TryLock() {
 		writeErr(w, 409, "正在打开工具，请勿重复提交")
 		return
@@ -278,6 +302,12 @@ func (s *Server) handleManagedAPILaunch(w http.ResponseWriter, r *http.Request) 
 	if !ok || p.ClientID != in.ClientID || p.Target != in.Target || !p.Expires.After(time.Now()) {
 		writeErr(w, 409, "打开确认已失效，请重新打开")
 		return
+	}
+	if safe {
+		if err := s.reserveAgentChange(in.Protocol, in.OperationID); err != nil {
+			safeAgentChangeError(w, 409, "duplicate", err)
+			return
+		}
 	}
 	// One confirmation is consumed before any side effect; an unknown response
 	// must not restart the native application a second time.
@@ -290,8 +320,27 @@ func (s *Server) handleManagedAPILaunch(w http.ResponseWriter, r *http.Request) 
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 55*time.Second)
 	defer cancel()
-	launcher.LaunchPhase(ctx, "remote", "检查远程任务")
-	if s.d.Hub != nil {
+	if safe {
+		if len(p.Models) == 0 {
+			safeAgentChangeError(w, 409, "model", errors.New("模型目录已失效，请重新打开"))
+			return
+		}
+		preflight := config.LocalAccount{ID: "managed-local-client", Name: "本地 API · " + client.Name, Kind: config.ToolKind(in.Target), SourceType: "api_key", BaseURL: fmt.Sprintf("http://127.0.0.1:%d/codex-api/managed/%s", s.d.Port, in.Target), Key: config.RandomToken(32), AuthMode: "bearer", Models: append([]string(nil), p.Models...), Model: p.Models[0], Wire: config.NativeProtocol(config.ToolKind(in.Target)), CatalogOverride: in.CatalogOverride}
+		preflight.Protocol = preflight.Wire
+		if err := s.validateSafeNativeConfiguration(ctx, preflight, in.Target, in.Workspace, c.LocalToolPaths, in.AllowModeChange); err != nil {
+			safeAgentChangeError(w, 400, "invalid_native", err)
+			return
+		}
+	}
+	launcher.LaunchPhase(ctx, "stop", "正在安全停止相关 Agent 任务")
+	if safe {
+		release, err := s.beginSafeLocalToolChange(ctx, in.Target)
+		if err != nil {
+			safeAgentChangeError(w, 409, "stop_unconfirmed", err)
+			return
+		}
+		defer release()
+	} else if s.d.Hub != nil {
 		release, err := s.d.Hub.BeginLocalToolChange(ctx)
 		if err != nil {
 			writeErr(w, 409, err.Error())
@@ -322,9 +371,38 @@ func (s *Server) handleManagedAPILaunch(w http.ResponseWriter, r *http.Request) 
 		writeErr(w, 409, "本机授权尚未就绪")
 		return
 	}
-	connection := config.LocalAccount{ID: "managed-local-client", Name: "本地 API · " + client.Name, Kind: strings.Split(in.Target, "-")[0], SourceType: "api_key", BaseURL: fmt.Sprintf("http://127.0.0.1:%d/codex-api/managed/%s", s.d.Port, in.Target), Key: key, AuthMode: "bearer", Models: append([]string(nil), p.Models...), Model: p.Models[0], Wire: config.NativeProtocol(strings.Split(in.Target, "-")[0]), CatalogOverride: in.CatalogOverride}
+	connection := config.LocalAccount{ID: "managed-local-client", Name: "本地 API · " + client.Name, Kind: config.ToolKind(in.Target), SourceType: "api_key", BaseURL: fmt.Sprintf("http://127.0.0.1:%d/codex-api/managed/%s", s.d.Port, in.Target), Key: key, AuthMode: "bearer", Models: append([]string(nil), p.Models...), Model: p.Models[0], Wire: config.NativeProtocol(config.ToolKind(in.Target)), CatalogOverride: in.CatalogOverride}
 	connection.Protocol = connection.Wire
+	committed := false
+	finalizing := false
+	_, committedState, _ := s.managedLaunchState(prospective, in.ClientID, in.Target)
+	guard := func() error {
+		if err := ctx.Err(); err != nil && !finalizing {
+			return err
+		}
+		_, revision, err := s.managedLaunchState(s.d.Store.Get(), in.ClientID, in.Target)
+		expected := state
+		if committed {
+			expected = committedState
+		}
+		if err != nil || revision != expected {
+			return errors.New("本机启动来源已改变")
+		}
+		if s.d.Hub != nil {
+			return s.d.Hub.CheckUpdateAdmission()
+		}
+		return nil
+	}
+	if safe {
+		ctx = launcher.WithManagedLaunch(launcher.WithConfigurationGuard(ctx, guard))
+		if s.nativeConfigurationStop != nil {
+			ctx = launcher.WithNativeConfigurationStopForTest(ctx, s.nativeConfigurationStop)
+		}
+	}
 	authorize := func() error {
+		if err := guard(); err != nil {
+			return err
+		}
 		err := s.d.Store.Update(func(now *config.Config) error {
 			current, revision, err := s.managedLaunchState(*now, in.ClientID, in.Target)
 			if err != nil || revision != state || ctx.Err() != nil {
@@ -334,6 +412,7 @@ func (s *Server) handleManagedAPILaunch(w http.ResponseWriter, r *http.Request) 
 			return nil
 		})
 		if err == nil {
+			committed = true
 			s.apiService.AdmitManagedLaunch(key)
 		}
 		return err
@@ -342,20 +421,46 @@ func (s *Server) handleManagedAPILaunch(w http.ResponseWriter, r *http.Request) 
 	if in.Target == "claude-desktop" {
 		connection.Models, connection.DesktopModelLabels = config.ClaudeDesktopCatalog(connection)
 		connection.Model = ""
-		result, err = s.d.ClaudeDesktop.SwitchAuthorized(ctx, connection, c.LocalToolPaths, in.AllowModeChange, authorize)
+		configure := s.d.ClaudeDesktop.SwitchAuthorized
+		if in.ApplyOnly {
+			configure = s.d.ClaudeDesktop.ApplyAuthorized
+		}
+		result, err = configure(ctx, connection, c.LocalToolPaths, in.AllowModeChange, authorize)
 	} else {
-		result, err = s.d.Local.SwitchAuthorized(ctx, connection, in.Target, in.Workspace, c.LocalToolPaths, authorize)
+		configure := s.d.Local.SwitchAuthorized
+		if in.ApplyOnly {
+			configure = s.d.Local.ApplyAuthorized
+		}
+		result, err = configure(ctx, connection, in.Target, in.Workspace, c.LocalToolPaths, authorize)
 	}
 	if err != nil {
+		if safe && committed {
+			s.rollbackSafeAgentChange(c, c, in.Target, lease)
+		}
 		s.d.Store.RevokeAppliedLaunchLease(in.Target, lease)
 		writeErr(w, 409, err.Error())
 		return
 	}
 	launcher.LaunchPhase(ctx, "record", "保存本次启动状态")
+	finalizing = true
+	if safe {
+		if err := guard(); err != nil {
+			safeAgentChangeRecordError(w, in.OperationID, in.ApplyOnly, result, err)
+			return
+		}
+	}
 	if s.d.Store.Get().ManagedAPICredential(in.Target) != key {
+		if safe {
+			safeAgentChangeRecordError(w, in.OperationID, in.ApplyOnly, result, errors.New("本机连接授权已改变"))
+			return
+		}
 		s.d.Store.RevokeAppliedLaunchLease(in.Target, lease)
 		w.WriteHeader(http.StatusConflict)
 		writeJSON(w, map[string]any{"error": "工具已启动，但本机连接授权已改变", "started": true, "result": result})
+		return
+	}
+	if safe {
+		writeJSON(w, map[string]any{"ok": true, "protocol": safeAgentChangeProtocol, "operationId": in.OperationID, "result": result})
 		return
 	}
 	writeJSON(w, map[string]any{"ok": true, "result": result})
