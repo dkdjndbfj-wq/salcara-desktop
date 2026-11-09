@@ -82,10 +82,9 @@ function wbCardHeader(t, menu = '', status = wbCardStatus(t)) {
     ${menu}</div>`;
 }
 function wbCardControls(t, picker, action) {
-  const desktop = String(t.id).endsWith('-desktop');
-  const lamp = desktop ? desktopRemoteLamp(t) : bindingFor(t).remote;
+  const lamp = agentLocalStatus(t);
   return `<div class="agent-body"><span class="agent-api-label">使用的 API</span>${picker}</div>
-    <div class="agent-foot"><span class="agent-remote" id="lamp-${esc(t.id)}">${remoteLampHTML(lamp, desktop ? 'desktop' : 'cli')}</span>${action}</div>`;
+    <div class="agent-foot"><span class="agent-remote" id="lamp-${esc(t.id)}">${remoteLampHTML(lamp, 'agent')}</span>${action}</div>`;
 }
 
 // An absent tool keeps its installation action in the same footer position as Open.
@@ -102,7 +101,7 @@ function wbCard(t) {
   </article>`;
   if (t.id === 'claude-desktop' && typeof wbClaudeDesktopCard === 'function') return wbClaudeDesktopCard(t);
   const kind = toolKind(t), desktop = t.id.endsWith('-desktop');
-  const lamp = desktop ? desktopRemoteLamp(t) : bindingFor(t).remote || {};
+  const lamp = agentLocalStatus(t);
   if (t.id === 'claude-desktop') {
     // Fallback when the dedicated Claude Desktop adapter is absent: manual setup only.
     const menu = wbMore(`<p class="wb-note">在 Claude Desktop 的 Developer 菜单配置 API；Bridge 不会自动改写或重启它。普通云端聊天不能由 Bridge 遥控。</p>`);
@@ -133,7 +132,7 @@ function wbRefreshCardStatus(target) {
   const t = S.local.tools.find((x) => x.id === target);
   if (!t) return;
   const lamp = document.getElementById('lamp-' + target);
-  if (lamp) lamp.innerHTML = remoteLampHTML(t.id.endsWith('-desktop') ? desktopRemoteLamp(t) : bindingFor(t).remote, t.id.endsWith('-desktop') ? 'desktop' : 'cli');
+  if (lamp) lamp.innerHTML = remoteLampHTML(agentLocalStatus(t), 'agent');
   const status = document.getElementById('wbStatus-' + target);
   if (status) status.innerHTML = wbCardStatus(t);
 }

@@ -10,7 +10,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -32,16 +31,21 @@ import (
 
 // Connection states shown in the console.
 const (
-	StateNotLoggedIn = "not_logged_in" // 未登录
-	StateConnecting  = "connecting"    // 连接中
-	StateConnected   = "connected"     // 已连接
-	StateInvalidKey  = "invalid_key"   // Key 无效
+	StateNotLoggedIn        = "not_logged_in" // 未登录
+	StateConnecting         = "connecting"    // 连接中
+	StateConnected          = "connected"     // 已连接
+	StateInvalidKey         = "invalid_key"   // legacy remote authorization failure
+	StateDeviceAuthRequired = "device_auth_required"
+	StateSourceUnauthorized = "source_unauthorized"
+	StatePairRequired       = "pair_required"
+	StateRemoteBlocked      = "remote_blocked"
 )
 
 // Status is a snapshot of the hub connection.
 type Status struct {
 	State     string         `json:"state"`
 	Error     string         `json:"error,omitempty"`
+	ErrorCode string         `json:"errorCode,omitempty"`
 	Since     int64          `json:"since"` // ms
 	HubURL    string         `json:"hubUrl"`
 	DeviceID  string         `json:"deviceId"`
@@ -196,7 +200,7 @@ type Client struct {
 	streamHTTP *http.Client
 }
 
-var errUnauthorized = errors.New("Key 无效或不是中转站用户")
+var errUnauthorized = errors.New("远程连接授权被拒绝")
 
 // New creates a client; call SetManager before Run.
 func New(o Options) *Client {
@@ -349,16 +353,20 @@ func (c *Client) Tools() []protocol.Tool {
 }
 
 func (c *Client) setState(state, errText string) {
+	c.setStateCode(state, errText, "")
+}
+
+func (c *Client) setStateCode(state, errText, code string) {
 	var cfg config.Config
 	if c.o.Store != nil {
 		cfg = c.o.Store.Get()
 	}
 	c.mu.Lock()
-	changed := c.status.State != state || c.status.Error != errText
+	changed := c.status.State != state || c.status.Error != errText || c.status.ErrorCode != code
 	if c.status.State != state {
 		c.status.Since = nowMS()
 	}
-	c.status.State, c.status.Error = state, errText
+	c.status.State, c.status.Error, c.status.ErrorCode = state, errText, code
 	if state != StateConnected && cfg.EffectiveRemoteMode() == "bot" && botEventScopeRequired(cfg) {
 		c.eventScope.Store(&eventUploadScope{identity: eventIdentity(cfg), required: true})
 	}
@@ -373,6 +381,34 @@ func (c *Client) setState(state, errText string) {
 			c.o.OnStatus(c.Status())
 		}
 	}
+}
+
+// A completed request belongs to one connection generation, even if a new
+// connection uses exactly the same URL and device ID. Kick retires it under mu.
+func (c *Client) publishConnectionFailure(cfg config.Config, epoch uint64, err error) (string, bool) {
+	state, code, message := remoteFailure(err, cfg)
+	c.mu.Lock()
+	current := c.o.Store.Get() // Store notifications run after releasing its lock.
+	if c.connectionEpoch != epoch || config.RemoteIdentity(cfg) != config.RemoteIdentity(current) || !current.HubRemoteEnabled() {
+		c.mu.Unlock()
+		return "", false
+	}
+	changed := c.status.State != state || c.status.Error != message || c.status.ErrorCode != code
+	if c.status.State != state {
+		c.status.Since = nowMS()
+	}
+	c.status.State, c.status.Error, c.status.ErrorCode = state, message, code
+	if current.EffectiveRemoteMode() == "bot" && botEventScopeRequired(current) {
+		c.eventScope.Store(&eventUploadScope{identity: eventIdentity(current), required: true})
+	}
+	c.mu.Unlock()
+	if changed {
+		c.log.Printf("hub: %s (%s)", state, message)
+		if c.o.OnStatus != nil {
+			c.o.OnStatus(c.Status())
+		}
+	}
+	return state, true
 }
 
 // Kick drops the current connection and reconnects immediately (after login/config changes).
@@ -395,11 +431,11 @@ func (c *Client) Kick() {
 	// Status reads the current saved Hub URL. Clear the old stream's connected
 	// state in the same critical section as its authorization, so a just-saved
 	// station cannot appear ready before its own stream has connected.
-	stateChanged := c.status.State != nextState || c.status.Error != ""
+	stateChanged := c.status.State != nextState || c.status.Error != "" || c.status.ErrorCode != ""
 	if c.status.State != nextState {
 		c.status.Since = nowMS()
 	}
-	c.status.State, c.status.Error = nextState, ""
+	c.status.State, c.status.Error, c.status.ErrorCode = nextState, "", ""
 	c.status.Pairing = nil // unknown until the new station's authenticated snapshot
 	c.uploadAuthorization = ""
 	if cfg.EffectiveRemoteMode() == "bot" && botEventScopeRequired(cfg) {
@@ -455,6 +491,7 @@ func (c *Client) Run(ctx context.Context) {
 		connCtx, cancel := context.WithCancel(ctx)
 		c.mu.Lock()
 		c.cancelConn = cancel
+		epoch := c.connectionEpoch
 		c.mu.Unlock()
 		if st := c.Status().State; st != StateConnected {
 			c.setState(StateConnecting, c.Status().Error)
@@ -475,22 +512,21 @@ func (c *Client) Run(ctx context.Context) {
 			backoff = c.o.BackoffMin
 			continue // an old site's failure must not mark the new identity invalid.
 		}
-		if errors.Is(err, errUnauthorized) {
-			c.setState(StateInvalidKey, err.Error())
-			c.waitWake(ctx, 5*time.Minute)
-			backoff = c.o.BackoffMin
-			continue
-		}
 		if interrupted && !errors.Is(err, errHeartbeat) {
 			// cancelled by Kick: reconnect right away
 			backoff = c.o.BackoffMin
 			continue
 		}
-		msg := "连接中断"
-		if err != nil {
-			msg = err.Error()
+		state, published := c.publishConnectionFailure(cfg, epoch, err)
+		if !published {
+			backoff = c.o.BackoffMin
+			continue
 		}
-		c.setState(StateConnecting, msg)
+		if state == StateInvalidKey || state == StateDeviceAuthRequired || state == StateSourceUnauthorized || state == StatePairRequired || state == StateRemoteBlocked {
+			c.waitWake(ctx, 5*time.Minute)
+			backoff = c.o.BackoffMin
+			continue
+		}
 		if time.Since(started) > 2*time.Minute {
 			backoff = c.o.BackoffMin
 		}
@@ -541,6 +577,8 @@ func (c *Client) requestFor(ctx context.Context, cfg config.Config, method, path
 		return nil, err
 	}
 	req = hubingress.Bind(req, cfg.EffectiveHubURL()+"/v1")
+	id, publicKey, endpoint := cfg.RemoteIngress()
+	req = hubingress.BindIdentity(req, id, publicKey, endpoint)
 	if !cfg.RemoteDeviceOnly {
 		req.Header.Set("Authorization", "Bearer "+cfg.AccountKey)
 	}
@@ -699,23 +737,6 @@ func (c *Client) postFor(ctx context.Context, cfg config.Config, path string, bo
 	return checkResp(resp)
 }
 
-func checkResp(resp *http.Response) error {
-	if resp.StatusCode/100 == 2 {
-		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))
-		return nil
-	}
-	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
-	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
-		return errUnauthorized
-	}
-	// Do not reflect arbitrary station response bodies into the local logs/UI:
-	// a misconfigured station can echo a device secret or a private command.
-	if resp.StatusCode == http.StatusNotFound {
-		return errors.New("这个中转站还没有部署远程编程服务 (404)")
-	}
-	return fmt.Errorf("中转站返回 %d", resp.StatusCode)
-}
-
 // Device builds the registration body, detecting tools.
 func (c *Client) Device(ctx context.Context) protocol.Device {
 	cfg := c.o.Store.Get()
@@ -787,7 +808,14 @@ func (c *Client) register(ctx context.Context, force bool) error {
 	if config.RemoteIdentity(cfg) != config.RemoteIdentity(c.o.Store.Get()) {
 		return errors.New("中转站已切换，不上传旧站点设备信息")
 	}
-	c.refreshStationCapabilities(ctx, cfg)
+	if err := c.refreshStationCapabilities(ctx, cfg); err != nil {
+		return err
+	}
+	latest := c.o.Store.Get()
+	if config.RemoteIdentity(cfg) != config.RemoteIdentity(latest) {
+		return errors.New("中转站已切换，请重试")
+	}
+	cfg = latest
 	fp := fingerprint(d)
 	c.mu.Lock()
 	same := fp == c.lastFP && time.Since(c.lastReg) < c.o.ReregisterEvery
@@ -843,7 +871,7 @@ func (c *Client) registerLoop(ctx context.Context) {
 		}
 		if err := c.register(ctx, false); err != nil {
 			c.log.Printf("hub: re-register: %v", err)
-			if errors.Is(err, errUnauthorized) {
+			if errors.Is(err, errUnauthorized) || RemoteErrorCode(err) == "user_disabled" || RemoteErrorCode(err) == "ambiguous_credentials" || RemoteErrorCode(err) == "invalid_request" {
 				c.Kick()
 			}
 		}
@@ -865,11 +893,11 @@ func (c *Client) acceptStreamConnection(ctx context.Context, cfg config.Config, 
 		c.mu.Unlock()
 		return errors.New("中转站连接已更换，不接受旧连接")
 	}
-	changed := c.status.State != StateConnected || c.status.Error != ""
+	changed := c.status.State != StateConnected || c.status.Error != "" || c.status.ErrorCode != ""
 	if c.status.State != StateConnected {
 		c.status.Since = nowMS()
 	}
-	c.status.State, c.status.Error = StateConnected, ""
+	c.status.State, c.status.Error, c.status.ErrorCode = StateConnected, "", ""
 	c.mu.Unlock()
 	if changed {
 		c.log.Printf("hub: %s", StateConnected)
@@ -1259,7 +1287,7 @@ func (c *Client) flushLoop(ctx context.Context) {
 			continue
 		}
 		st := c.Status().State
-		if st == StateNotLoggedIn || st == StateInvalidKey {
+		if st == StateNotLoggedIn || st == StateInvalidKey || st == StateDeviceAuthRequired || st == StateSourceUnauthorized || st == StatePairRequired || st == StateRemoteBlocked {
 			continue
 		}
 		for {

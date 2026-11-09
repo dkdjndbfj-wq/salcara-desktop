@@ -84,7 +84,7 @@ for (const tool of tools) {
   const html = context.agentCard(tool);
   const main = html.match(new RegExp('<div id="lamp-' + tool.id + '">([\\s\\S]*?)<\\/div>'))?.[1];
   assert(main, 'main lamp missing');
-  assert(main.includes('lamp-connected'), tool.id + ' incorrect initial lamp');
+  assert(main.includes('lamp-ready') && main.includes('API 已应用'), tool.id + ' incorrect local readiness');
   assert(!html.includes('data-act="toolRestore"'), 'opening an Agent must not offer a history step');
   assert(!html.includes('desktopProbe'), 'experimental desktop plugin controls must not be shown');
   if (tool.id === 'claude-desktop') {
@@ -101,12 +101,12 @@ for (const tool of tools) {
     elements.set('agentApplied-' + tool.id, { innerHTML: '' });
     context.toolDraftStatus(tool.id);
     const lamp = elements.get('lamp-' + tool.id).innerHTML;
-    assert(lamp.includes(desktop ? 'lamp-connected' : dirty ? 'lamp-pending' : 'lamp-connected'), tool.id + ' draft changed capability');
+    assert(lamp.includes(dirty ? 'lamp-pending' : 'lamp-ready'), tool.id + ' draft changed local API readiness');
     assert(elements.get('agentApplied-' + tool.id).innerHTML.includes(tool.id === 'claude-desktop' ? '自动应用暂不可用' : dirty ? '设置待应用' : '已应用'), 'API capability / pending indicator was lost');
     assert(restartButton.disabled === (tool.id === 'claude-desktop'), tool.id + ' draft changed automatic API support');
   }
 }
-assert(source.includes("$$('.remote-lamp[data-remote-capability=\"cli\"]')"), 'connection loss must not alter the unsupported desktop lamp');
+assert(!source.includes("lamp.className = 'remote-lamp lamp-connecting'"), 'connection loss must not overwrite Agent API readiness');
 // Exercise the guard and restore modal with fake callbacks only. No HTTP or UI
 // interaction is performed, even when a disabled button handler is invoked.
 vm.runInContext('globalThis.testActions = ({' + section('  toolRestart: async (b) => {', '  toolReadModels: async (b) => {') + '}); globalThis.testRestart = testActions.toolRestart;' + section('async function openRestore(', 'function matchesSession('), context);

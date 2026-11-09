@@ -6,7 +6,6 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"strings"
 	"time"
 
 	"salcara/bridge/internal/config"
@@ -132,7 +131,9 @@ func accountRemoteDiscoveryTarget(c config.Config, account config.LocalAccount) 
 	if len(saved) > 1 {
 		return "", errors.New("本站保存了多个插件地址，请先在手机远程中检测对应站点")
 	}
-	return remoteDiscoveryTarget(origin, "")
+	// Empty override preserves the full ordinary API prefix during anonymous
+	// candidate discovery. A saved exact plugin above remains authoritative.
+	return "", nil
 }
 
 // The request identifies a saved source, not a free-form URL or credential.
@@ -168,7 +169,10 @@ func (s *Server) handleAccountRemoteSupport(w http.ResponseWriter, r *http.Reque
 	target, detectErr := accountRemoteDiscoveryTarget(c, account)
 	var info hubclient.Discovery
 	if detectErr == nil {
-		info, detectErr = hubclient.Discover(ctx, remoteOrigin(base), target)
+		info, detectErr = hubclient.Discover(ctx, base, target)
+		if info.HasCapability("discovery.policy.v1") {
+			info.RemoteAccess = nil // public site metadata is not device policy
+		}
 	}
 	latest := s.d.Store.Get()
 	current, exists := latest.LocalAccount(in.ID)
@@ -191,20 +195,9 @@ func (s *Server) handleAccountRemoteSupport(w http.ResponseWriter, r *http.Reque
 }
 
 func remoteDiscoveryTarget(raw, override string) (string, error) {
-	u, err := hubclient.RemoteURL(raw)
+	targets, err := hubclient.DiscoveryTargets(raw, override)
 	if err != nil {
 		return "", err
 	}
-	target := u.Scheme + "://" + u.Host + "/salcara-hub"
-	if strings.Contains(u.Path, "/salcara-hub") {
-		target = config.NormalizeHubURL(u.String())
-	}
-	if override != "" {
-		h, err := hubclient.RemoteURL(override)
-		if err != nil || h.Scheme != u.Scheme || h.Host != u.Host {
-			return "", errors.New("插件地址必须与中转站同源")
-		}
-		target = config.NormalizeHubURL(h.String())
-	}
-	return target, nil
+	return targets[0], nil
 }

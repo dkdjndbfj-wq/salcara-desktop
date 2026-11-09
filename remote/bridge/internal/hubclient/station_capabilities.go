@@ -10,20 +10,56 @@ import (
 
 // Discovery carries no upstream credentials. Cached observations help users
 // choose a station, while commands must still carry a current Hub source scope.
-func (c *Client) refreshStationCapabilities(ctx context.Context, station config.Config) {
+func (c *Client) refreshStationCapabilities(ctx context.Context, station config.Config) error {
 	if c.o.Store == nil || !station.RemoteExecutionArmed {
-		return
+		return nil
 	}
 	sequence := c.o.Store.BeginRemoteStationObservation(station)
 	if sequence == 0 {
-		return
+		return nil
 	}
-	info, err := DiscoverForDevice(ctx, station.EffectiveHubURL(), station.EffectiveHubURL(), station.DeviceID, station.DeviceSecret, station.DeviceEnrollmentClaim())
+	var info Discovery
+	var err error
+	if saved, ok := station.SavedRemoteConnection(station.EffectiveHubURL(), station.DeviceID); ok {
+		info, err = DiscoverForConnection(ctx, station, saved)
+	} else {
+		info, err = DiscoverForDevice(ctx, station.EffectiveHubURL(), station.EffectiveHubURL(), station.DeviceID, station.DeviceSecret, station.DeviceEnrollmentClaim())
+	}
+	if info.Identity != nil {
+		// Upgrade a trusted exact-URL legacy record before the next credential
+		// request. Pins are durable, unlike short-lived routing manifests.
+		if pinErr := c.o.Store.Update(func(current *config.Config) error {
+			for i := range current.RemoteConnections {
+				saved := &current.RemoteConnections[i]
+				if saved.DeviceID != station.DeviceID || config.NormalizeHubURL(saved.HubURL) != config.NormalizeHubURL(station.EffectiveHubURL()) {
+					continue
+				}
+				if saved.DeviceSecret != station.DeviceSecret {
+					return ErrHubIdentityChanged
+				}
+				if saved.HubInstanceID != "" && (saved.HubInstanceID != info.Identity.HubInstanceID || saved.IdentityPublicKey != info.Identity.IdentityPublicKey) {
+					return ErrHubIdentityChanged
+				}
+				saved.HubInstanceID, saved.IdentityPublicKey = info.Identity.HubInstanceID, info.Identity.IdentityPublicKey
+				if saved.IngressURL == "" {
+					saved.IngressURL = info.HubURL + "/v1"
+				}
+				return nil
+			}
+			return ErrHubIdentityChanged
+		}); pinErr != nil {
+			return pinErr
+		}
+	}
 	if err != nil {
 		c.o.Store.ObserveRemoteStation(station, nil, sequence)
-		return
+		if errors.Is(err, ErrHubIdentityChanged) || errors.Is(err, ErrHubIdentityVerification) {
+			return err
+		}
+		return nil
 	}
 	c.o.Store.ObserveRemoteStation(station, info.RemoteAccess, sequence)
+	return nil
 }
 
 // A queued envelope cannot reinstate a scope already retired by discovery.

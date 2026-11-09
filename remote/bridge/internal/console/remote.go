@@ -21,6 +21,7 @@ func (s *Server) handleRemoteDiscover(w http.ResponseWriter, r *http.Request) {
 		EnrollmentClaim string `json:"enrollmentClaim"`
 		Connect         bool   `json:"connect"`
 		RequireOfficial bool   `json:"requireOfficial,omitempty"`
+		Reenroll        bool   `json:"reenroll,omitempty"`
 	}
 	if err := readJSON(r, &in); err != nil {
 		writeErr(w, 400, err.Error())
@@ -29,6 +30,11 @@ func (s *Server) handleRemoteDiscover(w http.ResponseWriter, r *http.Request) {
 	target, targetErr := remoteDiscoveryTarget(in.URL, in.HubURL)
 	if targetErr != nil {
 		writeErr(w, http.StatusBadRequest, targetErr.Error())
+		return
+	}
+	targets, _ := hubclient.DiscoveryTargets(in.URL, in.HubURL)
+	if in.Reenroll && !in.Connect {
+		writeErr(w, http.StatusBadRequest, "重新登记需要明确连接操作")
 		return
 	}
 	claim := strings.TrimSpace(in.EnrollmentClaim)
@@ -48,30 +54,66 @@ func (s *Server) handleRemoteDiscover(w http.ResponseWriter, r *http.Request) {
 	if s.remoteDiscoveryLatest == nil {
 		s.remoteDiscoveryLatest = map[string]uint64{}
 	}
-	s.remoteDiscoveryLatest[target] = sequence
+	for _, item := range targets {
+		s.remoteDiscoveryLatest[item] = sequence
+	}
 	s.remoteDiscoveryMu.Unlock()
-	startedAt, runtimeKey := time.Now().UnixMilli(), s.d.Store.Get().GatewayRuntimeKey
+	snapshot := s.d.Store.Get()
+	startedAt, runtimeKey := time.Now().UnixMilli(), snapshot.GatewayRuntimeKey
 	s.remoteModeMu.Lock()
 	modeSequence := s.remoteModeSeq
 	s.remoteModeMu.Unlock()
 	ctx, cancel := ctxTimeout(r, 10*time.Second)
 	defer cancel()
-	deviceID, deviceSecret := "", ""
-	for _, saved := range s.d.Store.Get().RemoteConnections {
-		if config.NormalizeHubURL(saved.HubURL) == target {
-			deviceID, deviceSecret = saved.DeviceID, saved.DeviceSecret
-			break
-		}
-	}
 	// Only an explicit connect operation may use the freshly supplied claim.
 	discoveryClaim := ""
 	if in.Connect {
 		discoveryClaim = claim
 	}
-	info, err := hubclient.DiscoverForDevice(ctx, in.URL, in.HubURL, deviceID, deviceSecret, discoveryClaim)
-	detectErr := err
+	info, detectErr := hubclient.Discover(ctx, in.URL, in.HubURL)
+	var saved *config.RemoteConnection
+	var identityErr, policyErr error
+	if info.HubURL != "" {
+		target = config.NormalizeHubURL(info.HubURL)
+	}
+	if detectErr != nil {
+		for _, item := range snapshot.RemoteConnections {
+			if item.BotGroupID == "" && config.NormalizeHubURL(item.HubURL) == target {
+				copy := item
+				saved = &copy
+				break
+			}
+		}
+	}
+	if detectErr == nil {
+		info, saved, identityErr = hubclient.ResolveDiscoveryConnection(ctx, info, snapshot)
+		if info.HubURL != "" {
+			target = config.NormalizeHubURL(info.HubURL)
+		}
+		if saved != nil {
+			target = config.NormalizeHubURL(saved.HubURL)
+		}
+		// A supplied, validated new claim explicitly replaces an old device
+		// enrollment. Never send a retired device secret to a replacement Hub.
+		if identityErr == nil || in.Connect && in.Reenroll && errors.Is(identityErr, hubclient.ErrHubIdentityChanged) {
+			deviceID, deviceSecret := "", ""
+			policyClaim := discoveryClaim
+			if saved != nil && !in.Reenroll {
+				deviceID, deviceSecret = saved.DeviceID, saved.DeviceSecret
+				if policyClaim == "" {
+					policyClaim = saved.EnrollmentClaim
+				}
+			}
+			info, policyErr = hubclient.DiscoverDevicePolicy(ctx, info, deviceID, deviceSecret, policyClaim)
+			if identityErr != nil && (policyErr == nil || hubclient.RemoteErrorCode(policyErr) == "device_credentials_required") {
+				identityErr = nil
+			}
+		} else {
+			info.RemoteAccess = nil
+		}
+	}
 	observation := config.CloneStationObservation(info.RemoteAccess)
-	if observation == nil || detectErr != nil {
+	if observation == nil || detectErr != nil || identityErr != nil || policyErr != nil {
 		observation = &config.StationObservation{Mode: "unknown"}
 	}
 	observation.CheckedAt = startedAt
@@ -85,44 +127,77 @@ func (s *Server) handleRemoteDiscover(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	s.remoteDiscoveryMu.Lock()
-	if s.remoteDiscoveryLatest[target] != sequence {
-		s.remoteDiscoveryMu.Unlock()
-		writeErr(w, http.StatusConflict, "检测结果已更新，请重试")
-		return
+	for _, item := range targets {
+		if s.remoteDiscoveryLatest[item] != sequence {
+			s.remoteDiscoveryMu.Unlock()
+			writeErr(w, http.StatusConflict, "检测结果已更新，请重试")
+			return
+		}
 	}
-	err = s.d.Store.Update(func(c *config.Config) error {
-		if c.GatewayRuntimeKey != runtimeKey {
+	err := s.d.Store.Update(func(c *config.Config) error {
+		if c.GatewayRuntimeKey != runtimeKey || c.RemoteConnectionEpoch != snapshot.RemoteConnectionEpoch {
 			return errors.New("设备状态已更新，请重新检测")
 		}
+		if saved != nil {
+			current, exists := c.SavedRemoteConnection(saved.HubURL, saved.DeviceID)
+			if !exists || current.DeviceSecret != saved.DeviceSecret || current.EnrollmentClaim != saved.EnrollmentClaim || current.HubInstanceID != saved.HubInstanceID || current.IdentityPublicKey != saved.IdentityPublicKey || current.IngressURL != saved.IngressURL {
+				return errors.New("电脑登记已变化，请重新检测")
+			}
+		}
 		effective := observation
+		scopeID, scopeSecret := "", ""
+		if saved != nil {
+			scopeID, scopeSecret = saved.DeviceID, saved.DeviceSecret
+		}
+		matchesScope := func(connection config.RemoteConnection) bool {
+			return connection.BotGroupID == "" && config.NormalizeHubURL(connection.HubURL) == target && scopeID != "" && connection.DeviceID == scopeID && connection.DeviceSecret == scopeSecret
+		}
 		for _, connection := range c.RemoteConnections {
-			if config.NormalizeHubURL(connection.HubURL) == target && connection.RemoteSupport != nil && connection.RemoteSupport.CheckedAt > startedAt {
+			if matchesScope(connection) && connection.RemoteSupport != nil && connection.RemoteSupport.CheckedAt > startedAt {
 				effective = connection.RemoteSupport
 			}
 		}
-		if detectErr == nil && in.Connect {
+		if detectErr == nil && identityErr == nil && in.Connect {
 			if in.RequireOfficial && (!effective.Available() || !effective.Station.AllowOfficialAccounts) {
 				officialUnavailable = true
-			} else {
-				if claim != "" {
-					c.ConnectRemoteWithEnrollmentClaim(info.Root, info.HubURL, claim)
+			} else if policyErr == nil || hubclient.RemoteErrorCode(policyErr) == "device_credentials_required" {
+				logicalHub := info.HubURL
+				if saved != nil {
+					logicalHub = saved.HubURL
+				}
+				if in.Reenroll || claim != "" && saved != nil && saved.EnrollmentClaim != claim {
+					c.ReenrollRemote(info.Root, logicalHub, claim)
+				} else if claim != "" {
+					c.ConnectRemoteWithEnrollmentClaim(info.Root, logicalHub, claim)
 				} else {
-					c.ConnectRemote(info.Root, info.HubURL)
+					c.ConnectRemote(info.Root, logicalHub)
+				}
+				scopeID, scopeSecret = c.DeviceID, c.DeviceSecret
+				if info.Identity != nil {
+					for i := range c.RemoteConnections {
+						if c.RemoteConnections[i].DeviceID == c.DeviceID && config.NormalizeHubURL(c.RemoteConnections[i].HubURL) == config.NormalizeHubURL(logicalHub) {
+							c.RemoteConnections[i].HubInstanceID = info.Identity.HubInstanceID
+							c.RemoteConnections[i].IdentityPublicKey = info.Identity.IdentityPublicKey
+							c.RemoteConnections[i].IngressURL = info.HubURL + "/v1"
+						}
+					}
 				}
 			}
 		}
 		for i := range c.RemoteConnections {
-			if config.NormalizeHubURL(c.RemoteConnections[i].HubURL) == target {
+			if matchesScope(c.RemoteConnections[i]) {
 				c.RemoteConnections[i].RemoteSupport = config.CloneStationObservation(effective)
 			}
 		}
-		if target == config.NormalizeHubURL(c.EffectiveHubURL()) && (c.RemoteStationObservation == nil || effective.CheckedAt >= c.RemoteStationObservation.CheckedAt) {
+		if c.EffectiveRemoteMode() == "hub" && c.DeviceID == scopeID && c.DeviceSecret == scopeSecret && target == config.NormalizeHubURL(c.EffectiveHubURL()) && (c.RemoteStationObservation == nil || effective.CheckedAt >= c.RemoteStationObservation.CheckedAt) {
 			c.RecordRemoteStationObservation(effective)
 		}
 		observation = config.CloneStationObservation(effective)
 		return nil
 	})
-	delete(s.remoteDiscoveryLatest, target)
+	for _, item := range targets {
+		delete(s.remoteDiscoveryLatest, item)
+	}
 	s.remoteDiscoveryMu.Unlock()
 	if err != nil {
 		writeErr(w, http.StatusConflict, err.Error())
@@ -130,6 +205,18 @@ func (s *Server) handleRemoteDiscover(w http.ResponseWriter, r *http.Request) {
 	}
 	if detectErr != nil {
 		writeErr(w, http.StatusBadRequest, detectErr.Error())
+		return
+	}
+	if identityErr != nil {
+		status, code := http.StatusServiceUnavailable, "remote_unavailable"
+		if errors.Is(identityErr, hubclient.ErrHubIdentityChanged) {
+			status, code = http.StatusConflict, "hub_identity_changed"
+		}
+		writeRemoteDiscoveryError(w, status, code, identityErr, info)
+		return
+	}
+	if in.Connect && policyErr != nil && hubclient.RemoteErrorCode(policyErr) != "device_credentials_required" {
+		writeRemoteDiscoveryError(w, http.StatusForbidden, hubclient.RemoteErrorCode(policyErr), policyErr, info)
 		return
 	}
 	if officialUnavailable {
@@ -140,7 +227,17 @@ func (s *Server) handleRemoteDiscover(w http.ResponseWriter, r *http.Request) {
 	if in.Connect {
 		s.finishRemoteModeSwitch()
 	}
-	writeJSON(w, map[string]any{"ok": true, "plugin": info, "connected": in.Connect, "message": "插件兼容，设备连接不需要模型 API Key；电脑在线后生成二维码"})
+	out := map[string]any{"ok": true, "plugin": info, "connected": in.Connect, "message": "插件兼容，设备连接不需要模型 API Key；电脑在线后生成二维码"}
+	if policyErr != nil {
+		out["deviceError"], out["errorCode"] = policyErr.Error(), hubclient.RemoteErrorCode(policyErr)
+	}
+	writeJSON(w, out)
+}
+
+func writeRemoteDiscoveryError(w http.ResponseWriter, status int, code string, err error, info hubclient.Discovery) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "plugin": info, "connected": false, "error": err.Error(), "code": code})
 }
 
 func (s *Server) clearQR() { s.pairMu.Lock(); s.pairPNG = nil; s.pairExpires = 0; s.pairMu.Unlock() }

@@ -124,6 +124,10 @@ type Config struct {
 	// UsageSourceRevision retires earlier dashboard observations on committed
 	// source/credential/display changes. It is process-local and Store-owned.
 	UsageSourceRevision string `json:"-"`
+	// RemoteConnectionEpoch retires in-flight remote connection operations on
+	// every committed identity, transport or runtime lease change. It is
+	// process-local and can only be assigned by the Store.
+	RemoteConnectionEpoch string `json:"-"`
 	// RemoteExecutionArmed is process-local. It makes remote workers use the
 	// vault snapshot instead of re-reading native tool config that another
 	// process may have changed since Salcara last applied it.
@@ -358,6 +362,7 @@ func Open(path string) (*Store, error) {
 	fenceCodexAPIAuthorization(Config{}, &s.cfg)
 	fenceGatewayAuthorization(Config{}, &s.cfg)
 	fenceUsageSourceRevision(Config{}, &s.cfg)
+	fenceRemoteConnectionEpoch(Config{}, &s.cfg)
 	if changed {
 		if err := s.saveLocked(); err != nil {
 			return nil, err
@@ -460,6 +465,7 @@ func (s *Store) SetRuntimeGatewayKey(key string) {
 	s.cfg.CodexAPI.AuthEpoch = RandomToken(32)
 	s.cfg.CodexServiceProfile = ServiceProfileBinding{}
 	fenceGatewayAuthorization(old, &s.cfg)
+	fenceRemoteConnectionEpoch(old, &s.cfg)
 	s.mu.Unlock()
 }
 
@@ -514,14 +520,15 @@ func (s *Store) updateWithSnapshot(fn func(c *Config) error, capture bool) (Conf
 	s.cfg.retireInvalidManagedAPILaunches()
 	fenceGatewayAuthorization(old, &s.cfg)
 	fenceUsageSourceRevision(old, &s.cfg)
+	fenceRemoteConnectionEpoch(old, &s.cfg)
 	if err := s.saveLocked(); err != nil {
 		s.cfg = old
 		s.mu.Unlock()
 		return Config{}, err
 	}
-	if RemoteIdentity(old) != RemoteIdentity(s.cfg) {
+	if old.RemoteConnectionEpoch != s.cfg.RemoteConnectionEpoch {
 		// A connection can move A -> B -> A before an old probe completes.
-		// Retire its ticket on every successful identity transition.
+		// Retire its ticket on every successful connection transition.
 		s.stationObservationLatest = nil
 	}
 	cur := s.cfg.Clone()

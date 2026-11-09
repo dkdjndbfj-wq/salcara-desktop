@@ -14,12 +14,10 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/netip"
 	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -41,6 +39,8 @@ type Manifest struct {
 	IssuedAt          int64      `json:"issued_at"`
 	ExpiresAt         int64      `json:"expires_at"`
 	Endpoints         []Endpoint `json:"endpoints"`
+	SignedPayload     string     `json:"signed_payload,omitempty"`
+	Signature         string     `json:"signature,omitempty"`
 }
 type proof struct {
 	Version       int    `json:"version"`
@@ -82,48 +82,20 @@ func validHex(s string, bytes int) bool {
 	return len(s) == bytes*2 && strings.Trim(s, "0123456789abcdef") == ""
 }
 func validURL(raw string) bool {
-	u, err := url.Parse(raw)
-	if err != nil || len(raw) > 512 || u.Scheme != "https" || u.Hostname() == "" || u.User != nil || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || u.RawPath != "" || u.Opaque != "" || u.Path != "/salcara-hub/v1" || strings.ContainsAny(raw, "\\\r\n\t ") {
-		return false
-	}
-	host := strings.ToLower(u.Hostname())
-	if host == "localhost" || strings.HasSuffix(host, ".localhost") || strings.HasSuffix(host, ".local") || !strings.ContainsAny(host, ".:") || strings.Contains(host, "%") {
-		return false
-	}
-	if ip, e := netip.ParseAddr(host); e == nil && (!ip.IsGlobalUnicast() || ip.IsPrivate() || ip.IsLoopback() || ip.IsLinkLocalUnicast()) {
-		return false
-	}
-	if port := u.Port(); port != "" {
-		number, err := strconv.Atoi(port)
-		if err != nil || number < 1 || number > 65535 {
-			return false
-		}
-	}
-	return true
+	return normalizeIngressURL(raw) != ""
 }
 func normalizeURL(raw string) string {
-	if !validURL(raw) {
-		return ""
-	}
-	u, _ := url.Parse(raw)
-	u.Host = strings.ToLower(u.Host)
-	if u.Port() == "443" {
-		u.Host = u.Hostname()
-		if strings.Contains(u.Host, ":") {
-			u.Host = "[" + u.Host + "]"
-		}
-	}
-	return u.String()
+	return normalizeIngressURL(raw)
 }
 func validManifest(m Manifest, canonical string, now time.Time) bool {
 	key, err := base64.StdEncoding.DecodeString(m.IdentityPublicKey)
-	if m.Version != 1 || !validHex(m.HubInstanceID, 16) || err != nil || len(key) != ed25519.PublicKeySize || m.CanonicalURL != canonical || m.Revision < 1 || m.IssuedAt < now.Add(-24*time.Hour).UnixMilli() || m.IssuedAt > now.Add(5*time.Second).UnixMilli() || m.ExpiresAt <= now.UnixMilli() || m.ExpiresAt-m.IssuedAt != int64((24*time.Hour)/time.Millisecond) || len(m.Endpoints) < 1 || len(m.Endpoints) > 8 {
+	if m.Version != 1 || !validHex(m.HubInstanceID, 16) || err != nil || len(key) != ed25519.PublicKeySize || canonical == "" || normalizeURL(canonical) != canonical || m.CanonicalURL != canonical || m.Revision < 1 || m.IssuedAt < now.Add(-24*time.Hour).UnixMilli() || m.IssuedAt > now.Add(5*time.Second).UnixMilli() || m.ExpiresAt <= now.UnixMilli() || m.ExpiresAt-m.IssuedAt != int64((24*time.Hour)/time.Millisecond) || len(m.Endpoints) < 1 || len(m.Endpoints) > 8 {
 		return false
 	}
 	seen := map[string]bool{}
 	found := false
 	for _, e := range m.Endpoints {
-		if !validURL(e.URL) || e.Priority < 0 || e.Priority > 1000 || e.ID != "canonical" && !validHex(e.ID, 16) || seen[e.URL] || seen[e.ID] {
+		if e.URL == "" || normalizeURL(e.URL) != e.URL || e.Priority < 0 || e.Priority > 1000 || e.ID != "canonical" && !validHex(e.ID, 16) || seen[e.URL] || seen[e.ID] {
 			return false
 		}
 		seen[e.URL] = true
@@ -144,6 +116,10 @@ func (t *Transport) cachePath(canonical string) string {
 	return filepath.Join(t.dir, hex.EncodeToString(sum[:])+".json")
 }
 func (t *Transport) persist(m Manifest) {
+	t.persistAs(m.CanonicalURL, m)
+}
+
+func (t *Transport) persistAs(logical string, m Manifest) {
 	if t.dir == "" {
 		return
 	}
@@ -153,7 +129,7 @@ func (t *Transport) persist(m Manifest) {
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	if atomicfile.WriteFile(t.cachePath(m.CanonicalURL), raw, 0600) != nil {
+	if atomicfile.WriteFile(t.cachePath(logical), raw, 0600) != nil {
 		return
 	}
 	files, _ := os.ReadDir(t.dir)
@@ -196,7 +172,7 @@ func (t *Transport) state(canonical string) *entry {
 				raw, readErr := io.ReadAll(io.LimitReader(file, (32<<10)+1))
 				file.Close()
 				var m Manifest
-				if readErr == nil && len(raw) <= 32<<10 && json.Unmarshal(raw, &m) == nil && validManifest(m, canonical, time.Now()) {
+				if readErr == nil && len(raw) <= 32<<10 && json.Unmarshal(raw, &m) == nil && validManifest(m, m.CanonicalURL, time.Now()) {
 					e.manifest = m
 				}
 			}
@@ -280,7 +256,7 @@ func (t *Transport) verify(ctx context.Context, m Manifest, address string) erro
 	key, _ := base64.StdEncoding.DecodeString(m.IdentityPublicKey)
 	sig, err := base64.StdEncoding.DecodeString(p.Signature)
 	message := []byte(fmt.Sprintf("salcara-ingress-proof-v1\n%s\n%s\n%d\n%d", p.HubInstanceID, p.Nonce, p.IssuedAt, p.ExpiresAt))
-	if err != nil || !ed25519.Verify(key, message, sig) {
+	if err != nil || len(key) != ed25519.PublicKeySize || !ed25519.Verify(key, message, sig) {
 		return errors.New("ingress_identity_mismatch")
 	}
 	return nil
@@ -298,13 +274,12 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 		}
 		return nil, err
 	}
+	if pin, bound := req.Context().Value(identityKey{}).(identityBinding); bound {
+		return t.roundTripPinned(req, pin)
+	}
 	canonical, _ := req.Context().Value(canonicalKey{}).(string)
-	requestOrigin := *req.URL
-	requestOrigin.Path = "/salcara-hub/v1"
-	requestOrigin.RawPath = ""
-	requestOrigin.RawQuery = ""
-	requestOrigin.ForceQuery = false
-	if !validURL(canonical) || !strings.HasPrefix(req.URL.Path, "/salcara-hub/v1/") || normalizeURL(requestOrigin.String()) != canonical {
+	suffix, matches := requestSuffix(req, canonical)
+	if !matches {
 		return t.base.RoundTrip(req)
 	}
 	e := t.state(canonical)
@@ -334,6 +309,7 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 		target, _ := url.Parse(endpoint.URL)
 		nextURL.Scheme = target.Scheme
 		nextURL.Host = target.Host
+		nextURL.Path = target.Path + suffix
 		next.URL = &nextURL
 		next.Host = ""
 		// Suppress net/http's connection-reuse replay even when callers supplied

@@ -63,7 +63,11 @@ const STATUS = {
   connected: '已连接',
   connecting: '连接中',
   not_logged_in: '本地模式',
-  invalid_key: 'Key 无效',
+  invalid_key: '远程授权被拒绝',
+  device_auth_required: '设备需重新登记',
+  source_unauthorized: '远程来源未授权',
+  pair_required: '手机需重新绑定',
+  remote_blocked: '远程授权待处理',
 };
 const TOOL_LABEL = { codex: 'Codex CLI', 'codex-desktop': 'Codex Desktop', claude: 'Claude Code', 'claude-desktop': 'Claude Desktop', 'deepseek-harness': 'DeepSeek Harness', hermes: 'Hermes Agent' };
 const SESSION_STATUS = { running: '运行中', idle: '空闲', waiting_approval: '等待审批', failed: '失败' };
@@ -252,15 +256,16 @@ function connectionPresentation(st) {
     return { state: 'direct', label: direct?.enabled && direct.running ? '直连已启用' : '直连模式', title: '已选择电脑直连；手机是否在线请查看手机远程页。' };
   }
   const state = mode === 'none' ? 'not_logged_in' : st?.state || 'not_logged_in';
-  const label = state === 'invalid_key' && config?.remoteDeviceOnly ? '设备验证失败' : STATUS[state] || state;
-  return { state, label: mode === 'bot' ? `Bot · ${state === 'not_logged_in' ? '待连接' : label}` : label, title: mode === 'none' ? '' : st?.error || '' };
+  const label = state === 'invalid_key' && config?.remoteDeviceOnly ? '设备需重新登记' : STATUS[state] || state;
+  const visual = ['device_auth_required', 'source_unauthorized', 'pair_required', 'remote_blocked', 'invalid_key'].includes(state) ? 'error' : state;
+  return { state: visual, label: mode === 'bot' ? `Bot · ${state === 'not_logged_in' ? '待连接' : label}` : label, title: mode === 'none' ? '' : st?.error || '' };
 }
 
 function setConn(st) {
   const signal = connectionPresentation(st), s = signal.state, label = signal.label;
   const pill = $('#connPill');
   pill.className = 'conn st-' + s;
-  $('.conn-label', pill).textContent = label;
+  $('.conn-label', pill).textContent = `远程 · ${label}`;
   pill.title = signal.title;
   const hero = $('#heroStatus');
   if (hero) {
@@ -422,6 +427,16 @@ function remoteLampHTML(remote, capability = 'cli') {
   return `<span class="remote-lamp lamp-${esc(r.state)}" data-remote-capability="${esc(capability)}" title="${esc(r.detail)}"><span class="lamp-dot" aria-hidden="true"></span>${esc(r.label)}</span>`;
 }
 
+function agentLocalStatus(tool) {
+  const binding = S.local?.bindings?.[tool.id] || {};
+  if (!tool.available) return { state: 'unsupported', label: '工具未安装', detail: '先安装此工具或填写程序路径' };
+  if (binding.agent) return binding.agent;
+  // Older payloads contain only a remote lamp. Never reuse it as local status.
+  if (!binding.accountId) return { state: 'pending', label: '待选择 API', detail: '选择 API 后可打开此 Agent' };
+  if (binding.pending || !binding.appliedId) return { state: 'pending', label: 'API 待应用', detail: '打开 Agent 时应用所选 API；已有聊天保留' };
+  return { state: 'ready', label: 'API 已应用', detail: '本机配置已应用；进程和任务状态请在原工具中确认' };
+}
+
 function desktopRemoteLamp(tool) {
   // Codex App, CLI and IDE share one thread store: the phone continues Codex App
   // threads through the same Codex worker, so the desktop card mirrors the Codex lamp.
@@ -452,12 +467,12 @@ function agentCard(t) {
   const protocol = binding.protocol || (codex ? 'responses' : 'anthropic');
   const adapted = protocol !== (codex ? 'responses' : 'anthropic');
   return `<article class="card agent-card" data-tool="${esc(t.id)}" data-available="${t.available}"><div class="tool-head"><span class="tool-logo ${codex ? 'codex' : desktop ? 'desktop' : 'claude'}">${codex ? 'Cx' : desktop ? 'CD' : 'CC'}</span><div class="li-main"><h3 class="tool-name">${esc(t.name)}</h3><div class="muted small">${desktop ? '桌面应用' : '命令行工具'} · 模型不限制品牌</div></div><span class="chip ${t.available ? 'ok' : ''}">${t.available ? '已安装' : '未检测到'}</span></div>
-    <label class="agent-api-label" for="toolAPI-${esc(t.id)}">使用的 API</label><div class="agent-api-row"><select class="input" id="toolAPI-${esc(t.id)}" data-target="${esc(t.id)}" aria-label="${esc(t.name)}使用的 API"><option value="">${accounts.length ? '请选择 API…' : '先在密钥库添加 API'}</option>${accounts.map((x) => `<option value="${esc(x.id)}" ${x.id === binding.accountId ? 'selected' : ''}>${esc(x.name)}</option>`).join('')}</select><div id="lamp-${esc(t.id)}">${remoteLampHTML(desktop ? desktopRemoteLamp(t) : binding.remote, desktop ? 'desktop' : 'cli')}</div></div>
+    <label class="agent-api-label" for="toolAPI-${esc(t.id)}">使用的 API</label><div class="agent-api-row"><select class="input" id="toolAPI-${esc(t.id)}" data-target="${esc(t.id)}" aria-label="${esc(t.name)}使用的 API"><option value="">${accounts.length ? '请选择 API…' : '先在密钥库添加 API'}</option>${accounts.map((x) => `<option value="${esc(x.id)}" ${x.id === binding.accountId ? 'selected' : ''}>${esc(x.name)}</option>`).join('')}</select><div id="lamp-${esc(t.id)}">${remoteLampHTML(agentLocalStatus(t), 'agent')}</div></div>
     <div class="agent-config" id="agentConfig-${esc(t.id)}">${a ? `<div title="${esc(a.baseUrl)}">${ico('globe')}<span>${esc(a.baseUrl)}</span></div><div>${ico('key')}<code>${esc(a.keyMasked)}</code></div>` : '<div class="muted">选择已命名的密钥；模型在原工具内选择。</div>'}</div>
     <div class="agent-protocol"><label for="toolProtocol-${esc(t.id)}">服务商提供的上游接口</label><select class="input" id="toolProtocol-${esc(t.id)}" data-target="${esc(t.id)}" aria-label="${esc(t.name)}上游接口">${[['responses', 'OpenAI Responses（兼容中转站）'], ['chat', 'OpenAI Chat Completions（Grok / DeepSeek 等）'], ['anthropic', 'Anthropic Messages（Claude 等）']].map(([v,l]) => `<option value="${v}" ${protocol === v ? 'selected' : ''}>${l}</option>`).join('')}</select><span class="help">${!autoApply ? '这里的选择仅保存在 Bridge，须在原桌面应用中手动设置；不会自动应用。' : adapted ? '经 CLIProxyAPI 本地转换；无需远程登录，但 Bridge 必须保持运行。' : '原生接口直接连接服务商，不按模型品牌过滤。'}</span></div>
     <div class="agent-applied" id="agentApplied-${esc(t.id)}">${!autoApply ? '<span class="chip warn">自动应用暂不可用</span>' : binding.pending ? `<span class="chip warn">${a ? '选择已保存，等待应用' : '未选择 API'}</span>${applied ? `<span class="muted small">当前应用：${esc(applied.name)}</span>` : ''}` : `<span class="chip ok">已应用 ${esc(applied?.name || '')}</span>`}</div>
     <div class="agent-actions"><button class="btn primary" data-act="toolRestart" data-target="${esc(t.id)}" ${autoApply && a && binding.model && t.available ? '' : 'disabled'}>${icon('refresh')}${autoApply ? '应用并重启' : '自动应用暂不可用'}</button>${a ? `<button class="icon-btn" data-act="localEdit" data-id="${esc(a.id)}" title="编辑这个密钥" aria-label="编辑这个密钥">${icon('edit')}</button>` : '<button class="btn sm" data-act="localNew">添加密钥</button>'}</div>
-    <p class="agent-note muted small" id="remoteDetail-${esc(t.id)}">${esc(desktop ? desktopRemoteLamp(t).detail : binding.remote?.detail || '')}</p>
+    <p class="agent-note muted small" id="remoteDetail-${esc(t.id)}">${esc(agentLocalStatus(t).detail || '')}</p>
     ${!autoApply ? `<p class="agent-note small">${esc(claudeDesktopApplyNote())}</p><p class="agent-note small">CLI 恢复会话仅支持本地 Code 记录，使用 Claude Code 卡片已应用的 API 并通过 Claude Code 终端打开；普通云端聊天仍在原桌面应用里查看，不能通过 Bridge 遥控。</p>` : desktop ? '<p class="agent-note muted small">重启原桌面应用保留本地历史；指定旧会话的恢复通过原 CLI 打开。</p>' : '<p class="agent-note muted small">打开原终端会话列表；不会关闭其他终端，请先手动结束旧任务。</p>'}
   </article>`;
 }
@@ -498,7 +513,7 @@ async function refreshWorkbenchStatus() {
         if (typeof wbRefreshCardStatus === 'function') wbRefreshCardStatus(t.id);
         else toolDraftStatus(t.id);
       }
-      if (detail) detail.textContent = t.id.endsWith('-desktop') ? desktopRemoteLamp(t).detail : b?.remote?.detail || '';
+      if (detail) detail.textContent = agentLocalStatus(t).detail || '';
       const cliLamp = document.getElementById('cliLamp-' + t.id);
       const cliDetail = document.getElementById('cliRemoteDetail-' + t.id);
       if (cliLamp) cliLamp.innerHTML = remoteLampHTML(b?.cliRemote);
@@ -1005,7 +1020,7 @@ function toolDraftStatus(target) {
   const dirty = form.id !== (binding.accountId || '') || form.model !== (binding.model || '') || form.protocol !== (binding.protocol || (target.startsWith('codex') ? 'responses' : 'anthropic'));
   const desktop = target.endsWith('-desktop');
   const tool = S.local?.tools?.find((t) => t.id === target) || { id: target, available: card.dataset.available === 'true' };
-  document.getElementById('lamp-' + target).innerHTML = remoteLampHTML(desktop ? desktopRemoteLamp(tool) : dirty ? { state: 'pending', label: '设置待应用', detail: '卡片设置尚未应用；CLI 远程仍使用上一次已应用配置' } : binding.remote, desktop ? 'desktop' : 'cli');
+  document.getElementById('lamp-' + target).innerHTML = remoteLampHTML(dirty ? { state: 'pending', label: '设置待应用', detail: '卡片设置尚未应用；原工具继续使用上一次已应用配置' } : agentLocalStatus(tool), 'agent');
   const applied = document.getElementById('agentApplied-' + target);
   if (applied) {
     const account = S.local?.accounts?.find((a) => a.id === binding.appliedId);
@@ -2287,7 +2302,7 @@ function connectStream() {
   });
   es.onerror = () => {
     setConn({ state: 'connecting', error: '与本机程序的连接断开', consoleDisconnected: true });
-    $$('.remote-lamp[data-remote-capability="cli"]').forEach((lamp) => { lamp.className = 'remote-lamp lamp-connecting'; lamp.innerHTML = '<span class="lamp-dot"></span>状态连接中断'; });
+    // Agent configuration remains valid when the local status stream drops.
   };
 }
 

@@ -44,6 +44,33 @@ function connectionFixture(mode = 'station') {
   f.node('rmEnrollmentClaim').value = 'a'.repeat(64);
   return f;
 }
+
+test('saved API selection supplies only its full address and clears another station claim', () => {
+  const f = connectionFixture();
+  f.context.S.local = { accounts: [{ id: 'a', baseUrl: 'https://api.test/tenant/v1', key: 'never-forward-this-key' }] };
+  f.node('rmSourceAPI').value = 'a';
+  f.node('rmHub').value = 'https://old.test/custom/v1';
+  f.node('rmSourceAPI').classList.contains = () => false;
+  f.emit('change', f.node('rmSourceAPI'));
+  assert.equal(f.node('rmStation').value, 'https://api.test/tenant/v1');
+  assert.equal(f.node('rmHub').value, '');
+  assert.equal(f.node('rmEnrollmentClaim').value, '');
+  assert.equal(f.calls.length, 0);
+});
+
+test('explicit reenrollment rotates only remote binding without loading histories', async () => {
+  const f = connectionFixture();
+  f.node('rmRecoveryClaim').value = 'c'.repeat(64);
+  const recovering = f.context.ACTIONS.rmReenroll({ isConnected: true });
+  await new Promise(setImmediate);
+  assert.equal(f.calls.length, 1);
+  assert.equal(f.calls[0].path, '/api/remote/discover');
+  assert.deepEqual(JSON.parse(JSON.stringify(f.calls[0].body)), { url: 'https://old.test/salcara-hub', hubUrl: 'https://old.test/salcara-hub', enrollmentClaim: 'c'.repeat(64), connect: true, reenroll: true });
+  f.pending[0].resolve({ ok: true });
+  await recovering;
+  assert.equal(f.node('rmRecoveryClaim').value, '');
+  assert.equal(f.calls.some(call => /session|history/.test(call.path)), false);
+});
 const tick = () => new Promise(resolve => setImmediate(resolve));
 
 test('remote API picker explains separate API and reverse proxy restrictions', async () => {
@@ -101,6 +128,25 @@ test('live connection and recovery updates preserve drafts and restore QR after 
   const previous = f.node('rmRecovery').innerHTML;
   f.context.rmUpdateRemoteStatus({ deviceId: 'different-device', state: 'connected', queued: 999 });
   assert.equal(f.node('rmRecovery').innerHTML, previous, 'an old device must not repaint the current one');
+});
+
+test('remote errors distinguish enrollment, phone pairing, source policy and availability', () => {
+  const f = connectionFixture();
+  for (const [status, label] of [
+    [{ state: 'device_auth_required', errorCode: 'enrollment_claim_invalid' }, '需要新的设备登记码'],
+    [{ state: 'device_auth_required', errorCode: 'device_enrollment_required' }, '设备尚未登记'],
+    [{ state: 'device_auth_required', errorCode: 'device_credentials_invalid' }, '设备登记凭据失效'],
+    [{ state: 'source_unauthorized' }, '本站未授权此 API 来源远程使用'],
+    [{ state: 'pair_required' }, '手机需重新绑定'],
+    [{ state: 'remote_blocked', errorCode: 'user_disabled' }, '远程用户已停用'],
+    [{ state: 'connecting', errorCode: 'remote_unavailable' }, '远程服务暂不可用，自动重连中'],
+  ]) assert.equal(f.context.rmConnectionLabel(status), label);
+});
+
+test('a delayed status from another Hub cannot repaint the current remote page', () => {
+  const f = connectionFixture();
+  f.context.rmUpdateRemoteStatus({ deviceId: 'test-device', hubUrl: 'https://other.test/salcara-hub', state: 'device_auth_required', error: 'old error' });
+  assert.equal(f.node('rmHubConnectionError').innerHTML, '');
 });
 
 test('read-only recovery refresh cannot repaint or notify after leaving the page', async () => {

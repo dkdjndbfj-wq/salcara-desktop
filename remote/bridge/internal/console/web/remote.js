@@ -58,7 +58,7 @@ function rmFinishConnectionAction(owner) {
 function rmRememberConnectionDraft() {
   if (S.route !== 'login') return;
   if (RM.remoteMode === 'station' && document.getElementById('rmStation')) {
-    RM.stationDraft = { url: document.getElementById('rmStation').value || '', hubUrl: document.getElementById('rmHub')?.value || '', claim: document.getElementById('rmEnrollmentClaim')?.value || '' };
+    RM.stationDraft = { url: document.getElementById('rmStation').value || '', hubUrl: document.getElementById('rmHub')?.value || '', claim: document.getElementById('rmEnrollmentClaim')?.value || '', accountId: document.getElementById('rmSourceAPI')?.value || '' };
   } else if (RM.remoteMode === 'bot' && document.getElementById('rmBotBinding')) RM.botDraft = document.getElementById('rmBotBinding').value || '';
 }
 async function rmRefreshAcceptedConnection() {
@@ -171,7 +171,19 @@ function rmUpdateModeStatus() {
 
 function rmConnectionLabel(hub) {
   if (hub?.state === 'connected') return '已连接';
-  if (hub?.state === 'invalid_key') return '设备登记凭据失效';
+  if (hub?.errorCode === 'hub_identity_changed') return '中转站身份已变化，需重新登记';
+  if (hub?.errorCode === 'user_disabled') return '远程用户已停用';
+  if (hub?.errorCode === 'enrollment_claim_invalid') return '需要新的设备登记码';
+  if (hub?.errorCode === 'device_enrollment_required' || hub?.errorCode === 'device_credentials_required') return '设备尚未登记';
+  if (hub?.state === 'device_auth_required') return '设备登记凭据失效';
+  if (hub?.state === 'source_unauthorized') return '本站未授权此 API 来源远程使用';
+  if (hub?.state === 'pair_required') return '手机需重新绑定';
+  if (hub?.state === 'remote_blocked') return '远程连接配置需处理';
+  if (hub?.state === 'invalid_key') return S.state?.config?.remoteDeviceOnly ? '设备登记凭据失效' : '远程连接授权被拒绝';
+  if (hub?.errorCode === 'remote_unsupported') return '本站远程服务不兼容';
+  if (['remote_rate_limited', 'source_challenge_capacity'].includes(hub?.errorCode)) return '远程请求过于频繁，稍后重试';
+  if (['remote_unavailable', 'source_policy_unavailable', 'source_challenge_unavailable'].includes(hub?.errorCode)) return '远程服务暂不可用，自动重连中';
+  if (hub?.errorCode === 'source_acquisition_pending') return '正在验证 API 来源，稍后重试';
   if (hub?.state === 'not_logged_in') return '未连接';
   return hub?.error ? '连接中断，自动重连中' : '正在连接';
 }
@@ -200,6 +212,7 @@ function rmRecoveryMarkup(hub = {}) {
 // device-name edit, QR timer or connection action while state is refreshed.
 function rmUpdateRemoteStatus(hub = S.state?.hub) {
   if (S.route !== 'login' || !hub || hub.deviceId && hub.deviceId !== S.state?.config?.deviceId) return;
+  if (hub.hubUrl && rmNormalizeHub(hub.hubUrl) !== rmNormalizeHub(S.state?.config?.effectiveHubUrl || S.state?.config?.hubUrl)) return;
   rmUpdateModeStatus();
   if (typeof syncRemoteSupport === 'function') syncRemoteSupport();
   const recovery = document.getElementById('rmRecovery');
@@ -296,6 +309,8 @@ function renderRemoteBotPanel(c) {
 
 function renderRemoteStationPanel(view, st, c, linked, connected, station, qrLive) {
   const draft = RM.stationDraft;
+  const apis = (S.local?.accounts || []).filter(a => a.baseUrl && !a.credentialRef && ['api_key', 'reverse_proxy'].includes(a.sourceType));
+  const chosen = apis.find(a => a.id === draft?.accountId) || apis.find(a => a.id === S.local?.activeCodexAccount) || apis[0];
   const saved = rmSavedConnections(c, 'hub').length > 0;
   const savedMarkup = typeof remoteSavedStationsHTML === 'function' ? remoteSavedStationsHTML(c) : '';
   return `${!linked && saved ? savedMarkup : ''}${linked ? `<section class="rm-sec">
@@ -307,14 +322,19 @@ function renderRemoteStationPanel(view, st, c, linked, connected, station, qrLiv
           <div class="rm-meta" id="rmHubConnectionMeta">${esc(rmConnectionLabel(st.hub))} · ${esc(station)}</div></div>
         <button class="rm-link" data-act="rmActivateMode" data-mode="none">停用</button>
       </div><div id="rmHubConnectionError">${!connected && st.hub && st.hub.error ? `<div class="rm-error">${esc(st.hub.error)}</div>` : ''}</div>
-    </section>`
+    </section><section class="rm-sec"><details class="rm-adv"><summary>重新登记这台电脑</summary>
+      <p>设备凭证失效或站点重置后，在这里重新登记，再让手机扫码。API、项目和聊天记录会保留。</p>
+      <label class="field"><span>新的设备登记码</span><input class="input" id="rmRecoveryClaim" type="password" maxlength="64" autocomplete="off" placeholder="按本站要求填写；开放站点可留空"></label>
+      <button class="btn" data-act="rmReenroll">重新登记并绑定手机</button><div id="rmReenrollError"></div>
+    </details></section>`
   : `<section class="rm-sec rm-hero">${saved ? `<details class="rm-new-connection" ${draft?.url || draft?.claim ? 'open' : ''}><summary>添加其他中转站</summary>` : ''}
       ${saved ? '' : '<h2>连接中转站</h2>'}
-      <p>Hub 只转发远程设备消息，模型仍由这台电脑上的 Agent 调用。</p>
-      <div class="rm-form"><input class="input" id="rmStation" placeholder="Hub 地址，例如 https://hub.example.com/salcara-hub" value="${esc(draft ? draft.url : c.relayRoot || '')}" autocomplete="url">
+      <p>使用普通 API 地址自动检测本站远程能力。模型仍由这台电脑上的 Agent 调用。</p>
+      ${apis.length ? `<label class="field"><span>已保存的 API</span><select class="input" id="rmSourceAPI">${apis.map(a => `<option value="${esc(a.id)}" ${a.id === chosen?.id ? 'selected' : ''}>${esc(a.name || host(a.baseUrl))}</option>`).join('')}<option value="">其他地址</option></select></label>` : ''}
+      <div class="rm-form"><input class="input" id="rmStation" placeholder="API 地址，例如 https://api.example.com/v1" value="${esc(draft ? draft.url : chosen?.baseUrl || c.relayRoot || '')}" autocomplete="url">
         <button class="btn primary" data-act="rmConnect">连接</button></div>
       <details class="rm-adv"><summary>高级选项</summary>
-        <label class="field"><span>自定义 Hub 路径</span><input class="input" id="rmHub" placeholder="默认：地址/salcara-hub" value="${esc(draft ? draft.hubUrl : c.hubUrl || '')}" autocomplete="url"></label>
+        <label class="field"><span>自定义 Hub 路径（可选）</span><input class="input" id="rmHub" placeholder="自动发现，无需填写" value="${esc(draft ? draft.hubUrl : '')}" autocomplete="url"></label>
         <label class="field"><span>新电脑首次登记码</span><input class="input" id="rmEnrollmentClaim" type="password" maxlength="64" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="首次登记必填，已登记电脑留空" value="${esc(draft?.claim || '')}"></label>
         <p class="rm-note">登记失败时保留以便重试；这里填写设备登记码，不是 Sub2API 账号或 API Key。</p>
       </details>
@@ -384,6 +404,11 @@ RENDER_login = function (view) {
   }).catch((e) => {
     if (!S.state && ownsTarget() && inputRevision === RM.connectionRevision) target.innerHTML = `<div class="rm-error" style="margin:20px">${esc(e.message)}</div>`;
   });
+  void api('/api/local/accounts').then(local => {
+    if (!ownsTarget() || inputRevision !== RM.connectionRevision || RM.connectionAction || RM.stationDraft) return;
+    S.local = local;
+    if (S.state && RM.remoteMode === 'station') renderRemoteLoginPage(target, S.state);
+  }).catch(() => undefined);
 };
 
 const LIVE_PROMPT = '请开启 Salcara 实时桌面模式：用你的工具列出本机最近的 Codex 对话（最多 200 个，排除当前这个对话），然后调用 salcara_desktop_connect，参数 allowRemoteControl 为 true，durationSeconds 为 2592000，sessionKeys 为这些对话的 codex:真实对话ID 数组。保持这次调用一直运行，不要在这个对话里做别的事。';
@@ -527,6 +552,30 @@ document.addEventListener('change', (e) => {
 });
 
 Object.assign(ACTIONS, {
+  rmReenroll: async (button) => {
+    const owner = rmBeginConnectionAction(button, 'station', ['rmRecoveryClaim']);
+    if (!owner) return;
+    const cfg = S.state?.config, identity = JSON.stringify([cfg?.deviceId, cfg?.effectiveHubUrl]);
+    const enrollmentClaim = owner.fields[0].value.trim();
+    const out = document.getElementById('rmReenrollError');
+    try {
+      if (enrollmentClaim && !/^[a-f0-9]{64}$/i.test(enrollmentClaim)) throw new Error('请填写完整的 64 位设备登记码');
+      if (!await confirm('重新登记会替换本站的电脑设备凭证，手机需要重新扫码。API、项目和聊天记录保留。继续？') || !owner.current()) return;
+      await busy(button, async () => {
+        try {
+          if (identity !== JSON.stringify([S.state?.config?.deviceId, S.state?.config?.effectiveHubUrl])) return;
+          owner.submitted = true;
+          await api('/api/remote/discover', { url: cfg.effectiveHubUrl, hubUrl: cfg.effectiveHubUrl, enrollmentClaim, connect: true, reenroll: true });
+          if (owner.current()) owner.fields[0].node.value = '';
+          S.pairQR = ''; S.pairExpires = 0;
+          const state = await rmRefreshAcceptedConnection();
+          if (S.route === 'login' && state) await route();
+          toast('已保存新的电脑登记，请连接成功后重新扫码', 'ok');
+        } catch (error) { await rmRefreshAcceptedConnection(); rmConnectionError(owner, out, error); }
+      });
+    } catch (error) { rmConnectionError(owner, out, error); }
+    finally { rmFinishConnectionAction(owner); }
+  },
   rmActivateMode: async (b) => {
     const mode = b.dataset.mode;
     if (!['none', 'direct', 'hub', 'bot'].includes(mode)) return;
@@ -1217,6 +1266,13 @@ document.addEventListener('input', (e) => {
   if (e.target.id === 'cxPrompt') RM.newPrompt = e.target.value;
 });
 document.addEventListener('change', (e) => {
+  if (e.target.id === 'rmSourceAPI') {
+    const selected = (S.local?.accounts || []).find(a => a.id === e.target.value);
+    if (document.getElementById('rmStation')) document.getElementById('rmStation').value = selected?.baseUrl || '';
+    for (const id of ['rmHub', 'rmEnrollmentClaim']) { const field = document.getElementById(id); if (field) field.value = ''; }
+    ++RM.connectionRevision;
+    rmRememberConnectionDraft();
+  }
   if (e.target.id === 'cxProject' && RM.newThread) {
     RM.featureChoice = { mode: '', skills: [] };
     loadFeaturesForCwd(e.target.value, RM.tool);

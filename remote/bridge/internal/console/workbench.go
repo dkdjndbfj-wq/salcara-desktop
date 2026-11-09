@@ -27,6 +27,7 @@ type toolBinding struct {
 	Protocol  string      `json:"protocol"`
 	Pending   bool        `json:"pending"`
 	Override  bool        `json:"override"`
+	Agent     remoteLamp  `json:"agent"`
 	Remote    remoteLamp  `json:"remote"`
 	CLIRemote *remoteLamp `json:"cliRemote,omitempty"`
 }
@@ -41,6 +42,17 @@ func toolBindings(c config.Config, tools []launcher.Tool, hubState string, nativ
 		a, _ := c.SelectedToolAPI(t.ID)
 		applied, valid := c.AuthorizedAppliedToolAccount(t.ID)
 		b := toolBinding{AccountID: a.ID, AppliedID: applied.ID, Model: a.Model, Protocol: a.Protocol, Pending: !valid || applied.ID != a.ID || config.AccountFingerprint(a) != config.AccountFingerprint(applied), Override: a.CatalogOverride}
+		// Local readiness never depends on device registration or phone pairing.
+		// A saved/applied API is not evidence that an Agent process is running.
+		b.Agent = remoteLamp{State: "ready", Label: "API 已应用", Detail: "本机配置已应用；进程和任务状态请在原工具中确认", Supported: true}
+		if a.ID == "" {
+			b.Agent = remoteLamp{State: "pending", Label: "待选择 API", Detail: "选择 API 后可打开此 Agent", Supported: true}
+		} else if b.Pending {
+			b.Agent = remoteLamp{State: "pending", Label: "API 待应用", Detail: "打开 Agent 时应用所选 API；已有聊天保留", Supported: true}
+		}
+		if !t.Available {
+			b.Agent = remoteLamp{State: "unsupported", Label: "工具未安装", Detail: "先安装此工具或填写程序路径", Supported: false}
+		}
 		// Connectivity and an executable API are separate conditions. Claude
 		// workers never fall back to the native application's subscription login.
 		lamp := remoteLamp{State: "off", Label: "手机远程未连接", Detail: "在「手机远程」连接中转站并扫码绑定手机", Supported: true}
@@ -48,11 +60,17 @@ func toolBindings(c config.Config, tools []launcher.Tool, hubState string, nativ
 		if !installed[backend] {
 			lamp = remoteLamp{State: "unsupported", Label: "远程需安装 CLI", Detail: "手机远程通过对应的 Codex / Claude Code 在电脑上继续对话", Supported: false}
 		} else if !c.LoggedIn() {
-		} else if hubState == hubclient.StateInvalidKey {
+		} else if hubState == hubclient.StateRemoteBlocked {
+			lamp.State, lamp.Label, lamp.Detail = "error", "远程授权待处理", "本站拒绝了远程用户或连接配置，请在「手机远程」检查详情"
+		} else if hubState == hubclient.StateInvalidKey || hubState == hubclient.StateDeviceAuthRequired {
 			lamp.State, lamp.Label, lamp.Detail = "error", "远程连接被拒绝", "站点拒绝了这台电脑，请在「手机远程」重新连接"
 			if c.RemoteDeviceOnly {
 				lamp.Label, lamp.Detail = "设备验证失败", "本站拒绝了这台电脑的设备身份，请在「手机远程」检查连接"
 			}
+		} else if hubState == hubclient.StateSourceUnauthorized {
+			lamp.State, lamp.Label, lamp.Detail = "error", "远程来源未授权", "本站未授权此 API 来源用于远程；本机 API 配置保留"
+		} else if hubState == hubclient.StatePairRequired {
+			lamp.State, lamp.Label, lamp.Detail = "off", "手机需重新绑定", "在「手机远程」重新扫码绑定手机"
 		} else if hubState == "unpaired" {
 			lamp.State, lamp.Label, lamp.Detail = "off", "手机未绑定", "在「手机远程」扫码绑定手机"
 		} else if hubState != hubclient.StateConnected {

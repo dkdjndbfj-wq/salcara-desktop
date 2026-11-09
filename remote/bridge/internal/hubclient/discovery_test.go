@@ -20,7 +20,7 @@ func TestDiscoveryDoesNotSendCredentialsAndChecksCapabilities(t *testing.T) {
 		if r.Header.Get("Authorization") != "" || r.Header.Get("X-Salcara-Device-Secret") != "" || r.Header.Get("Cookie") != "" {
 			t.Error("discovery leaked credentials")
 		}
-		if r.URL.Path != "/salcara-hub/v1/ping" {
+		if r.URL.Path != "/salcara-hub/v1/ping" && !(mode == "missing" && r.URL.Path == "/v1/ping") {
 			t.Error("wrong discovery endpoint")
 		}
 		switch mode {
@@ -67,12 +67,8 @@ func TestDiscoverForDeviceScopesCredentialsAndNeverFollowsRedirects(t *testing.T
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			u := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				wantID, wantSecret := tc.id, tc.secret
-				if tc.claim != "" || tc.secret == "" {
-					wantID, wantSecret = "", ""
-				}
-				if r.Header.Get("X-Salcara-Device-Id") != wantID || r.Header.Get("X-Salcara-Device-Secret") != wantSecret || r.Header.Get("X-Salcara-Enrollment-Claim") != tc.claim || r.Header.Get("Authorization") != "" || r.Header.Get("Cookie") != "" {
-					t.Error("discovery mixed device, invitation or upstream credentials")
+				if r.Header.Get("X-Salcara-Device-Id") != "" || r.Header.Get("X-Salcara-Device-Secret") != "" || r.Header.Get("X-Salcara-Enrollment-Claim") != "" || r.Header.Get("Authorization") != "" || r.Header.Get("Cookie") != "" {
+					t.Error("legacy discovery sent device, invitation or upstream credentials")
 				}
 				_, _ = w.Write([]byte(`{"service":"salcara-hub","protocol":"salcara-remote","protocolVersion":1,"authModes":["device-pairing"],"capabilities":["device.identity.v1","pair.qr.v1","session.remote.v1","pair.revoke.v1"]}`))
 			}))

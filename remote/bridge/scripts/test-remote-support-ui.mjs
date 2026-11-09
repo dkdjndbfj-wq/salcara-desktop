@@ -4,6 +4,8 @@ import fs from 'node:fs';
 import vm from 'node:vm';
 
 const source = fs.readFileSync(new URL('../internal/console/web/remote-support.js', import.meta.url), 'utf8');
+const remoteSource = fs.readFileSync(new URL('../internal/console/web/remote.js', import.meta.url), 'utf8');
+const connectionHelpers = remoteSource.slice(remoteSource.indexOf('function rmBeginConnectionAction('), remoteSource.indexOf('function sessionCapabilities('));
 const SRC = 'src-v1-' + 'a'.repeat(64), NEXT = 'src-v1-' + 'b'.repeat(64);
 const plain = value => JSON.parse(JSON.stringify(value));
 function gate() { let resolve, reject; return { promise: new Promise((r, j) => { resolve = r; reject = j; }), resolve, reject }; }
@@ -20,6 +22,8 @@ function fixture() {
   function node(id, extra = {}) { const item = { innerHTML: '', textContent: '', dataset: {}, isConnected: true, ...extra }; nodes.set(id, item); return item; }
   const context = vm.createContext({
     S: { route: 'accounts', local, state: { config: { remoteConnections: [] } } }, ACTIONS: {}, OFFICIAL_PANEL: { epoch: 0 },
+    RM: { remoteMode: 'station', connectionRevision: 0, loginEpoch: 0 },
+    loadState: async () => context.S.state, rmUpdateRemoteStatus() {},
     URL, Date: Clock, icon: () => '', esc: value => String(value).replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('"', '&quot;'),
     $: key => nodes.get(key), document: { getElementById: id => nodes.get('#' + id), addEventListener() {} },
     setTimeout: (fn, ms) => { const id = ++state.timer; timers.set(id, { fn, at: state.now + ms }); return id; },
@@ -36,9 +40,11 @@ function fixture() {
         return { ok: true, id: body.id, sourceRevision: body.expectedSourceRevision, baseUrl: row.baseUrl, remoteSupport: supported() };
       }
       if (path === '/api/remote/discover') return { ok: true, connected: body.connect, plugin: { root: new URL(body.hubUrl).origin, hubUrl: body.hubUrl } };
+      if (path === '/api/remote/mode') return { ok: true, activeMode: body.mode };
       throw new Error('unexpected API path');
     },
   });
+  vm.runInContext(connectionHelpers, context);
   vm.runInContext(source, context);
   const card = a => node('#accountRemote-' + a.id, { dataset: { source: a.sourceRevision, base: a.baseUrl } });
   const button = (hub = station.hubUrl, target = '#officialStationChoices') => ({
@@ -121,11 +127,10 @@ test('the phone-remote page retains a separate explicit connect action', async (
   const f = fixture(); f.context.S.route = 'login'; f.context.location.hash = 'login';
   f.node('#savedRemoteStations');
   const html = f.context.remoteSavedStationsHTML({ remoteConnections: [f.station] });
-  assert.match(html, /data-act="remoteStationSelect"[^>]*>连接<\/button>/);
+  assert.match(html, /data-act="remoteStationSelect"[^>]*>启用中转站<\/button>/);
   await f.context.ACTIONS.remoteStationSelect(f.button(f.station.hubUrl, '#savedRemoteStations'));
   assert.equal(f.writes().length, 1);
-  assert.equal(f.writes()[0].body.connect, true);
-  assert.equal(f.writes()[0].body.requireOfficial, false);
+  assert.deepEqual(f.writes()[0], { path: '/api/remote/mode', body: { mode: 'hub', hubUrl: f.station.hubUrl } });
   assert.equal(f.nodes.has('#officialPanel'), false);
 });
 
@@ -265,7 +270,7 @@ test('station failure remains gray even when the follow-up list read also fails'
   f.state.intercept = () => Promise.reject(new Error('fixture network error'));
   await f.context.ACTIONS.remoteStationProbe(f.button());
   assert.doesNotMatch(f.officialHTML(), /is-supported/);
-  assert.match(f.nodes.get('#officialError').textContent, /network error/);
+  assert.match(f.nodes.get('#officialError').innerHTML, /network error/);
 });
 
 test('a successful station retry clears the preceding error without leaving a stale failure message', async () => {
@@ -293,7 +298,7 @@ test('duplicate station selections issue only one connect', async () => {
   f.state.intercept = path => path === '/api/remote/discover' ? pending.promise : undefined;
   const one = f.context.ACTIONS.remoteStationSelect(f.button()); const two = f.context.ACTIONS.remoteStationSelect(f.button());
   assert.match(f.officialHTML(), /API 远程 · 检测中/);
-  assert.match(f.officialHTML(), /disabled>检测中/);
+  assert.match(f.officialHTML(), /disabled>处理中/);
   assert.equal(f.writes().length, 1); pending.resolve({ ok: true }); await Promise.all([one, two]);
 });
 

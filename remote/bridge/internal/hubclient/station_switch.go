@@ -170,15 +170,24 @@ func (c *Client) verifyStationSwitch(ctx context.Context, target config.RemoteCo
 	}
 	probeCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
 	defer cancel()
-	discovery, err := Discover(probeCtx, target.HubURL, target.HubURL)
+	discovery, err := DiscoverForConnection(probeCtx, c.o.Store.Get(), target)
 	if err != nil {
 		return config.Config{}, fmt.Errorf("目标中转站不可用：%w", err)
 	}
-	if config.NormalizeHubURL(discovery.HubURL) != config.NormalizeHubURL(target.HubURL) {
+	if config.NormalizeHubURL(discovery.HubURL) != config.NormalizeHubURL(target.HubURL) && target.IngressURL == "" {
 		return config.Config{}, errors.New("目标中转站地址发生跳转，已取消切换")
 	}
 	base := c.o.Store.Get()
 	next := activeStationConfig(base, target)
+	if discovery.Identity != nil {
+		for i := range next.RemoteConnections {
+			saved := &next.RemoteConnections[i]
+			if saved.DeviceID == target.DeviceID && saved.DeviceSecret == target.DeviceSecret && saved.BotGroupID == target.BotGroupID && config.NormalizeHubURL(saved.HubURL) == config.NormalizeHubURL(target.HubURL) {
+				saved.HubInstanceID, saved.IdentityPublicKey = discovery.Identity.HubInstanceID, discovery.Identity.IdentityPublicKey
+				saved.IngressURL = discovery.HubURL + "/v1"
+			}
+		}
+	}
 	if base.RemoteExecutionArmed {
 		if !discovery.RemoteAccess.Available() {
 			return config.Config{}, errors.New("目标站点暂不支持安全远程，请更新站点或检查远程设置")
@@ -386,14 +395,14 @@ func (c *Client) switchStationMode(ctx context.Context, in stationSwitchCommand,
 				return err
 			}
 		}
-		if config.RemoteIdentity(*cfg) != identity {
+		if config.RemoteIdentity(*cfg) != identity || cfg.RemoteConnectionEpoch != current.RemoteConnectionEpoch {
 			return errors.New("连接已变化，请刷新后重试")
 		}
 		if expectedBinding != "" && (cfg.PhoneBindingID != expectedBinding || cfg.PhoneHash != expectedPhone) {
 			return errors.New("手机绑定已更换，请重新扫码")
 		}
 		station, exists := cfg.SavedRemoteConnection(in.TargetHubURL, in.TargetDeviceID)
-		if !exists || station.DeviceSecret != target.DeviceSecret {
+		if !exists || station.DeviceSecret != target.DeviceSecret || station.HubInstanceID != target.HubInstanceID || station.IdentityPublicKey != target.IdentityPublicKey || station.IngressURL != target.IngressURL {
 			return errors.New("目标中转站连接记录已变化，请刷新")
 		}
 		if selectedID != "" {
@@ -415,6 +424,9 @@ func (c *Client) switchStationMode(ctx context.Context, in stationSwitchCommand,
 		for i := range cfg.RemoteConnections {
 			if cfg.RemoteConnections[i].DeviceID == station.DeviceID && config.NormalizeHubURL(cfg.RemoteConnections[i].HubURL) == config.NormalizeHubURL(station.HubURL) {
 				cfg.RemoteConnections[i].RemoteSupport = config.CloneStationObservation(next.RemoteStationObservation)
+				if verified, ok := next.SavedRemoteConnection(station.HubURL, station.DeviceID); ok {
+					cfg.RemoteConnections[i].HubInstanceID, cfg.RemoteConnections[i].IdentityPublicKey, cfg.RemoteConnections[i].IngressURL = verified.HubInstanceID, verified.IdentityPublicKey, verified.IngressURL
+				}
 			}
 		}
 		cfg.RemoteHandoverOperation = in.OperationID

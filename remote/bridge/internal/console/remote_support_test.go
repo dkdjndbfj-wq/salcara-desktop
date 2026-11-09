@@ -36,7 +36,7 @@ func TestAccountRemoteSupportUsesFullAPIBaseAndNeverSendsSecrets(t *testing.T) {
 			var requests atomic.Int32
 			upstream = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				requests.Add(1)
-				if r.URL.Path != "/salcara-hub/v1/ping" || r.Method != http.MethodGet || r.Header.Get("Authorization") != "" || r.Header.Get("Cookie") != "" || r.Header.Get("X-Api-Key") != "" || r.ContentLength > 0 {
+				if r.URL.Path != "/a/salcara-hub/v1/ping" || r.Method != http.MethodGet || r.Header.Get("Authorization") != "" || r.Header.Get("Cookie") != "" || r.Header.Get("X-Api-Key") != "" || r.ContentLength > 0 {
 					t.Error("discovery sent credentials/body or used a non-plugin endpoint")
 				}
 				if scenario == "failed" {
@@ -182,7 +182,7 @@ func TestAccountRemoteSupportUsesExactSavedCustomHub(t *testing.T) {
 func TestAccountRemoteDiscoveryTargetDefaultsOnlyWithoutSavedSameOriginHub(t *testing.T) {
 	account := config.LocalAccount{BaseURL: "https://relay.fixture/tenant/v1", SourceType: "api_key"}
 	c := config.Config{}
-	if target, err := accountRemoteDiscoveryTarget(c, account); err != nil || target != "https://relay.fixture/salcara-hub" {
+	if target, err := accountRemoteDiscoveryTarget(c, account); err != nil || target != "" {
 		t.Fatal("an unsaved origin lost default plugin discovery")
 	}
 	c.ConnectRemote("https://relay.fixture", "https://relay.fixture/one/salcara-hub")

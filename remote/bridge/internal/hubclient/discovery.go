@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"salcara/bridge/internal/config"
+	"salcara/bridge/internal/hubingress"
 	"salcara/bridge/internal/protocol"
 )
 
@@ -22,14 +23,16 @@ type Discovery struct {
 	Version         string                     `json:"version"`
 	ProtocolVersion int                        `json:"protocolVersion"`
 	Capabilities    []string                   `json:"capabilities"`
+	Identity        *hubingress.Manifest       `json:"-"`
 }
 
 func RemoteURL(raw string) (*url.URL, error) {
+	raw = strings.TrimSpace(raw)
 	if !strings.Contains(raw, "://") {
 		raw = "https://" + raw
 	}
-	u, err := url.Parse(strings.TrimRight(strings.TrimSpace(raw), "/"))
-	if err != nil || u.Hostname() == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || (u.Scheme != "https" && u.Scheme != "http") {
+	u, err := url.Parse(raw)
+	if err != nil || u.Hostname() == "" || u.User != nil || u.RawQuery != "" || u.ForceQuery || strings.Contains(raw, "#") || u.Opaque != "" || !safeRemotePath(u) || (u.Scheme != "https" && u.Scheme != "http") {
 		return nil, errors.New("请填写不带凭据或查询参数的中转站地址")
 	}
 	ip := net.ParseIP(u.Hostname())
@@ -37,45 +40,110 @@ func RemoteURL(raw string) (*url.URL, error) {
 		return nil, errors.New("远程设备连接必须使用 HTTPS；HTTP 只允许本机测试")
 	}
 	u.Host = strings.ToLower(u.Host)
+	if u.Scheme == "https" && u.Port() == "443" {
+		u.Host = u.Hostname()
+		if strings.Contains(u.Host, ":") {
+			u.Host = "[" + u.Host + "]"
+		}
+	}
+	u.Path = strings.TrimSuffix(u.Path, "/")
 	return u, nil
 }
 
 // Discover sends no model key or device secret. A advertised capability is not
 // proof of ownership; ownership is established later by one-time pairing.
 func Discover(ctx context.Context, raw, override string) (Discovery, error) {
-	return discoverWithIdentity(ctx, raw, override, "", "", "")
+	return discoverAnonymous(ctx, raw, override)
 }
 
-// DiscoverForDevice is only for an already selected/saved station. Credential
-// headers are never redirected and the override still must be same-origin.
+// Capability discovery is always anonymous, even for a saved device. New Hubs
+// expose effective policy on a separate authenticated endpoint.
 func DiscoverForDevice(ctx context.Context, raw, override, deviceID, secret, claim string) (Discovery, error) {
-	return discoverWithIdentity(ctx, raw, override, deviceID, secret, claim)
+	info, err := Discover(ctx, raw, override)
+	if err != nil {
+		return info, err
+	}
+	return DiscoverDevicePolicy(ctx, info, deviceID, secret, claim)
 }
 
-func discoverWithIdentity(ctx context.Context, raw, override, deviceID, secret, claim string) (Discovery, error) {
+func safeRemotePath(u *url.URL) bool {
+	if strings.ContainsAny(u.EscapedPath(), "%\\") || strings.Contains(u.Path, "//") {
+		return false
+	}
+	for _, segment := range strings.Split(u.Path, "/") {
+		if segment == "." || segment == ".." {
+			return false
+		}
+		for _, ch := range segment {
+			if !(ch >= 'a' && ch <= 'z' || ch >= 'A' && ch <= 'Z' || ch >= '0' && ch <= '9' || strings.ContainsRune("._~-", ch)) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// DiscoveryTargets preserves an API prefix and tries only anonymous plugin
+// endpoints. No request is made to models/completions or a status HTML page.
+func DiscoveryTargets(raw, override string) ([]string, error) {
 	u, err := RemoteURL(raw)
 	if err != nil {
-		return Discovery{}, err
+		return nil, err
 	}
 	root := u.Scheme + "://" + u.Host
-	hubURL := root + "/salcara-hub"
-	if strings.Contains(u.Path, "/salcara-hub") {
-		hubURL = strings.TrimSuffix(u.String(), "/v1")
-	}
 	if override != "" {
 		h, err := RemoteURL(override)
 		if err != nil || h.Scheme != u.Scheme || h.Host != u.Host {
-			return Discovery{}, errors.New("插件地址必须与中转站同源，不能跨站发送设备凭证")
+			return nil, errors.New("插件地址必须与中转站同源，不能跨站发送设备凭证")
 		}
-		hubURL = strings.TrimSuffix(h.String(), "/v1")
+		return []string{config.NormalizeHubURL(h.String())}, nil
 	}
+	prefix := strings.TrimSuffix(strings.TrimRight(u.Path, "/"), "/v1")
+	if strings.HasSuffix(prefix, "/salcara-hub") {
+		return []string{root + prefix}, nil
+	}
+	items := []string{root + prefix + "/salcara-hub"}
+	if prefix != "" {
+		items = append(items, root+"/salcara-hub")
+	}
+	// A plugin mounted directly at the supplied API prefix is also a bounded
+	// public discovery candidate. Only a 404 at earlier locations reaches it.
+	if prefix != "" || strings.HasSuffix(u.Path, "/v1") {
+		items = append(items, root+prefix)
+	}
+	return items, nil
+}
+
+func discoverAnonymous(ctx context.Context, raw, override string) (Discovery, error) {
+	targets, err := DiscoveryTargets(raw, override)
+	if err != nil {
+		return Discovery{}, err
+	}
+	for i, target := range targets {
+		info, err := discoverAt(ctx, target)
+		if info.HubURL == "" {
+			u, _ := url.Parse(target)
+			info.HubURL, info.Root = target, u.Scheme+"://"+u.Host
+		}
+		if err == nil || i == len(targets)-1 {
+			return info, err
+		}
+		var missing *discoveryMissing
+		if !errors.As(err, &missing) {
+			return info, err
+		}
+	}
+	return Discovery{}, errors.New("无法发现远程插件")
+}
+
+type discoveryMissing struct{}
+
+func (*discoveryMissing) Error() string { return "这个中转站没有部署兼容的远程插件" }
+
+func discoverAt(ctx context.Context, hubURL string) (Discovery, error) {
+	u, _ := url.Parse(hubURL)
+	root := u.Scheme + "://" + u.Host
 	req, _ := http.NewRequestWithContext(ctx, "GET", hubURL+"/v1/ping", nil)
-	if claim != "" {
-		req.Header.Set("X-Salcara-Enrollment-Claim", claim)
-	} else if deviceID != "" && secret != "" {
-		req.Header.Set("X-Salcara-Device-Id", deviceID)
-		req.Header.Set("X-Salcara-Device-Secret", secret)
-	}
 	checkedAt := time.Now().UnixMilli()
 	client := &http.Client{Timeout: 8 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	resp, err := client.Do(req)
@@ -84,7 +152,7 @@ func discoverWithIdentity(ctx context.Context, raw, override, deviceID, secret, 
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == 404 {
-		return Discovery{}, errors.New("这个中转站没有部署兼容的远程插件")
+		return Discovery{}, &discoveryMissing{}
 	}
 	if resp.StatusCode != 200 {
 		return Discovery{}, errors.New("远程插件未就绪，或请求被本站反向代理拦截")

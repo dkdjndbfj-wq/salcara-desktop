@@ -13,14 +13,17 @@ const MaxRemoteHubBindings = 32
 // independent of model keys. Hub and Bot may share a server without sharing
 // device credentials or replacing each other's saved binding.
 type RemoteConnection struct {
-	RemoteSupport   *StationObservation `json:"remoteSupport,omitempty"`
-	HubURL          string              `json:"hubUrl"`
-	DeviceID        string              `json:"deviceId"`
-	DeviceSecret    string              `json:"deviceSecret"`
-	EnrollmentClaim string              `json:"enrollmentClaim,omitempty"`
-	BotGroupID      string              `json:"botGroupId,omitempty"`
-	BotInvite       string              `json:"botInvite,omitempty"`
-	BotSignature    string              `json:"botSignature,omitempty"`
+	RemoteSupport     *StationObservation `json:"remoteSupport,omitempty"`
+	HubURL            string              `json:"hubUrl"`
+	DeviceID          string              `json:"deviceId"`
+	DeviceSecret      string              `json:"deviceSecret"`
+	EnrollmentClaim   string              `json:"enrollmentClaim,omitempty"`
+	HubInstanceID     string              `json:"hubInstanceId,omitempty"`
+	IdentityPublicKey string              `json:"identityPublicKey,omitempty"`
+	IngressURL        string              `json:"ingressUrl,omitempty"`
+	BotGroupID        string              `json:"botGroupId,omitempty"`
+	BotInvite         string              `json:"botInvite,omitempty"`
+	BotSignature      string              `json:"botSignature,omitempty"`
 }
 
 // PendingPhoneRevoke is an exact, retired phone generation on one saved Hub.
@@ -38,7 +41,7 @@ type PendingPhoneRevoke struct {
 // It deliberately does not resolve hosts or follow redirects.
 func NormalizeHubURL(raw string) string {
 	s := strings.TrimRight(strings.TrimSpace(raw), "/")
-	if len(s) >= 3 && strings.EqualFold(s[len(s)-3:], "/v1") {
+	if strings.HasSuffix(s, "/v1") {
 		s = s[:len(s)-3]
 	}
 	return strings.TrimRight(s, "/")
@@ -110,6 +113,35 @@ func (c *Config) ConnectRemote(root, hubURL string) {
 
 func (c *Config) ConnectRemoteWithEnrollmentClaim(root, hubURL, claim string) {
 	c.connectRemote(root, hubURL, strings.TrimSpace(claim), "")
+}
+
+// ReenrollRemote rotates only this station's retired device binding. Local
+// accounts, projects, tool selections and conversations remain independent.
+// Call only after the user explicitly requests re-enrollment. The station may
+// require a fresh enrollment claim before it accepts the new device.
+func (c *Config) ReenrollRemote(root, hubURL, claim string) {
+	want := NormalizeHubURL(hubURL)
+	for i := range c.RemoteConnections {
+		saved := &c.RemoteConnections[i]
+		if NormalizeHubURL(saved.HubURL) == want && saved.BotGroupID == "" {
+			saved.DeviceID, saved.DeviceSecret = NewUUID(), RandomToken(32)
+			saved.EnrollmentClaim = strings.TrimSpace(claim)
+			saved.HubInstanceID, saved.IdentityPublicKey, saved.IngressURL = "", "", ""
+			saved.RemoteSupport = nil
+			c.activateRemoteConnection(root, *saved)
+			return
+		}
+	}
+	c.ConnectRemoteWithEnrollmentClaim(root, hubURL, claim)
+}
+
+// RemoteIngress returns a persistent identity pin even when its routing
+// manifest has expired. Cache expiry must never make a replacement Hub trusted.
+func (c Config) RemoteIngress() (id, publicKey, endpoint string) {
+	if saved, ok := c.SavedRemoteConnection(c.EffectiveHubURL(), c.DeviceID); ok {
+		return saved.HubInstanceID, saved.IdentityPublicKey, saved.IngressURL
+	}
+	return "", "", ""
 }
 
 // ConnectRemoteWithBotBinding registers this computer with a Bot group while

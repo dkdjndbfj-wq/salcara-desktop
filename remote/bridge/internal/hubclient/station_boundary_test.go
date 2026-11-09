@@ -156,13 +156,20 @@ func TestStationExecutionRefreshRequiresCurrentHubPolicy(t *testing.T) {
 	env.Source.Mode = "open"
 	policy := &config.StationObservation{Mode: "open", Revision: "r1", Station: config.CloneStationPolicy(env.Source.Station)}
 	var policyMu sync.Mutex
-	capabilities := []string{"pair.qr.v1", "device.identity.v1", "session.remote.v1", "pair.revoke.v1", "station.guard.v1"}
+	capabilities := []string{"pair.qr.v1", "device.identity.v1", "session.remote.v1", "pair.revoke.v1", "discovery.policy.v1", "station.guard.v1"}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		policyMu.Lock()
 		defer policyMu.Unlock()
 		expected := store.Get()
-		if r.URL.Path != "/salcara-hub/v1/ping" || r.Header.Get("Authorization") != "" || r.Header.Get("X-Salcara-Device-Secret") != expected.DeviceSecret || r.Header.Get("X-Salcara-Device-Id") != expected.DeviceID {
-			t.Error("capability refresh did not use the selected station's device identity")
+		if r.URL.Path == "/salcara-hub/v1/discovery/policy" {
+			if r.Header.Get("Authorization") != "" || r.Header.Get("X-Salcara-Device-Secret") != expected.DeviceSecret || r.Header.Get("X-Salcara-Device-Id") != expected.DeviceID {
+				t.Error("effective policy did not use the selected device")
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "scope": "device", "remoteAccess": policy})
+			return
+		}
+		if r.URL.Path != "/salcara-hub/v1/ping" || r.Header.Get("Authorization") != "" || r.Header.Get("X-Salcara-Device-Secret") != "" || r.Header.Get("X-Salcara-Device-Id") != "" {
+			t.Error("public discovery sent credentials")
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"service": "salcara-hub", "protocol": "salcara-remote", "protocolVersion": 1, "authModes": []string{"device-pairing"}, "capabilities": capabilities, "remoteAccess": policy})
 	}))

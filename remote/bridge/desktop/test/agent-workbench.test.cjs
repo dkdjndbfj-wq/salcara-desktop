@@ -239,11 +239,13 @@ test('status refresh updates lamp/chip without replacing the selected API or ori
   const ui = setup();
   await ui.change('codex', 'api-shared');
   const select = ui.document.getElementById('wbKey-codex'), modal = ui.modal.innerHTML;
-  ui.S.local.bindings.codex.remote = { state: 'connected', label: '已连接', detail: 'Synthetic connected status' };
+  ui.S.local.bindings.codex.agent = { state: 'ready', label: 'API 已应用', detail: 'Synthetic local API status' };
+  ui.S.local.bindings.codex.remote = { state: 'error', label: '设备验证失败', detail: 'Synthetic remote failure' };
   ui.wbRefreshCardStatus('codex');
   assert.equal(ui.document.getElementById('wbKey-codex'), select);
   assert.equal(ui.modal.innerHTML, modal);
-  assert.match(ui.document.getElementById('lamp-codex').innerHTML, /lamp-connected/);
+  assert.match(ui.document.getElementById('lamp-codex').innerHTML, /lamp-ready/);
+  assert.doesNotMatch(ui.document.getElementById('lamp-codex').innerHTML, /设备验证失败|lamp-error/);
   ui.assertNoLaunch();
 });
 
