@@ -270,8 +270,10 @@ test('a restored browser page rereads instead of remaining on its suspended skel
 test('actual shell route advances its epoch even when closing the panel', async () => {
   const shell=await readFile(new URL('../internal/console/web/shell.js',import.meta.url),'utf8');const start=shell.indexOf('route = async function ()'),end=shell.indexOf('\nfunction goHome',start);
   const state={route:'usage',routeRevision:1};let disposed=0,closed=0;
+  const homeController=new AbortController();
   const modal={innerHTML:'previous dialog'};
-  const ctx=vm.createContext({route:null,S:state,location:{hash:''},PAGES:{},RENDER:{},$:selector=>selector==='#modalRoot'?modal:null,$$:()=>[],accountDailyDispose(){disposed++;},closePanel(){closed++;}});
+  const ctx=vm.createContext({route:null,S:state,HOME:{controller:homeController},location:{hash:''},PAGES:{},RENDER:{},$:selector=>selector==='#modalRoot'?modal:null,$$:()=>[],accountDailyDispose(){disposed++;},closePanel(){closed++;}});
+  vm.runInContext(shell.slice(shell.indexOf('function homeCancelLoad()'),shell.indexOf('async function homeLoadStats(')),ctx);
   vm.runInContext(shell.slice(start,end),ctx);await ctx.route();assert.equal(state.routeRevision,2);assert.equal(state.route,'home');assert.equal(disposed,1);assert.equal(closed,1);
-  assert.equal(modal.innerHTML,'');
+  assert.equal(modal.innerHTML,'');assert.equal(homeController.signal.aborted,true);assert.equal(ctx.HOME.controller,null);
 });

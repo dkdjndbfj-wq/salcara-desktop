@@ -200,21 +200,22 @@ async function open(h) { await h.context.ACTIONS.codexAPI(); await settle(); }
 async function edit(h, id = 'client-one') { await h.context.ACTIONS.codexAPIEdit({ dataset: { id } }); await settle(); }
 
 function installNavigation(h) {
-  const rendered = [], closes = [];
+  const rendered = [], closes = [], homeController = new AbortController();
   h.$('#modalRoot').insertAdjacentHTML('beforebegin', '<div id="view"></div><div id="headActions"></div><div id="pageIco"></div><div id="pageTitle"></div><div id="pageSub"></div>');
   Object.assign(h.context, {
     route() {}, location: { hash: '#accounts', pathname: '/', search: '' },
     history: { replaceState(_state, _title, url) { h.context.location.hash = url.includes('#') ? '#' + url.split('#')[1] : ''; } },
     $$: () => [], ROUTE_ICON: {}, PAGES: { accounts: {}, settings: {}, usage: {} },
     RENDER: Object.fromEntries(['accounts', 'settings', 'usage'].map(name => [name, async () => rendered.push(name)])),
-    openPanel() {}, closePanel() {}, pageSkeleton: () => '',
+    openPanel() {}, closePanel() {}, pageSkeleton: () => '', HOME: { controller: homeController },
     closeLocalEditor: options => { closes.push(options); return h.context.closeAPIManagement(); },
   });
   h.context.S.route = 'accounts';
   const start = shellSource.indexOf('route = async function () {');
   const end = shellSource.indexOf('/* ---------- loading:', start);
+  h.run(shellSource.slice(shellSource.indexOf('function homeCancelLoad()'), shellSource.indexOf('async function homeLoadStats(')));
   h.run(shellSource.slice(start, end));
-  return { rendered, closes };
+  return { rendered, closes, homeController };
 }
 
 test('back navigation protects client and settings drafts, cancel restores the current URL', async () => {
@@ -230,6 +231,8 @@ test('back navigation protects client and settings drafts, cancel restores the c
     assert.equal(h.context.location.hash, '#accounts'); assert.deepEqual(nav.rendered, []);
     assert.equal(h.run('apiManagementHasDraft()'), true);
     assert.equal(nav.closes[0].returnToService, false);
+    assert.equal(nav.homeController.signal.aborted, false);
+    assert.equal(h.context.HOME.controller, nav.homeController);
   }
 });
 
@@ -240,9 +243,11 @@ test('multiple navigation requests share one discard choice and only the latest 
   const notice = h.$('#apiUnsaved');
   h.context.location.hash = '#usage'; const latest = h.context.route(); await settle();
   assert.equal(h.$('#apiUnsaved'), notice);
+  assert.equal(nav.homeController.signal.aborted, false);
   await h.action('apiManagementDiscard'); await Promise.all([first, latest]);
   assert.deepEqual(nav.rendered, ['usage']); assert.equal(h.context.S.route, 'usage');
   assert.equal(h.context.location.hash, '#usage'); assert.equal(h.$('#officialPanel'), null);
+  assert.equal(nav.homeController.signal.aborted, true); assert.equal(h.context.HOME.controller, null);
 });
 
 test('service tabs retain settings drafts and closing offers inline stay or discard', async () => {

@@ -8,6 +8,7 @@ const shell = await readFile(new URL('../internal/console/web/shell.js', import.
 const appHandler = app.slice(app.indexOf("document.addEventListener('keydown', (e) => {"), app.indexOf('/* ---------------- live stream ---------------- */'));
 const shellStart = shell.indexOf("addEventListener('keydown', (e) => {", shell.indexOf('function goHome()'));
 const shellHandler = shell.slice(shellStart, shell.indexOf("addEventListener('popstate'", shellStart));
+const closeEditor = app.slice(app.indexOf('async function closeLocalEditor('), app.indexOf('function localValidateForm('));
 
 function fixture() {
   let documentKey, windowKey, closedPages = 0;
@@ -15,9 +16,9 @@ function fixture() {
   const context = vm.createContext({
     document: { addEventListener: (_name, handler) => { documentKey = handler; }, body: { classList: { contains: () => true } } },
     addEventListener: (_name, handler) => { windowKey = handler; },
-    $: () => modal, goHome: () => { closedPages++; }, setMenu() {}, ACTIONS: {},
+    $: selector => selector === '#modalRoot' ? modal : null, S: { localEditorDraft: null }, goHome: () => { closedPages++; }, setMenu() {}, ACTIONS: {},
   });
-  vm.runInContext(appHandler, context); vm.runInContext(shellHandler, context);
+  vm.runInContext(closeEditor, context); vm.runInContext(appHandler, context); vm.runInContext(shellHandler, context);
   return { modal, pages: () => closedPages, key(key) {
     let stopped = false, prevented = false;
     const event = { target: { id: 'apiClientName' }, key, preventDefault() { prevented = true; }, stopPropagation() { stopped = true; } };

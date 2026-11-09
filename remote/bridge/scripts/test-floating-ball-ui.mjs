@@ -52,6 +52,7 @@ async function harness(initial = {}) {
   host.onDragFinished = fn => { dragFinished = fn; };
   const document = {
     visibilityState: 'visible', querySelector: selector => nodes.get(selector), querySelectorAll: selector => selector === '#sats button' ? sats : [],
+    get hidden() { return this.visibilityState === 'hidden'; },
     addEventListener: documentEvents.addEventListener, elementFromPoint: () => point,
   };
   const ctx = vm.createContext({
@@ -59,7 +60,12 @@ async function harness(initial = {}) {
     screen: { availLeft: 0, availWidth: 1920 }, innerWidth: 400,
     addEventListener: globalEvents.addEventListener, requestAnimationFrame() {}, matchMedia: () => ({ matches: true }),
     setTimeout(fn, ms) { const id = nextTimer++; timers.set(id, { fn, ms }); return id; }, clearTimeout: id => timers.delete(id), setInterval() {},
-    EventSource: class { constructor() { eventSource = this; } addEventListener(name, fn) { this[name] = fn; } },
+    EventSource: class {
+      static CLOSED = 2;
+      constructor() { eventSource = this; this.readyState = 1; }
+      addEventListener(name, fn) { this[name] = fn; }
+      close() { this.readyState = 2; }
+    },
     fetch: async (url, init = {}) => {
       const parsed = new URL(url, 'http://127.0.0.1'); requests.push({ url: parsed, signal: init.signal });
       if (parsed.pathname === '/api/activity') return state.activityOverride ? state.activityOverride(init) : response(state.activity);
@@ -352,9 +358,12 @@ test('activity timeouts retain known approvals and a healthy stream cannot erase
   const h = await harness({ activity: { revision: 1, sessions: [], approvalIds: ['pending'] } });
   h.state.activityOverride = init => new Promise((resolve, reject) => init.signal.addEventListener('abort', () => reject(Error('timeout'))));
   const reading = h.ctx.refreshActivity(); await settle(); await h.timer(10000); await reading;
+  assert.equal(h.eval('STATE.approvals'), 1); assert.equal(h.eval('STATE.error'), false);
+  await h.timer(8000);
   assert.equal(h.eval('STATE.approvals'), 1); assert.equal(h.eval('STATE.error'), true);
   h.state.activityOverride = null; await h.ctx.refreshActivity(); assert.equal(h.eval('STATE.error'), false);
   h.state.override = () => response({ error: '用量接口暂时不可用' }, 503); await h.refresh();
+  assert.equal(h.eval('STATE.error'), false); await h.timer(8000);
   h.streamOpen(); await settle(); assert.equal(h.eval('STATE.error'), true);
   assert.equal(h.nodes.get('#bSub').textContent, '用量接口暂时不可用');
   h.state.override = null; await h.refresh(); assert.equal(h.eval('STATE.error'), false);

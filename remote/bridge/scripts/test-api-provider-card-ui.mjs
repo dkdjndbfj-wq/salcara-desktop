@@ -58,7 +58,7 @@ test('ordinary API card shows direct actions and only masked credentials', () =>
   assert.match(html, /加入 API 服务/);
   assert.doesNotMatch(html, /api-provider-meta|api-provider-wire|class="api-provider-service"|未加入 API 服务/);
   assert.match(html, /已保存模型<\/span><b>2<\/b><button[^>]+data-act="apiCardMembership"/);
-  for (const target of ['codex-desktop', 'codex', 'claude-desktop', 'claude']) {
+  for (const target of ['codex-desktop', 'codex', 'claude-desktop', 'claude', 'deepseek-harness', 'hermes']) {
     assert.match(html, new RegExp(`data-act="accountOpen" data-id="synthetic-api" data-target="${target}"`));
   }
   assert.doesNotMatch(html, /data-act="localLaunch"/);
@@ -161,26 +161,39 @@ test('official accounts retain their dedicated card renderer and selected-tool c
 
 test('launch row uses bundled tool artwork, CLI corner marks and full accessible names', () => {
   const h = harness(), html = h.context.accountLaunchButtonsHTML(fixture());
-  assert.equal((html.match(/<img /g) || []).length, 4);
+  assert.equal((html.match(/<img /g) || []).length, 6);
   assert.equal((html.match(/class="account-tool-cli"/g) || []).length, 2);
   for (const family of ['codex', 'claude']) assert.equal((html.match(new RegExp('agent-brand/' + family + '-app-official.png', 'g')) || []).length, 2);
-  for (const name of ['Codex', 'Codex CLI', 'Claude Code', 'Claude Desktop']) assert.match(html, new RegExp('aria-label="使用 主力 API 打开 ' + name + '"'));
+  for (const family of ['deepseek-harness', 'hermes']) assert.equal((html.match(new RegExp('agent-brand/' + family + '-app-official.png', 'g')) || []).length, 1);
+  for (const name of ['Codex', 'Codex CLI', 'Claude Code', 'Claude Desktop', 'DeepSeek Harness', 'Hermes Agent']) assert.match(html, new RegExp('aria-label="使用 主力 API 打开 ' + name + '"'));
   assert.doesNotMatch(html, /<span>Codex|<span>Claude/);
   const official = h.context.accountLaunchButtonsHTML({ ...fixture(), sourceType: 'official_account' });
   assert.equal((official.match(/<img /g) || []).length, 2);
-  assert.doesNotMatch(official, /claude-app/);
+  assert.doesNotMatch(official, /claude-app|deepseek-harness|hermes/);
 });
 
-test('local service shares icon helper but only offers its two Codex targets', async () => {
+test('local service names its two Codex targets and only enables ready service launches', async () => {
   const h = harness();
   const serviceSource = await readFile(new URL('../internal/console/web/codex-accounts.js', import.meta.url), 'utf8');
   const begin = serviceSource.indexOf('function localAPIServiceLaunchHTML(status) {');
   const finish = serviceSource.indexOf('\nfunction apiServiceLaunchCurrent(', begin);
-  vm.runInContext(`const API_SERVICE_TOOLS = {'codex-desktop':'Codex',codex:'Codex CLI'}; const CODEX_API_OVERVIEW = {};\n` + serviceSource.slice(begin, finish), h.context);
+  const tools = serviceSource.split('\n').find(line => line.startsWith('const API_SERVICE_TOOLS = '));
+  vm.runInContext(tools + '\nconst CODEX_API_OVERVIEW = {};\n' + serviceSource.slice(begin, finish), h.context);
   const html = h.context.localAPIServiceLaunchHTML({ running: true, clients: [{ disabled: false }] });
-  assert.equal((html.match(/<img /g) || []).length, 2);
-  assert.match(html, /aria-label="使用本地 API 服务打开 Codex CLI"/);
-  assert.doesNotMatch(html, /claude|<span>Codex/);
+  assert.equal((html.match(/data-act="codexAPIServiceOpen"/g) || []).length, 2);
+  assert.equal((html.match(/data-icon="external"/g) || []).length, 2);
+  assert.match(html, /aria-label="通过本地 API 服务打开工具"/);
+  for (const [target, name] of [['codex-desktop', 'Codex'], ['codex', 'Codex CLI']]) {
+    assert.match(html, new RegExp('data-target="' + target + '"[^>]*title="选择客户端并检查配置后打开"[^>]*>.*打开 ' + name + '<\\/button>'));
+  }
+  assert.doesNotMatch(html, /disabled|claude|deepseek|hermes/);
+  for (const status of [{ running: false, clients: [{}] }, { running: true, clients: [] }, { running: true, clients: [{ disabled: true }] }]) {
+    const blocked = h.context.localAPIServiceLaunchHTML(status);
+    assert.equal((blocked.match(/ disabled /g) || []).length, 2);
+    assert.equal((blocked.match(/title="请先配置客户端并启动本地服务"/g) || []).length, 2);
+  }
+  vm.runInContext('CODEX_API_OVERVIEW.error = true', h.context);
+  assert.equal((h.context.localAPIServiceLaunchHTML({ running: true, clients: [{}] }).match(/ disabled /g) || []).length, 2);
 });
 
 const revision = (letter = 'a') => 'src-v1-' + letter.repeat(64);

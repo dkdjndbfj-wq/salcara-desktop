@@ -8,6 +8,7 @@ const escape = app.slice(app.indexOf('const esc ='), app.indexOf('const ICONS ='
 const textRenderer = app.slice(app.indexOf('function renderText('), app.indexOf('function renderDiff('));
 const projection = app.slice(app.indexOf('function tlKey('), app.indexOf('const KIND_ICON ='));
 const timeline = app.slice(app.indexOf('const KIND_ICON ='), app.indexOf('function renderDetail('));
+const nativeSession = app.slice(app.indexOf('function canOpenNativeSession('), app.indexOf('async function openRestore('));
 const detail = app.slice(app.indexOf('function renderDetail('), app.indexOf('async function openSession('));
 const open = app.slice(app.indexOf('async function openSession('), app.indexOf('/* ----------------', app.indexOf('async function openSession(')));
 const stream = app.slice(app.indexOf('let bootApprovalChanges ='), app.indexOf('function boot()'));
@@ -23,7 +24,7 @@ function harness(tool = 'codex') {
     renderSessionList() {}, setApprovalBadge() {}, renderApprovalsBox() {}, setConn() {}, refreshWorkbenchStatus() {},
     api: async () => fixture, EventSource: class { addEventListener(name, callback) { listeners.set(name, callback); } },
   });
-  vm.runInContext([escape, textRenderer, projection, timeline, detail, open, stream].join('\n'), context);
+  vm.runInContext([escape, textRenderer, projection, timeline, nativeSession, detail, open, stream].join('\n'), context);
   return { context, state, fixture, nodes, live: event => listeners.get('event')({ data: JSON.stringify(event) }) };
 }
 
