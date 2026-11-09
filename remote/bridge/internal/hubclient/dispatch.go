@@ -89,6 +89,9 @@ func (c *Client) Dispatch(ctx context.Context, cmd map[string]any) (result any, 
 			return nil, err
 		}
 	}
+	if err := validateProjectlessFields(cmd); err != nil {
+		return nil, err
+	}
 	if handled, result, err := c.dispatchClaudeDesktopHistory(ctx, cmd); handled {
 		return result, err
 	}
@@ -184,6 +187,9 @@ func (c *Client) Dispatch(ctx context.Context, cmd map[string]any) (result any, 
 		if accountErr != nil {
 			return nil, accountErr
 		}
+	}
+	if err := c.validateManagedSession(ctx, cfg, str(cmd, "sessionKey")); err != nil {
+		return nil, err
 	}
 	finish, replayed, previous, ledgerErr := c.beginDurableExecution(ctx, cfg, cmd)
 	if ledgerErr != nil || replayed {
@@ -488,7 +494,11 @@ func (c *Client) Dispatch(ctx context.Context, cmd map[string]any) (result any, 
 	case "features.list":
 		return c.dispatchFeatures(ctx, m, cfg, cmd)
 	case "sessions.list":
-		return dispatchSessionsPage(ctx, m, cmd)
+		page, err := dispatchSessionsPage(ctx, m, cmd)
+		if err == nil {
+			page = c.projectProjectlessResult(ctx, page)
+		}
+		return page, err
 
 	case "desktop.navigate":
 		key := str(cmd, "sessionKey")
@@ -532,6 +542,7 @@ func (c *Client) Dispatch(ctx context.Context, cmd map[string]any) (result any, 
 		ticket := c.beginSideQuestionHistory(str(cmd, "sessionKey"))
 		result, err := dispatchHistoryPageWithAttachments(ctx, m, cmd, attachments)
 		if err == nil {
+			result = c.projectProjectlessResult(ctx, result)
 			c.rememberSideQuestionHistory(ctx, cfg, cmd, result, ticket)
 		}
 		return result, err
@@ -573,14 +584,24 @@ func (c *Client) Dispatch(ctx context.Context, cmd map[string]any) (result any, 
 			return nil, errors.New("无效的推理强度")
 		}
 		// A saved project needs no history lookup or startup of unrelated tools.
-		cwd, err := CheckCwd(str(cmd, "cwd"), cfg.Projects)
-		if errors.Is(err, ErrNotAllowed) {
-			cwd, err = CheckCwd(str(cmd, "cwd"), allowedProjects(ctx, m, cfg.Projects))
+		projectless := cmd["projectless"] == true
+		cwd := ""
+		if !projectless {
+			if c.isManagedCwd(str(cmd, "cwd")) {
+				return nil, ErrNotAllowed
+			}
+			cwd, err = CheckCwd(str(cmd, "cwd"), cfg.Projects)
+			if errors.Is(err, ErrNotAllowed) {
+				cwd, err = CheckCwd(str(cmd, "cwd"), allowedProjects(ctx, m, cfg.Projects))
+			}
+			if err != nil {
+				return nil, err
+			}
+			if c.isManagedCwd(cwd) {
+				return nil, ErrNotAllowed
+			}
 		}
-		if err != nil {
-			return nil, err
-		}
-		if workspaceGuardedAgent(a) {
+		if !projectless && workspaceGuardedAgent(a) {
 			if err := c.checkWorkspaceAdmission(ctx, m, cwd, ""); err != nil {
 				return nil, err
 			}
@@ -643,6 +664,22 @@ func (c *Client) Dispatch(ctx context.Context, cmd map[string]any) (result any, 
 		if err := validateModelImages(ctx, cfg, a, model, "", len(images)); err != nil {
 			return nil, err
 		}
+		managedKey := ""
+		if projectless {
+			var accepted string
+			cwd, managedKey, accepted, err = c.prepareProjectless(ctx, cmd)
+			if err != nil {
+				return nil, err
+			}
+			if accepted != "" {
+				return map[string]any{"sessionKey": accepted}, nil
+			}
+			if workspaceGuardedAgent(a) {
+				if err := c.checkWorkspaceAdmission(ctx, m, cwd, ""); err != nil {
+					return nil, err
+				}
+			}
+		}
 		var id string
 		opts := agents.TurnOptions{WorkspaceMode: workspaceMode, CollaborationMode: featureOpts.CollaborationMode, Skills: featureOpts.Skills, ContextReferences: featureOpts.ContextReferences, PermissionMode: permissionMode, Model: model, Effort: effort, Images: images, Attachments: attachments.refs(attachmentIDs),
 			Desktop: a.ID() == "claude" && str(cmd, "entrypoint") == "claude-desktop"}
@@ -657,14 +694,21 @@ func (c *Client) Dispatch(ctx context.Context, cmd map[string]any) (result any, 
 		}
 		finishWorkspaceStart := c.beginWorkspaceStart()
 		defer finishWorkspaceStart("", "")
+		if projectless {
+			if err := c.markProjectlessStarting(ctx, managedKey); err != nil {
+				return nil, err
+			}
+		}
 		if starter, ok := a.(turnOptionsStarter); ok {
 			id, err = starter.StartWithOptions(ctx, cwd, prompt, approval, opts)
 		} else {
 			id, err = a.Start(ctx, cwd, prompt, model, approval)
 		}
 		if err != nil {
-			if id != "" { // A native thread already exists; a new UUID can duplicate it.
-				finishWorkspaceStart(a.ID()+":"+id, cwd)
+			if id != "" || projectless { // A native thread may exist; a new UUID can duplicate it.
+				if id != "" {
+					finishWorkspaceStart(a.ID()+":"+id, cwd)
+				}
 				return nil, newTaskUncertainError{}
 			}
 			return nil, err
@@ -673,6 +717,11 @@ func (c *Client) Dispatch(ctx context.Context, cmd map[string]any) (result any, 
 		finishWorkspaceStart(sessionKey, cwd)
 		if !agents.SessionBelongsTo(a, sessionKey, protocol.SessionInfo{SessionKey: sessionKey}) {
 			return nil, newTaskUncertainError{}
+		}
+		if projectless {
+			if err := c.bindProjectless(managedKey, sessionKey); err != nil {
+				return nil, newTaskUncertainError{}
+			}
 		}
 		if modes, ok := m.(interface {
 			RememberWorkspaceMode(string, protocol.WorkspaceMode) error
@@ -683,6 +732,9 @@ func (c *Client) Dispatch(ctx context.Context, cmd map[string]any) (result any, 
 			}
 		}
 		if err := attachments.bind(attachmentIDs, sessionKey); err != nil {
+			return nil, newTaskUncertainError{}
+		}
+		if projectless && !c.projectlessStillOwned(ctx, managedKey) {
 			return nil, newTaskUncertainError{}
 		}
 		return map[string]any{"sessionKey": sessionKey}, nil
@@ -997,6 +1049,13 @@ func (c *Client) Dispatch(ctx context.Context, cmd map[string]any) (result any, 
 		} else {
 			p = append(p, cfg.Projects...)
 		}
+		visible := p[:0]
+		for _, project := range p {
+			if !c.isManagedCwd(project.Path) {
+				visible = append(visible, project)
+			}
+		}
+		p = visible
 		if p == nil {
 			p = []protocol.Project{}
 		}

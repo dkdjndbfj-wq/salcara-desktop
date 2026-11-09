@@ -133,7 +133,7 @@ func (c *Client) previewScope(ctx context.Context, cmd map[string]any) (workspac
 		return zero, err
 	}
 	cfg := c.o.Store.Get()
-	root, err := workspaceConfiguredRoot(cfg, cwd)
+	root, err := c.workspaceSessionRoot(ctx, cfg, key, surface, cwd)
 	if err != nil {
 		return zero, err
 	}
@@ -689,7 +689,7 @@ func (c *Client) watchWorkspacePreview(p *workspacePreview) {
 		if c.o.Store != nil {
 			cfg := c.o.Store.Get()
 			expired = expired || config.RemoteIdentity(cfg) != p.scope.identity || cfg.DeviceID != p.scope.device || cfg.PhoneBindingID != p.scope.binding || cfg.PhoneHash != p.scope.phone
-			if root, err := workspaceConfiguredRoot(cfg, p.scope.root); err != nil || !workspaceSamePath(root, p.scope.root) {
+			if root, err := c.workspaceRetainedRoot(cfg, p.scope.key, p.scope.surface, p.scope.root); err != nil || !workspaceSamePath(root, p.scope.root) {
 				expired = true
 			}
 		}

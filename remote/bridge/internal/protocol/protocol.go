@@ -43,6 +43,7 @@ type SessionInfo struct {
 	Title              string `json:"title"`
 	Archived           bool   `json:"archived,omitempty"`
 	Cwd                string `json:"cwd"`
+	Projectless        bool   `json:"projectless,omitempty"` // Bridge-owned independent workspace; never a cwd authorization
 	UpdatedAt          int64  `json:"updatedAt"`
 	Status             string `json:"status"` // running | idle | waiting_approval | failed | unknown
 	Controllable       bool   `json:"controllable"`

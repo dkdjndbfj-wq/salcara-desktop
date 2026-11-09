@@ -654,6 +654,9 @@ func isLoopback(remote string) bool {
 
 // Broadcast forwards an agent event to every open console page and tracks pending approvals.
 func (s *Server) Broadcast(ev protocol.Event) {
+	if s.d.Hub != nil {
+		ev = s.d.Hub.ProjectSessionEvent(ev)
+	}
 	s.backgroundMu.Lock()
 	watchdog := s.watchdog
 	s.backgroundMu.Unlock()

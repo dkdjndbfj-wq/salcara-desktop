@@ -156,7 +156,7 @@ func (c *Client) dispatchWorkspaceFiles(ctx context.Context, cmd map[string]any)
 	if !workspaceExpectedCwdMatches(expectedCwd, cwd) {
 		return nil, errWorkspaceChanged
 	}
-	rootPath, err := workspaceConfiguredRoot(cfg, cwd)
+	rootPath, err := c.workspaceSessionRoot(ctx, cfg, key, surface, cwd)
 	if err != nil {
 		return nil, err
 	}
@@ -197,7 +197,7 @@ func (c *Client) dispatchWorkspaceFiles(ctx context.Context, cmd map[string]any)
 		return nil, err
 	}
 	current := c.o.Store.Get()
-	currentRoot, err := workspaceConfiguredRoot(current, currentCwd)
+	currentRoot, err := c.workspaceSessionRoot(ctx, current, key, surface, currentCwd)
 	if err != nil || !workspaceSamePath(currentRoot, scope.root) || config.RemoteIdentity(current) != scope.identity || current.DeviceID != scope.device || current.PhoneBindingID != scope.binding || current.PhoneHash != scope.phone || ctx.Err() != nil {
 		return nil, errWorkspaceChanged
 	}

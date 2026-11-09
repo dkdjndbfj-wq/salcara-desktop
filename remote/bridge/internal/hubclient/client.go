@@ -124,6 +124,10 @@ type Client struct {
 	taskConfigMu             sync.Mutex // serialize phone task admission with API changes
 	sourceGrantMu            sync.Mutex // one acquisition at a time; never holds taskConfigMu across network
 	workspaceFilesMu         sync.Mutex // bounded, on-demand project file operations
+	projectlessMu            sync.Mutex
+	projectlessLoaded        bool
+	projectlessErr           error
+	projectlessRecords       map[string]projectlessRecord
 	terminalMu               sync.Mutex
 	terminals                map[string]*workspaceTerminal
 	previewMu                sync.Mutex
@@ -756,7 +760,7 @@ func (c *Client) Device(ctx context.Context) protocol.Device {
 		d.Capabilities = append(d.Capabilities, "durable.execution.v1", "durable.events.v1", "attachment.blobs.v1")
 	}
 	if runtime.GOOS == "windows" || runtime.GOOS == "linux" {
-		d.Capabilities = append(d.Capabilities, "workspace.projects.v1", "workspace.files.v1", "workspace.project.files.v1", "workspace.files.write.v1", "workspace.files.manage.v1", "workspace.terminal.v1", "workspace.artifacts.v1", "workspace.artifacts.write.v1", "workspace.project.preview.v1")
+		d.Capabilities = append(d.Capabilities, "session.projectless.v1", "workspace.projects.v1", "workspace.files.v1", "workspace.project.files.v1", "workspace.files.write.v1", "workspace.files.manage.v1", "workspace.terminal.v1", "workspace.artifacts.v1", "workspace.artifacts.write.v1", "workspace.project.preview.v1")
 		if _, err := exec.LookPath("git"); err == nil {
 			d.Capabilities = append(d.Capabilities, "workspace.git.v1", "workspace.git.review.v1", "workspace.git.repositories.v1")
 		}
@@ -1129,6 +1133,7 @@ func (c *Client) executeFor(env protocol.CommandEnvelope, cfg config.Config) {
 // Push queues an event for upload. Overflow drops oldest unsent events, keeps
 // the immutable in-flight prefix, and schedules bounded history-gap notices.
 func (c *Client) Push(ev protocol.Event) {
+	ev = c.ProjectSessionEvent(ev)
 	originalConfig := c.o.Store.Get()
 	originalScope := c.eventScopeFor(originalConfig)
 	c.observeWorkspaceEvent(ev)

@@ -184,12 +184,18 @@ func (c *Client) dispatchFeatures(ctx context.Context, m agents.Manager, cfg con
 		}
 		cwd = info.Cwd
 	} else {
+		if c.isManagedCwd(str(cmd, "cwd")) {
+			return empty, ErrNotAllowed
+		}
 		cwd, err = CheckCwd(str(cmd, "cwd"), cfg.Projects)
 		if errors.Is(err, ErrNotAllowed) {
 			cwd, err = CheckCwd(str(cmd, "cwd"), allowedProjects(ctx, m, cfg.Projects))
 		}
 		if err != nil {
 			return empty, err
+		}
+		if c.isManagedCwd(cwd) {
+			return empty, ErrNotAllowed
 		}
 	}
 	key := featureCatalogScope(ctx, cfg, a, str(cmd, "accountId"), cwd, id)

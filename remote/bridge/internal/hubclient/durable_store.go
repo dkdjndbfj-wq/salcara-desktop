@@ -214,6 +214,47 @@ func (d *durableStore) claim(scope, id, digest, source string) (bool, any, error
 	return false, nil, err
 }
 
+// completeKnownClaim repairs only an already-claimed exact operation after a
+// separate native-history proof. Neither an absent row nor changed payload or
+// source can be inserted, reset or executed through this path.
+func (d *durableStore) completeKnownClaim(scope, id, digest, source string, result any) (bool, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	db, err := d.database()
+	if err != nil {
+		return false, err
+	}
+	defer db.Close()
+	var oldDigest, oldSource, status string
+	if err = db.QueryRow("SELECT digest,source,status FROM operations WHERE scope=? AND id=?", scope, id).Scan(&oldDigest, &oldSource, &status); err != nil {
+		return false, err
+	}
+	if oldDigest != digest || oldSource != source || status != "claimed" && status != "uncertain" {
+		return false, nil
+	}
+	plain, err := json.Marshal(result)
+	if err != nil || len(plain) > 1024 {
+		return false, errors.New("恢复回执无效")
+	}
+	payload, err := d.seal(plain, scope+":"+id)
+	if err != nil {
+		return false, err
+	}
+	var retained int64
+	if err = db.QueryRow("SELECT COALESCE(sum(length(payload)),0) FROM operations").Scan(&retained); err != nil {
+		return false, err
+	}
+	if retained+int64(len(payload)) > 32<<20 {
+		return false, errors.New("执行回执存储已满")
+	}
+	updated, err := db.Exec("UPDATE operations SET status='complete',payload=?,updated=? WHERE scope=? AND id=? AND digest=? AND source=? AND status IN ('claimed','uncertain')", payload, time.Now().Unix(), scope, id, digest, source)
+	if err != nil {
+		return false, err
+	}
+	count, err := updated.RowsAffected()
+	return count == 1, err
+}
+
 func (d *durableStore) finish(scope, id string, result any, runErr error) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()

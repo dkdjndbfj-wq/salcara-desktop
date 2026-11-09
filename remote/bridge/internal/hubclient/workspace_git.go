@@ -293,7 +293,7 @@ func (c *Client) dispatchWorkspaceGit(ctx context.Context, cmd map[string]any) (
 		return nil, err
 	}
 	cfg := c.o.Store.Get()
-	root, err := workspaceConfiguredRoot(cfg, cwd)
+	root, err := c.workspaceSessionRoot(ctx, cfg, key, surface, cwd)
 	if err != nil {
 		return nil, err
 	}
@@ -317,7 +317,7 @@ func (c *Client) dispatchWorkspaceGit(ctx context.Context, cmd map[string]any) (
 			return errWorkspaceChanged
 		}
 		current := c.o.Store.Get()
-		currentRoot, e := workspaceConfiguredRoot(current, currentCwd)
+		currentRoot, e := c.workspaceSessionRoot(ctx, current, key, surface, currentCwd)
 		if e != nil || !workspaceSamePath(currentRoot, workspaceRoot) || config.RemoteIdentity(current) != config.RemoteIdentity(cfg) || current.DeviceID != cfg.DeviceID || current.PhoneBindingID != cfg.PhoneBindingID || current.PhoneHash != cfg.PhoneHash {
 			return errWorkspaceChanged
 		}

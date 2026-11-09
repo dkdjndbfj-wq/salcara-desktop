@@ -87,6 +87,17 @@ func (c *Client) beginDurableExecution(ctx context.Context, cfg config.Config, c
 
 	scope = durableHash(scope)
 	replayed, result, err := c.durable.claim(scope, id, durableHash(cmd), source)
+	if err != nil && replayed && cmd["projectless"] == true {
+		// A verified native acceptance may repair this exact crashed claim; it
+		// never authorizes another execution. The SQL update rechecks both the
+		// immutable payload and source because claim intentionally uses the same
+		// uncertain error for a crash and for a fingerprint mismatch.
+		if known, ok := c.knownProjectlessReceipt(ctx, cmd); ok {
+			if repaired, repairErr := c.durable.completeKnownClaim(scope, id, durableHash(cmd), source, known); repairErr == nil && repaired {
+				return nil, true, known, nil
+			}
+		}
+	}
 	if err != nil || replayed {
 		return nil, replayed, result, err
 	}

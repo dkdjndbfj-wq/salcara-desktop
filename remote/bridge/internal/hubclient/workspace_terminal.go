@@ -105,7 +105,7 @@ func (c *Client) dispatchWorkspaceTerminal(ctx context.Context, cmd map[string]a
 		return nil, err
 	}
 	cfg := c.o.Store.Get()
-	root, err := workspaceConfiguredRoot(cfg, cwd)
+	root, err := c.workspaceSessionRoot(ctx, cfg, key, surface, cwd)
 	if err != nil {
 		return nil, errTerminalScope
 	}
@@ -366,7 +366,7 @@ func (c *Client) watchTerminal(t *workspaceTerminal) {
 			t.mu.Lock()
 			idle := time.Since(t.lastTouch) > 90*time.Second
 			t.mu.Unlock()
-			root, err := workspaceConfiguredRoot(cfg, t.scope.root)
+			root, err := c.workspaceRetainedRoot(cfg, t.scope.key, t.scope.surface, t.scope.root)
 			info, statErr := os.Lstat(root)
 			invalid := idle || err != nil || statErr != nil || !os.SameFile(info, t.rootInfo) || config.RemoteIdentity(cfg) != t.scope.identity || cfg.DeviceID != t.scope.device || cfg.PhoneBindingID != t.scope.binding || cfg.PhoneHash != t.scope.phone || t.scope.phone != "" && !c.canUpload(cfg)
 			if !invalid {
