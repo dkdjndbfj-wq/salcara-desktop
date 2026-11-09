@@ -353,10 +353,7 @@ function renderRemoteStationPanel(view, st, c, linked, connected, station, qrLiv
       <ol class="rm-steps"><li>手机打开 Salcara →「编程」→「我的电脑」</li><li>点「绑定新电脑」扫码</li><li>确认 Agent</li><li class="rm-tip">二维码 5 分钟有效，只能用一次</li></ol>
     </div>
   </section>` : ''}
-  <section class="rm-sec"><div class="rm-sec-head"><h3>项目文件夹</h3><span class="rm-sub">手机可以在这里新建对话</span></div>
-    <div class="rm-projects">${(c.projects || []).map((p) => `<div class="rm-project">${icon('folder')}<div class="rm-grow"><div>${esc(p.name)}</div><div class="path">${esc(p.path)}</div></div><button class="rm-link" data-act="rmProj" data-path="${esc(p.path)}">移除</button></div>`).join('')}</div>
-    <div class="rm-add"><input class="input" id="projPath" placeholder="${st.os === 'windows' ? 'C:\\code\\my-app' : esc((st.home || '~') + '/code/my-app')}"><button class="btn" data-act="browse">浏览…</button><button class="btn primary" data-act="addProj">添加</button></div>
-  </section><div id="rmLive"></div><p class="rm-note">API Key 始终留在这台电脑上，中转站只转发对话。</p>`;
+  <div id="rmLive"></div><p class="rm-note">API Key 始终留在这台电脑上，中转站只转发对话。</p>`;
 }
 
 function renderRemoteLoginPage(view, st) {
@@ -1067,7 +1064,7 @@ function renderDetail(scroll) {
 function cxRenderNew(el) {
   el.innerHTML = `<div class="cx-head"><div style="flex:1"><div class="title">新对话</div><div class="meta">${AGENT_INFO[RM.tool].name} 会在电脑上的项目里工作</div></div></div>
     <div class="cx-thread"><div class="cx-empty"><div class="rm-hero-icon" style="margin:0 auto">${icon('code')}</div><h3>要构建什么？</h3>
-      <select class="input" id="cxProject" style="max-width:420px;margin:10px auto 0">${RM.projects.map((p) => `<option value="${esc(p.path)}">${esc(p.name || projectOf(p.path))} — ${esc(p.path)}</option>`).join('') || '<option value="">先在「手机远程」添加项目文件夹</option>'}</select><div id="cxFeatureMount">${featureInputs(RM.newFeatures)}</div></div></div>
+      <select class="input" id="cxProject" style="max-width:420px;margin:10px auto 0">${RM.projects.map((p) => `<option value="${esc(p.path)}">${esc(p.name || projectOf(p.path))} — ${esc(p.path)}</option>`).join('') || '<option value="">先在「设置 → 远程目录授权」允许目录</option>'}</select><div id="cxFeatureMount">${featureInputs(RM.newFeatures)}</div></div></div>
     <div class="cx-composer-wrap"><div class="cx-composer"><textarea id="cxPrompt" rows="3" placeholder="描述要做的事（${OSX() === 'darwin' ? '⌘' : 'Ctrl+'}Enter 发送）">${esc(RM.newPrompt)}</textarea>
       <div class="cx-bar"><select class="cx-chip" id="cxMode"><option value="ask">每一步都问我</option>${RM.tool === 'hermes' ? '' : '<option value="auto_edits">自动改文件</option>'}<option value="auto_all">全部自动</option></select><span class="grow"></span>
       <button class="cx-send" data-act="cxStart" title="开始">${icon('arrowUp')}</button></div></div></div>`;
