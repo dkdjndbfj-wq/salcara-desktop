@@ -208,6 +208,7 @@ test('launch rereads and manual-refresh failures cannot change a later visit to 
 test('ordinary and official cards share escaped identity markers and retain direct launch controls', () => {
   const f = fixture();
   Object.assign(f.context, { officialAPIServiceSummary: () => ({ action: '加入 API 服务' }), officialCardAction: () => '', officialStatusTone: () => 'ok', officialPlanBadge: () => '', officialAccountStatusLabel: () => '已登录', officialQuotaHTML: () => '', officialUsageDetails: () => '', officialSubscriptionCardHTML: () => '', officialUpdatedHTML: () => '', officialResetCreditButton: () => '' });
+  vm.runInContext(section(app, 'function localHubKey(', 'function localForm('), f.context);
   vm.runInContext(section(app, 'function accountLaunchToolIcon(', '\nfunction renderLocalCards()') + '\n' + section(official, 'function officialAccountCard(', '\nasync function reconcileClosedOfficialLogin('), f.context);
   const normal = f.context.localAccountCard(f.a); assert.match(normal, /data-account-active="a"/); assert.match(normal, /data-act="accountOpen"/);
   const protectedRow = { ...f.b, officialAccount: { id: 'vault_b', identityEpoch: 3, status: 'ready' } };

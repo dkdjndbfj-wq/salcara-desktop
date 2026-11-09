@@ -377,7 +377,7 @@ RENDER_overview = async function (view) {
   $('#headActions').innerHTML = `<button class="btn" data-act="refresh">${icon('refresh')}重新检测</button><a class="btn primary" href="#accounts">${icon('key')}API 密钥库</a>`;
 
   view.innerHTML = `
-  <div class="callout">${ico('info')}<div>先在密钥库保存 API，再在下面的工具卡片里选择并重启。沿用原工具的数据目录，不新建空实例。<br><span class="small muted">已保存 ${local.accounts.length} 个 API · 本地使用无需登录远程服务。切换前请结束任务并保存内容；Codex 桌面版与 CLI 共用原凭据。</span></div></div>
+  <div class="callout">${ico('info')}<div>先在密钥库保存 API，再在下面的工具卡片里选择并重启。沿用原工具的数据目录，不新建空实例。<br><span class="small muted">已保存 ${local.accounts.length} 个 API · 本地使用无需登录远程服务。应用前会停止受 Bridge 管理的当前任务；无法确认退出时不会修改配置。Codex 桌面版与 CLI 共用原凭据。</span></div></div>
   <div id="approvalsBox"></div>
   <div class="agent-grid" id="agentToolList"></div>
   <div class="card"><div class="row"><div class="folder-ico">${icon('chat')}</div>
@@ -477,7 +477,7 @@ function agentCard(t) {
     <div class="agent-applied" id="agentApplied-${esc(t.id)}">${!autoApply ? '<span class="chip warn">自动应用暂不可用</span>' : binding.pending ? `<span class="chip warn">${a ? '选择已保存，等待应用' : '未选择 API'}</span>${applied ? `<span class="muted small">当前应用：${esc(applied.name)}</span>` : ''}` : `<span class="chip ok">已应用 ${esc(applied?.name || '')}</span>`}</div>
     <div class="agent-actions"><button class="btn primary" data-act="toolRestart" data-target="${esc(t.id)}" ${autoApply && a && binding.model && t.available ? '' : 'disabled'}>${icon('refresh')}${autoApply ? '应用并重启' : '自动应用暂不可用'}</button>${a ? `<button class="icon-btn" data-act="localEdit" data-id="${esc(a.id)}" title="编辑这个密钥" aria-label="编辑这个密钥">${icon('edit')}</button>` : '<button class="btn sm" data-act="localNew">添加密钥</button>'}</div>
     <p class="agent-note muted small" id="remoteDetail-${esc(t.id)}">${esc(agentLocalStatus(t).detail || '')}</p>
-    ${!autoApply ? `<p class="agent-note small">${esc(claudeDesktopApplyNote())}</p><p class="agent-note small">CLI 恢复会话仅支持本地 Code 记录，使用 Claude Code 卡片已应用的 API 并通过 Claude Code 终端打开；普通云端聊天仍在原桌面应用里查看，不能通过 Bridge 遥控。</p>` : desktop ? '<p class="agent-note muted small">重启原桌面应用保留本地历史；指定旧会话的恢复通过原 CLI 打开。</p>' : '<p class="agent-note muted small">打开原终端会话列表；不会关闭其他终端，请先手动结束旧任务。</p>'}
+    ${!autoApply ? `<p class="agent-note small">${esc(claudeDesktopApplyNote())}</p><p class="agent-note small">CLI 恢复会话仅支持本地 Code 记录，使用 Claude Code 卡片已应用的 API 并通过 Claude Code 终端打开；普通云端聊天仍在原桌面应用里查看，不能通过 Bridge 遥控。</p>` : desktop ? '<p class="agent-note muted small">重启原桌面应用保留本地历史；指定旧会话的恢复通过原 CLI 打开。</p>' : '<p class="agent-note muted small">直接打开原工具；应用前会停止受 Bridge 管理的当前任务，无法确认退出时不会修改配置。</p>'}
   </article>`;
 }
 
@@ -802,7 +802,7 @@ function localEditorDraftSync() {
 async function closeLocalEditor(options = {}) {
   if (typeof apiManagementActive === 'function' && apiManagementActive()) return closeAPIManagement();
   const draft = S.localEditorDraft, input = $('#laID');
-  if (!draft || draft.input !== input) { $('#modalRoot').innerHTML = ''; S.localEditorDraft = null; return true; }
+  if (!draft || draft.input !== input) { if (typeof WB !== 'undefined') WB.cancelPending?.(); $('#modalRoot').innerHTML = ''; S.localEditorDraft = null; return true; }
   // A route change may join an already pending discard confirmation. It must
   // suppress the service return callback for that shared close operation too.
   if (options.returnToService === false) draft.leavePage = true;
@@ -814,6 +814,7 @@ async function closeLocalEditor(options = {}) {
         if (!await confirm('关闭正在保存的 API 配置？保存已经提交，关闭不会撤销本次保存。')) return false;
       } else if (JSON.stringify(localForm()) !== draft.initial && !await confirm('放弃未保存的 API 配置？本次修改不会保存。')) return false;
       if (S.localEditorDraft !== draft || $('#laID') !== input) return false;
+      if (typeof WB !== 'undefined') WB.cancelPending?.();
       $('#modalRoot').innerHTML = '';
       S.localEditorDraft = null;
       if (draft.onReturn && !draft.leavePage) await draft.onReturn();
@@ -1840,24 +1841,16 @@ const ACTIONS = {
     await busy(b, async () => { const r = await api('/api/pair/revoke', {}); S.pairQR = ''; S.pairExpires = 0; toast(r.message, 'ok'); await route(); });
   },
   toolRestart: async (b) => {
-    if (b.dataset.target === 'claude-desktop') throw new Error('自动应用暂不可用。' + claudeDesktopApplyNote());
+    if (b?.isConnected === false || typeof wbOpenAccount !== 'function') throw new Error('请刷新后从 Agent 卡片打开');
     const form = toolForm(b.dataset.target);
-    if (!form.id || !form.model) throw new Error('请先选择 API 和模型');
-    await api('/api/local/bind', form);
-    S.local = await api('/api/local/accounts');
-    b.dataset.id = form.id;
-    await ACTIONS.localSwitch(b);
+    if (!form.id) throw new Error('请先选择 API');
+    await wbOpenAccount(form.target, form.id, b);
   },
   toolReadModels: async (b) => {
-    await busy(b, async () => {
-      const form = toolForm(b.dataset.target);
-      if (!form.id) throw new Error('请先选择 API');
-      await api('/api/local/bind', form);
-      const r = await api('/api/local/models', { id: form.id });
-      S.local = await api('/api/local/accounts');
-      renderAgentCards();
-      toast(`已读取 ${r.models.length} 个模型，请在这张卡片的模型输入框选择`, 'ok');
-    });
+    const form = toolForm(b.dataset.target);
+    if (!form.id) throw new Error('请先选择 API');
+    if (typeof wbOpenAccount !== 'function') throw new Error('请刷新后从 Agent 卡片读取模型');
+    await wbOpenAccount(form.target, form.id, b);
   },
   toolRestore: async (b) => {
     if (b?.isConnected === false || !await ensureLocalAccounts(b)) return;
@@ -2004,74 +1997,17 @@ const ACTIONS = {
     toast('已从账号列表移除', 'ok'); await route();
   },
   localLaunch: async (b) => {
-    if (b?.isConnected === false || (typeof WB !== 'undefined' && WB.launchPending)) return;
-    const independentOk = confirm('这是高级“独立多开”：会打开一个独立的新实例，不显示原工具的历史。如果只是换 Key 继续原工作，请取消并使用“切换并打开”。确定新建独立实例？');
-    if (!(independentOk instanceof Promise ? await independentOk : independentOk)) return;
+    if (b?.isConnected === false || typeof wbOpenAccount !== 'function') throw new Error('请刷新后从 Agent 卡片打开');
     const target = b.dataset.target || document.getElementById('localTarget-' + b.dataset.id)?.value;
-    const progress = typeof beginLaunchProgress === 'function' ? beginLaunchProgress(target, '独立实例', ['提交启动请求']) : null;
-    const owner = $('#view'), route = S.route;
-    if (typeof WB !== 'undefined') WB.launchPending = true;
-    try {
-    await busy(b, async () => {
-      const r = await (typeof launchAPI === 'function' ? launchAPI : ((path, body) => api(path, body)))('/api/local/launch', { id: b.dataset.id, target }, progress);
-      if (r?.ok !== true) throw new Error('启动结果尚未确认');
-      progress?.finish();
-      if (b.isConnected === false || S.route !== route || $('#view') !== owner) return;
-      toast('已启动 ' + (TOOL_LABEL[target] || (target === 'codex-desktop' ? 'Codex Desktop' : target)), 'ok');
-      const hint = $('#localLaunchResult');
-      if (hint) hint.remove();
-      const note = document.createElement('div'); note.id = 'localLaunchResult'; note.className = 'callout ok';
-      note.textContent = r.result.message + ' 实例目录：' + r.result.profileDir;
-      $('#view').prepend(note);
-      if (S.local) { const a = S.local.accounts.find((a) => a.id === b.dataset.id); if (a) { a.target = target; a.lastUsedAt = Date.now(); } }
-    });
-    } catch (error) {
-      progress?.fail(error);
-      if (b.isConnected !== false && S.route === route && $('#view') === owner) throw error;
-    }
-    finally { if (typeof WB !== 'undefined') WB.launchPending = false; }
+    await wbOpenAccount(target, b.dataset.id, b);
   },
   localSwitch: async (b) => {
-    await busy(b, async () => {
-      const target = b.dataset.target || document.getElementById('localTarget-' + b.dataset.id)?.value;
-      const r = await api('/api/local/switch/preview', { id: b.dataset.id, target });
-      const a = { ...S.local.accounts.find((x) => x.id === b.dataset.id), model: r.info.model };
-      $('#modalRoot').innerHTML = `<div class="modal-back" data-act="closeModal"><div class="modal account-modal" data-stop role="dialog" aria-modal="true" aria-labelledby="switchTitle"><div class="modal-head"><h3 id="switchTitle">切换原来的 ${esc(r.info.name)}</h3><button class="icon-btn" data-act="closeModal" aria-label="关闭">✕</button></div><div class="modal-body"><p>切换到 <b>${esc(a.name)}</b> · ${esc(a.model)}</p><div class="callout">${ico('info')}<div>${esc(r.info.message)}</div></div><p class="muted small">原配置 / 会话目录</p><code class="path-help">${esc(r.info.profileDir)}</code>${r.info.appData ? `<p class="muted small">原桌面数据目录（不更换）</p><code class="path-help">${esc(r.info.appData)}</code>` : ''}${r.info.provider ? `<p class="muted small">保留 Codex 供应商标识：${esc(r.info.provider)}</p>` : ''}<p class="muted small">云端专属内容仍取决于原账户权限；切换不会把云端数据迁移到新 Key。</p><label class="row"><input type="checkbox" id="switchReady">我已结束正在执行的任务，保存了编辑内容${target.endsWith('-desktop') ? '' : '，并退出旧终端进程'}</label><div id="switchError" aria-live="polite"></div></div><div class="modal-foot"><button class="btn" data-act="closeModal">取消</button><button class="btn primary" data-act="localSwitchConfirm" data-id="${esc(a.id)}" data-target="${esc(target)}">${icon('refresh')}确认切换并打开</button></div></div></div>`;
-    });
+    if (b?.isConnected === false || typeof wbOpenAccount !== 'function') throw new Error('请刷新后从 Agent 卡片打开');
+    const target = b.dataset.target || document.getElementById('localTarget-' + b.dataset.id)?.value;
+    await wbOpenAccount(target, b.dataset.id, b);
   },
-  localSwitchConfirm: async (b) => {
-    if (b?.isConnected === false || (typeof WB !== 'undefined' && WB.launchPending)) return;
-    if (!$('#switchReady')?.checked) throw new Error('请先结束任务、保存内容，并勾选确认');
-    const progress = typeof beginLaunchProgress === 'function' ? beginLaunchProgress(b.dataset.target, '当前 API', ['提交启动请求']) : null;
-    const owner = $('#switchReady'), routeBefore = S.route;
-    if (typeof WB !== 'undefined') WB.launchPending = true;
-    try {
-    await busy(b, async () => {
-      try {
-        const r = await (typeof launchAPI === 'function' ? launchAPI : ((path, body) => api(path, body)))('/api/local/switch', { id: b.dataset.id, target: b.dataset.target, confirmed: true }, progress);
-        if (r?.ok !== true) throw new Error('启动结果尚未确认');
-        progress?.finish();
-        if (S.route !== routeBefore || $('#switchReady') !== owner) return;
-        $('#modalRoot').innerHTML = '';
-        const refresh = route(), revision = S.routeRevision;
-        await refresh;
-        if (S.route !== routeBefore || S.routeRevision !== revision || $('#modalRoot')?.innerHTML) return;
-        const note = document.createElement('div'); note.className = 'callout ok'; note.textContent = r.result.message;
-        $('#view').prepend(note); toast('已切换并打开原工具', 'ok');
-      } catch (e) {
-        progress?.fail(e);
-        if (S.route !== routeBefore || $('#switchReady') !== owner) return;
-        const out = $('#switchError');
-        if (out) out.innerHTML = `<div class="callout warn">${ico('warn')}<div>${esc(e.message)}</div></div>`;
-        else throw e;
-      }
-    });
-    } finally { if (typeof WB !== 'undefined') WB.launchPending = false; }
-  },
-  localApply: async (b) => {
-    if (!await confirm('只更新原工具的 CLI API 配置，不自动打开？会先备份，保留原会话。请先退出旧工具，更新后手动重开；后续打开也会使用这个 Key。')) return;
-    await busy(b, async () => { const r = await api('/api/local/default', { id: b.dataset.id, action: 'apply' }); toast(r.message, 'ok'); });
-  },
+  localSwitchConfirm: async () => { throw new Error('此配置面板已过期，请刷新后从 Agent 卡片打开'); },
+  localApply: async () => { throw new Error('此配置入口已过期，请刷新后在 Agent 面板中选择“仅应用配置”'); },
   localRestore: async (b) => {
     if (!await confirm('恢复通过本地账号应用前的系统配置？若配置后来被其他程序修改，会停止自动恢复以保护新改动。')) return;
     await busy(b, async () => { const r = await api('/api/local/default', { kind: b.dataset.kind, action: 'restore' }); toast(r.message, 'ok'); await route(); });
@@ -2257,21 +2193,9 @@ document.addEventListener('change', async (e) => {
     else if (t.matches?.('[data-remote-hub]')) t.closest('.remote-hub-bindings')?.setAttribute('data-touched', 'true');
     else if (t.id === 'remoteSaved' && t.value) { const u = new URL(t.value); $('#remoteRoot').value = u.origin; $('#remoteHub').value = t.value; S.remoteDiscovery = null; $('#remoteConnect').disabled = true; }
     else if (t.id.startsWith('toolAPI-') || t.id.startsWith('toolModel-') || t.id.startsWith('toolProtocol-')) {
-      const form = toolForm(t.dataset.target), keyChanged = t.id.startsWith('toolAPI-');
-      if (keyChanged) {
-        const account = S.local.accounts.find((a) => a.id === form.id);
-        try {
-          const host = new URL(account?.baseUrl).hostname;
-          if (host === 'api.anthropic.com') form.protocol = 'anthropic';
-          else if (host === 'api.x.ai') form.protocol = 'chat';
-        } catch (_) {}
-      }
-      t.disabled = true;
-      await api('/api/local/bind', form);
-      S.local = await api('/api/local/accounts');
-      if (keyChanged) renderAgentCards();
-      else { t.disabled = false; toolDraftStatus(t.dataset.target); }
-      toast(form.id ? '卡片设置已保存，点击“应用并重启”才会切换' : '已取消选择');
+      if (typeof wbStageSelection !== 'function') throw new Error('请刷新后从 Agent 卡片选择 API');
+      const form = toolForm(t.dataset.target);
+      await wbStageSelection(form.target, form.id, t);
     }
     else if (t.id.startsWith('localTarget-')) { const a = S.local.accounts.find((a) => 'localTarget-' + a.id === t.id); const b = t.closest('.account-launch').querySelector('button'); if (b) b.disabled = !a?.model || !S.local.tools.some((x) => x.id === t.value && x.available); }
     else if (t.id === 'swAuto' || t.id === 'swOpen' || t.id === 'swPhoneAuto' || t.name === 'pol') await saveSetting(t);

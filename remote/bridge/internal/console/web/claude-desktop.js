@@ -27,7 +27,7 @@ function wbClaudeDesktopCard(tool) {
 
 function cdModal(account, status, error, draft) {
   const binding = draft ? { override: draft.override } : bindingFor({ id: 'claude-desktop' }), models = cdModels(account);
-  const enabled = status && status.supported && !status.managed && (draft?.verified && draft.ready && !draft.loading);
+  const enabled = status && status.supported && !status.managed && draft?.verified && !draft.loading && !WB.launchPending;
   $('#modalRoot').innerHTML = `<div class="modal-back" data-act="closeModal"><div class="modal wb-open" data-stop role="dialog" aria-modal="true" aria-labelledby="cdTitle">
     <div class="modal-head"><h3 id="cdTitle">打开 Claude Desktop</h3><button class="icon-btn" data-act="closeModal" aria-label="关闭">✕</button></div>
     <div class="modal-body"><div class="wb-open-sum"><span class="wb-brand empty">${icon('key')}</span><div><b>${esc(account.name)}</b><small>${esc(wbHost(account.baseUrl))}</small></div></div>
@@ -37,9 +37,9 @@ function cdModal(account, status, error, draft) {
       <p class="wb-hint">模型在 Claude 内选，使用期间请保持 Bridge 运行；Bridge 重启后请重新应用配置。${status?.upstreamVerified ? '<span class="chip ok">上游已验证</span>' : '<span class="chip warn">仅验证本机配置，尚未验证上游推理</span>'}</p>
       ${status && (!status.supported || status.managed) ? `<div class="callout warn">${esc(status.message || (status.managed ? '受组织策略管理' : '当前版本暂不支持'))}</div>` : !status ? '<p class="wb-hint">检查中…</p>' : ''}
       ${status?.requiresModeChange ? '<p class="wb-hint">首次开启第三方模式，原账号聊天不删除。</p>' : ''}
-      ${draft ? `<label class="wb-check-row"><input type="checkbox" id="cdReady" ${draft.ready ? 'checked' : ''}>同系列工具任务已经结束</label>` : ''}
+      <p class="wb-hint">会先停止该 Agent 的当前任务，再应用所选 API。</p>
       ${wbLaunchFeedback(draft, error)}
-    </div><div class="modal-foot"><button class="btn ghost" data-act="closeModal">取消</button><span class="spacer"></span><button class="btn primary" data-act="cdGo" data-id="${esc(account.id)}" ${enabled ? '' : 'disabled'}>${icon('external')}配置并打开</button></div>
+    </div><div class="modal-foot"><button class="btn ghost" data-act="closeModal">取消</button><span class="spacer"></span><button class="btn" data-act="wbApplyGo" data-apply-only="true" data-id="${esc(account.id)}" data-target="claude-desktop" ${enabled ? '' : 'disabled'}>仅应用配置</button><button class="btn primary" data-act="cdGo" data-id="${esc(account.id)}" ${enabled ? '' : 'disabled'}>${icon('external')}应用并打开</button></div>
   </div></div>`;
 }
 
@@ -73,7 +73,6 @@ document.addEventListener('change', async (event) => {
     if (select.hasAttribute?.('data-cd-key')) { await wbStageSelection('claude-desktop', select.value, select); return; }
     const draft = WB.accountOpen;
     if (!wbAccountCurrent(draft) || draft.target !== 'claude-desktop') return;
-    if (select.id === 'cdReady') { draft.ready = select.checked; wbUpdateLaunchControls(draft); }
     if (select.hasAttribute?.('data-cd-override')) {
       if (WB.launchPending) { select.checked = draft.override; return; }
       draft.override = select.checked;

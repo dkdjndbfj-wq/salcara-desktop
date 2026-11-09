@@ -163,20 +163,59 @@ function beginLaunchProgress(target, source, labels = [], operation = '启动') 
   return handle;
 }
 
-// One POST carries actual stages and the final response. Hiding the panel never
-// retries or cancels the mutation; a lost connection leaves an unknown result.
-async function launchAPI(path, body, progress) {
+// Safe changes stay in the selection panel and carry a unique, echoed receipt.
+const SAFE_AGENT_CHANGE_PROTOCOL = 'safe-agent-change.v1';
+function safeAgentOperationId() {
+  if (typeof crypto === 'undefined' || typeof crypto.randomUUID !== 'function') throw new Error('当前页面无法安全提交，请刷新或更新电脑端');
+  return crypto.randomUUID();
+}
+function requireSafeAgentReceipt(data, operationId) {
+  if (data?.ok !== true || data.protocol !== SAFE_AGENT_CHANGE_PROTOCOL || data.operationId !== operationId) {
+    throw Object.assign(new Error('操作结果未确认，请检查原工具状态；不会自动重试'), { uncertain: true });
+  }
+  if (data.uncertain === true || data.result?.uncertain === true) {
+    throw Object.assign(new Error('配置/启动已提交，状态未能确认，请在原工具核对后重新打开；不会自动重试'), { uncertain: true, started: data.started === true, applied: data.applied === true, submitted: data.result?.submitted === true, result: data.result });
+  }
+  return data;
+}
+function inlineAgentProgress(owner, paint, applyOnly) {
+  let terminal = false;
+  const update = message => { owner.operationStage = message; paint(); };
+  return {
+    operation: applyOnly ? '应用配置' : '启动',
+    step() { if (!terminal) update('正在检查账号与工具…'); },
+    event(event) {
+      if (terminal || event?.type !== 'phase') return;
+      const label = ({ stop: '正在停止该 Agent 的当前任务…', catalog: '正在读取模型目录…', profile: '正在应用所选 API…', start: '正在打开 Agent…', record: '正在保存操作结果…' })[event.step];
+      if (label) update(label);
+    },
+    finish() { terminal = true; update(applyOnly ? '配置已应用' : '已应用并打开 Agent'); },
+    fail(error) { terminal = true; update(error?.uncertain ? '操作结果未确认' : '操作未完成'); },
+    cancel() { terminal = true; update('操作已取消'); },
+  };
+}
+
+// One POST carries actual stages and the final response. Callers may cancel when
+// their panel closes; a lost acknowledgement must never trigger a second POST.
+async function launchAPI(path, body, progress, options = {}) {
   const operation = progress?.operation === '应用配置' ? '应用配置' : '启动';
   const controller = new AbortController();
+  const abort = () => controller.abort();
+  if (options.signal?.aborted) abort();
+  else options.signal?.addEventListener('abort', abort, { once: true });
   const timer = setTimeout(() => controller.abort(), 65000);
   const uncertain = message => Object.assign(new Error(message), {uncertain:true});
   const result = (status, data) => {
     if (!Number.isInteger(status) || !data || typeof data !== 'object') throw uncertain(operation + '响应不完整');
-    if (status < 200 || status >= 300 || data.ok !== true) throw Object.assign(new Error(data.error || `${operation}失败 (${status})`), {started:data.started === true,result:data.result});
+    if (status < 200 || status >= 300 || data.ok !== true) throw Object.assign(new Error(data.error || `${operation}失败 (${status})`), {status,code:data.code,uncertain:data.uncertain === true || data.result?.uncertain === true,started:data.started === true,applied:data.applied === true,result:data.result});
     return data;
   };
   try {
+    if (controller.signal.aborted) throw Object.assign(new Error('操作已取消'), { cancelled: true });
     const res = await fetch(path, {method:'POST',credentials:'same-origin',signal:controller.signal,headers:{'Content-Type':'application/json','Accept':'application/x-ndjson'},body:JSON.stringify(body)});
+    if (body?.protocol === SAFE_AGENT_CHANGE_PROTOCOL && [404, 405].includes(res.status)) {
+      throw Object.assign(new Error('电脑端不支持安全应用功能，请更新电脑端后重新打开'), { status: res.status, code: 'safe_agent_change_not_supported' });
+    }
     if (!res.ok || !res.headers.get('Content-Type')?.includes('application/x-ndjson')) return result(res.status, await res.json());
     if (!res.body?.getReader) throw uncertain(operation + '进度连接不可用');
     const reader = res.body.getReader(), decoder = new TextDecoder();
@@ -199,8 +238,8 @@ async function launchAPI(path, body, progress) {
       }
     } finally { reader.releaseLock(); }
   } catch (error) {
-    if (controller.signal.aborted) throw uncertain('等待' + operation + '结果超时');
+    if (controller.signal.aborted) throw options.signal?.aborted ? Object.assign(uncertain('操作已取消，请检查原工具的最终状态'), { cancelled: true }) : uncertain('等待' + operation + '结果超时');
     if (error instanceof TypeError || error instanceof SyntaxError) throw uncertain(operation + '连接已中断，结果尚未确认');
     throw error;
-  } finally { clearTimeout(timer); }
+  } finally { clearTimeout(timer); options.signal?.removeEventListener('abort', abort); }
 }

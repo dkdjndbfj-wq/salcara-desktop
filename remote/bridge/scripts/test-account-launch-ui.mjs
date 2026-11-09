@@ -2,6 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import vm from 'node:vm';
+import crypto from 'node:crypto';
+const progressSource = fs.readFileSync(new URL('../internal/console/web/launch-progress.js', import.meta.url), 'utf8');
 
 // Actual shipped handlers, synthetic DOM and HTTP only. Never starts a native
 // app, reads credentials, opens a provider or creates an isolated tool profile.
@@ -25,29 +27,32 @@ function fixture() {
       this.children.push(node);if(node.id)nodes.set(node.id,node);
     }
   }};
-  const targets=['codex-desktop','codex','claude','claude-desktop'];
+  const targets=['codex-desktop','codex','claude','claude-desktop','deepseek-harness','hermes'];
   const account=id=>({id,name:'演示 '+id,sourceRevision:'src-v1-'+id.repeat(64),kind:'api',baseUrl:'https://example.test/v1',wire:'auto',models:['gpt-fixture','claude-fixture'],model:'',keyMasked:'fixture-mask'});
-  const backend={accounts:[account('a'),account('b')],tools:targets.map(id=>({id,name:id,kind:id.split('-')[0],available:true})),bindings:Object.fromEntries(targets.map(id=>[id,{accountId:'a',model:'gpt-fixture',override:false}]))};
+  const backend={accounts:[account('a'),account('b')],tools:targets.map(id=>({id,name:id,kind:id==='deepseek-harness'?id:id.split('-')[0],available:true})),bindings:Object.fromEntries(targets.map(id=>[id,{accountId:'a',model:'gpt-fixture',override:false}]))};
   const S={local:clone(backend),route:'accounts'}, ACTIONS={};
   const document={addEventListener:(type,fn)=>{if(!listeners.has(type))listeners.set(type,[]);listeners.get(type).push(fn);},getElementById:id=>nodes.get(id)};
   let intercept=null;
-  const context=vm.createContext({S,ACTIONS,document,URL,console,PAGES:{overview:{},accounts:{}},ICONS:{},TOOL_LABEL:{},
+  const context=vm.createContext({S,ACTIONS,document,URL,console,AbortController,crypto:crypto.webcrypto,PAGES:{overview:{},accounts:{}},ICONS:{},TOOL_LABEL:{},
     $:sel=>sel==='#modalRoot'?root:nodes.get(sel.slice(1)),esc:value=>String(value??'').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('"','&quot;'),icon:()=>'',ico:()=>'',
     remoteLampHTML:()=>'',desktopRemoteLamp:()=>({}),renderApprovalsBox(){},localEditor(){},clearTimeout(){},setTimeout(){throw Error('unexpected timer');},
     renderLocalCards:()=>cards.push('api'),toast:(...args)=>notices.push(args),busy:async(_button,action)=>action(),
-    api:async(url,body)=>{calls.push({url,body:clone(body)});if(intercept){const value=await intercept(url,body);if(value!==undefined)return value;}
+    api:async(url,body,method,options)=>{calls.push({url,body:clone(body)});if(intercept){const value=await intercept(url,body,options);if(value!==undefined)return value;}
       if(url==='/api/local/accounts')return clone(backend);
       if(url==='/api/local/models')return {models:backend.accounts.find(a=>a.id===body.id)?.models||[]};
       if(url==='/api/local/claude-desktop/status')return {supported:true,managed:false};
+      if(url==='/api/local/agent-change/v1'){Object.assign(backend.bindings[body.target],{accountId:body.id,model:body.model,override:body.override});return {ok:true,protocol:body.protocol,operationId:body.operationId};}
       if(url==='/api/local/bind'){Object.assign(backend.bindings[body.target],{accountId:body.id,model:body.model,override:body.override});return {ok:true};}
       if(['/api/local/switch','/api/local/claude-desktop/switch'].includes(url))return {ok:true};
       throw Error('unexpected route '+url);
     },
   });
+  vm.runInContext(progressSource,context);
+  context.launchAPI=(url,body,progress,options)=>context.api(url,body,undefined,options);
   vm.runInContext(workbench,context);vm.runInContext(claude,context);
   const api=vm.runInContext('({wbOpenAccount,wbAccountModels,WB})',context);
   const button=act=>root.children.find(node=>node.dataset.act===act);
-  const ready=()=>{const node=nodes.get('wbReady')||nodes.get('cdReady');assert.ok(node);node.checked=true;};
+  const ready=()=>assert.equal(nodes.get('wbReady')||nodes.get('cdReady'),undefined);
   const change=async node=>{for(const listener of listeners.get('change')||[])await listener({target:node});};
   return {context,S,ACTIONS,backend,calls,notices,cards,root,nodes,button,ready,change,...api,
     open:(target='codex',id='b')=>api.wbOpenAccount(target,id,{isConnected:true,dataset:{target,id}}),
@@ -56,141 +61,149 @@ function fixture() {
   };
 }
 
-test('all four API-card entries only stage the named API; confirmation starts unchecked',async()=>{
-  for(const target of ['codex-desktop','codex','claude','claude-desktop']){
-    const f=fixture();await f.open(target);assert.match(f.root.innerHTML,/演示 b/);assert.match(f.root.innerHTML,/同系列工具任务已经结束/);
-    assert.equal(f.backend.bindings[target].accountId,'a');assert.equal(f.writes().length,0);
-    assert.equal((f.nodes.get('cdReady')||f.nodes.get('wbReady')).checked,false);await f.go();assert.equal(f.writes().length,0);
+const safePath = '/api/local/agent-change/v1';
+const receipt = body => ({ok:true,protocol:body.protocol,operationId:body.operationId});
+test('all six Agent entries stage selection without checkbox, history reads or writes',async()=>{
+  for(const target of ['codex-desktop','codex','claude','claude-desktop','deepseek-harness','hermes']){
+    const f=fixture();await f.open(target);f.ready();assert.match(f.root.innerHTML,/会先停止该 Agent 的当前任务，再应用所选 API。/);
+    assert.equal(f.writes().length,0);assert.equal(f.backend.bindings[target].accountId,'a');
+    assert.equal(f.button('wbApplyGo').disabled,false);assert.equal((f.button('cdGo')||f.button('wbOpenGo')).disabled,false);
+    assert.equal(f.calls.some(c=>/session|history/.test(c.url)),false);
   }
+});
+test('one bottom click submits one versioned transaction with source CAS for every target',async()=>{
+  for(const target of ['codex-desktop','codex','claude','claude-desktop','deepseek-harness','hermes'])for(const applyOnly of [false,true]){
+    const f=fixture();await f.open(target);f.WB.accountOpen.override=true;
+    await (applyOnly?f.ACTIONS.wbApplyGo(f.button('wbApplyGo')):f.go());
+    const writes=f.writes();assert.equal(writes.length,1);assert.equal(writes[0].url,safePath);
+    assert.equal(writes[0].body.protocol,'safe-agent-change.v1');assert.match(writes[0].body.operationId,/^[a-f0-9-]{36}$/);
+    assert.equal(writes[0].body.target,target);assert.equal(writes[0].body.id,'b');assert.equal(writes[0].body.expectedSourceRevision,'src-v1-'+'b'.repeat(64));
+    assert.equal(writes[0].body.applyOnly,applyOnly);assert.equal(writes[0].body.override,true);
+    assert.equal('taskReady' in writes[0].body,false);assert.equal('confirmed' in writes[0].body,false);assert.equal(f.root.innerHTML,'');
+  }
+});
+test('both buttons disable throughout stopping and stage updates stay inside original panel',async()=>{
+  const f=fixture(),wait=gate();await f.open();const title=f.nodes.get('wbOpenTitle');
+  f.context.launchAPI=async(path,body,progress)=>{progress.event({type:'phase',step:'stop'});await wait.promise;progress.event({type:'phase',step:'profile'});return receipt(body);};
+  const pending=f.go();await flush();assert.equal(f.button('wbApplyGo').disabled,true);assert.equal(f.button('wbOpenGo').disabled,true);
+  assert.equal(f.nodes.get('wbOpenTitle'),title);assert.match(f.nodes.get('switchError').innerHTML,/正在停止/);
+  assert.equal(f.context.visibleLaunchProgress,undefined);await f.go();wait.resolve();await pending;
+});
+test('duplicate clicks and another card cannot interleave with a safe transaction',async()=>{
+  const f=fixture(),wait=gate();await f.open();f.setIntercept((url,body)=>url===safePath?wait.promise.then(()=>receipt(body)):undefined);
+  const pending=f.go();await flush();await f.go();await f.open('claude','a');assert.equal(f.WB.accountOpen.id,'b');assert.equal(f.writes().length,1);
+  wait.resolve();await pending;assert.equal(f.writes().length,1);
+});
+test('close during stop aborts the request and never applies or revives the panel',async()=>{
+  const f=fixture(),wait=gate();await f.open();let signal,applied=false;
+  f.setIntercept((url,body,options)=>url===safePath?wait.promise.then(()=>{signal=options.signal;if(signal.aborted)throw Object.assign(Error('cancelled'),{cancelled:true});applied=true;return receipt(body);}):undefined);
+  const pending=f.go();await flush();f.WB.cancelPending();f.root.innerHTML='';wait.resolve();await pending;
+  assert.equal(signal.aborted,true);assert.equal(applied,false);assert.equal(f.backend.bindings.codex.accountId,'a');assert.equal(f.root.innerHTML,'');
+});
+test('closing before freshness resolves never submits the transaction',async()=>{
+  const f=fixture();await f.open();const wait=gate();f.setIntercept(url=>url==='/api/local/accounts'?wait.promise:undefined);
+  const pending=f.go();f.WB.cancelPending();f.root.innerHTML='';wait.resolve(clone(f.backend));await pending;assert.equal(f.writes().length,0);
+});
+test('old backend and stop failures fail closed with preserved selection and no fallback',async()=>{
+  for(const code of ['not_found','safe_agent_change_stop_timeout','safe_agent_change_stop_unknown']){
+    const f=fixture();await f.open();f.WB.accountOpen.override=true;
+    f.setIntercept(url=>{if(url===safePath)throw Object.assign(Error(code),{status:code==='not_found'?404:409,code});});
+    await f.go();assert.equal(f.writes().length,1);assert.equal(f.backend.bindings.codex.accountId,'a');assert.equal(f.WB.accountOpen.id,'b');assert.equal(f.WB.accountOpen.override,true);
+    assert.match(f.root.innerHTML,new RegExp(code));assert.match(f.root.innerHTML,/wbRecheck/);assert.equal(f.button('wbApplyGo').disabled,true);
+  }
+});
+test('missing or mismatched receipts remain uncertain and cannot replay via recheck',async()=>{
+  for(const response of [{},{ok:false},{ok:true},{ok:true,protocol:'older',operationId:'wrong'}]){
+    const f=fixture();await f.open();f.setIntercept(url=>url===safePath?response:undefined);await f.go();
+    assert.equal(f.WB.accountOpen.executionUnknown,true);assert.doesNotMatch(f.root.innerHTML,/data-act="wbRecheck"/);
+    await f.ACTIONS.wbRecheck();await f.go();assert.equal(f.writes().length,1);
+  }
+});
+test('changed source revision, URL and identity prevent writes before stopping',async()=>{
+  for(const change of [{sourceRevision:'changed'},{baseUrl:'https://other.test'},{officialAccount:{id:'new',mode:'codex',identityEpoch:2}}]){
+    const f=fixture();await f.open();Object.assign(f.backend.accounts[1],change);await f.go();assert.equal(f.writes().length,0);assert.match(f.root.innerHTML,/账号或工具已变化/);
+  }
+});
+test('unsupported, vault and web-only sources cannot be launched from a forged entry',async()=>{
+  for(const flag of [{libraryOnly:true},{mode:'chatgpt_web_session'},{officialAccount:{mode:'chatgpt_web_session'}}]){
+    const f=fixture();Object.assign(f.S.local.accounts[1],flag);await assert.rejects(f.open(),/不能用于/);assert.equal(f.writes().length,0);
+  }
+  const f=fixture();f.S.local.accounts[1].officialAccount={id:'official',mode:'codex'};await assert.rejects(f.open('hermes'),/不能用于/);
+});
+test('missing revision or unavailable fresh tool keeps both buttons disabled',async()=>{
+  for(const change of ['revision','tool']){
+    const f=fixture();if(change==='revision')delete f.backend.accounts[1].sourceRevision;else f.backend.tools.find(t=>t.id==='codex').available=false;
+    await f.open();await f.go();assert.equal(f.writes().length,0);assert.equal(f.button('wbApplyGo').disabled,true);
+  }
+});
+test('late source reads and late completion cannot replace new route or dialog owners',async()=>{
+  const f=fixture(),wait=gate();f.setIntercept(url=>url==='/api/local/accounts'?wait.promise:undefined);const opening=f.open();f.root.innerHTML='<div id="newTitle">keep</div>';wait.resolve(clone(f.backend));await opening;assert.match(f.root.innerHTML,/keep/);
+  for(const failed of [false,true]){
+    const g=fixture(),pending=gate();await g.open();g.setIntercept((url,body)=>url===safePath?pending.promise.then(()=>receipt(body)):undefined);
+    const launch=g.go();await flush();g.root.innerHTML='<div id="newTitle">keep</div>';if(failed)pending.reject(Error('late failure'));else pending.resolve();await launch;assert.match(g.root.innerHTML,/keep/);
+  }
+});
+test('model reload and override toggle remain read-only until a bottom action',async()=>{
+  const f=fixture();await f.open();const toggle=f.root.children.find(n=>n.dataset.wbOverride);toggle.checked=true;await f.change(toggle);
+  await f.wbAccountModels(f.WB.accountOpen,false);assert.equal(f.WB.accountOpen.override,true);assert.equal(f.backend.bindings.codex.override,false);assert.equal(f.writes().length,0);
 });
 
-test('launch progress follows actual binding and switch acknowledgements without replay',async()=>{
-  const f=fixture(),events=[],binding=gate(),launch=gate();
-  f.context.beginLaunchProgress=(target,name,steps)=>{events.push(['begin',target,steps.length]);return {step:n=>events.push(['step',n]),finish:()=>events.push(['finish']),fail:()=>events.push(['fail']),cancel:()=>events.push(['cancel'])};};
-  await f.open('codex');f.ready();
-  f.setIntercept(url=>url==='/api/local/bind'?binding.promise:url==='/api/local/switch'?launch.promise:undefined);
-  const pending=f.go();await flush();assert.deepEqual(events,[['begin','codex',3],['step',1]]);
-  binding.resolve({ok:true});await flush();assert.deepEqual(events.at(-1),['step',2]);
-  launch.resolve({ok:true});await pending;assert.deepEqual(events.at(-1),['finish']);
-  assert.equal(f.calls.filter(call=>call.url==='/api/local/switch').length,1);
+test('same markup in a replacement modal is a new owner and rejects late completion',async()=>{
+  const f=fixture(),wait=gate();await f.open();const oldTitle=f.nodes.get('wbOpenTitle');
+  f.setIntercept((url,body)=>url===safePath?wait.promise.then(()=>receipt(body)):undefined);
+  const pending=f.go();await flush();const markup=f.root.innerHTML;f.root.innerHTML=markup;
+  assert.notEqual(f.nodes.get('wbOpenTitle'),oldTitle);wait.resolve();await pending;
+  assert.equal(f.root.innerHTML,markup);assert.equal(f.notices.some(([message])=>message==='已打开'),false);
 });
 
-test('progress reports uncertain launch failure and never retries the mutation',async()=>{
-  const f=fixture(),events=[];
-  f.context.beginLaunchProgress=()=>({step:n=>events.push(n),finish:()=>events.push('finished'),fail:()=>events.push('failed'),cancel:()=>events.push('cancelled')});
-  await f.open('claude-desktop');f.ready();f.setIntercept(url=>{if(url==='/api/local/claude-desktop/switch')throw Error('response lost');});
-  await f.go();assert.deepEqual(events,[1,'failed']);assert.equal(f.calls.filter(call=>call.url==='/api/local/claude-desktop/switch').length,1);
+test('A to B to A rejects an old model result even when account and route match again',async()=>{
+  const f=fixture(),wait=gate();await f.open('codex','a');const old=f.WB.accountOpen;
+  f.setIntercept(url=>url==='/api/local/models'?wait.promise:undefined);
+  const loading=f.wbAccountModels(old,false);await flush();f.root.innerHTML='';
+  await f.open('codex','b');f.root.innerHTML='';await f.open('codex','a');
+  const owner=f.WB.accountOpen,node=f.nodes.get('wbOpenTitle'),markup=f.root.innerHTML;
+  wait.reject(Error('obsolete-model-error'));await loading;
+  assert.notEqual(owner,old);assert.equal(f.WB.accountOpen,owner);assert.equal(f.nodes.get('wbOpenTitle'),node);assert.equal(f.root.innerHTML,markup);
+  assert.doesNotMatch(f.root.innerHTML,/obsolete-model-error/);assert.equal(f.writes().length,0);
 });
 
-test('empty or negative success envelopes never report launched or replay a mutation',async()=>{
-  for(const target of ['codex','claude-desktop'])for(const phase of target==='codex'?['bind','switch']:['switch'])for(const result of [{},{ok:false},{ok:'true'}]) {
-    const f=fixture(),events=[];f.context.beginLaunchProgress=()=>({step(){},finish:()=>events.push('done'),fail:()=>events.push('failed'),cancel(){}});
-    await f.open(target);f.ready();f.setIntercept(url=>url.endsWith('/'+phase)?result:undefined);await f.go();
-    assert.deepEqual(events,['failed']);assert.match(f.root.innerHTML,/结果待确认/);assert.equal(f.calls.filter(c=>c.url.endsWith('/'+phase)).length,1);
-    if(phase==='bind')assert.equal(f.calls.some(c=>c.url.endsWith('/switch')),false);
-  }
+test('A to B to A rejects a delayed Claude capability response from an earlier owner',async()=>{
+  const f=fixture(),wait=gate();let statusReads=0;
+  f.setIntercept(url=>url==='/api/local/claude-desktop/status'&&++statusReads===1?wait.promise:undefined);
+  const opening=f.open('claude-desktop','a');await flush();const old=f.WB.accountOpen;f.root.innerHTML='';
+  await f.open('claude-desktop','b');f.root.innerHTML='';await f.open('claude-desktop','a');
+  const owner=f.WB.accountOpen,node=f.nodes.get('cdTitle');wait.resolve({supported:true,managed:true,message:'obsolete-policy'});await opening;
+  assert.notEqual(owner,old);assert.equal(f.WB.accountOpen,owner);assert.equal(f.nodes.get('cdTitle'),node);assert.equal(owner.status.managed,false);
+  assert.doesNotMatch(f.root.innerHTML,/obsolete-policy/);assert.equal(f.writes().length,0);
 });
 
-test('Agent-page launches reuse progress and reject unconfirmed success envelopes',async()=>{
-  for(const target of ['codex-desktop','codex','claude','claude-desktop'])for(const ok of [true,false]) {
-    const f=fixture(),events=[];f.context.beginLaunchProgress=()=>({step(){},finish:()=>events.push('done'),fail:()=>events.push('failed'),cancel(){}});
-    await f.ACTIONS.wbOpen({dataset:{target}});
-    assert.equal(f.writes().length,0);f.ready();
-    if(!ok)f.setIntercept(url=>url.endsWith('/switch')?{}:undefined);
-    await f.go();assert.deepEqual(events,[ok?'done':'failed']);assert.equal(f.calls.filter(c=>c.url.endsWith('/switch')).length,1);
+test('managed or unsupported Claude and forged action identities cannot submit',async()=>{
+  for(const status of [{supported:false},{supported:true,managed:true}]){
+    const f=fixture();f.setIntercept(url=>url==='/api/local/claude-desktop/status'?status:undefined);await f.open('claude-desktop');await f.go();await f.ACTIONS.wbApplyGo(f.button('wbApplyGo'));assert.equal(f.writes().length,0);
   }
+  const f=fixture();await f.open();
+  for(const dataset of [{id:'a',target:'codex'},{id:'b',target:'hermes'}])await f.ACTIONS.wbOpenGo({dataset,isConnected:true});
+  assert.equal(f.writes().length,0);
 });
-test('official account scope, vault-only and quota-only are enforced outside button rendering',async()=>{
-  for(const target of ['claude','claude-desktop']){const f=fixture();f.S.local.accounts[1].officialAccount={id:'official',mode:'codex'};await assert.rejects(f.open(target),/不能用于/);}
-  for(const flag of [{libraryOnly:true},{mode:'chatgpt_web_session'},{officialAccount:{mode:'chatgpt_web_session'}}]){const f=fixture();Object.assign(f.S.local.accounts[1],flag);await assert.rejects(f.open(),/不能用于/);}
-  for(const target of ['codex','codex-desktop']){const f=fixture();f.S.local.accounts[1].officialAccount={id:'official',mode:'codex'};Object.assign(f.backend.accounts[1],f.S.local.accounts[1]);await f.open(target);assert.match(f.root.innerHTML,/演示 b/);}
+
+test('server CAS rejection preserves selected source and never automatically retries',async()=>{
+  const f=fixture();await f.open();f.WB.accountOpen.override=true;
+  f.setIntercept(url=>{if(url===safePath)throw Object.assign(Error('source CAS rejected'),{status:409,code:'safe_agent_change_source_changed'});});
+  await f.go();await f.go();await flush();
+  assert.equal(f.writes().length,1);assert.equal(f.WB.accountOpen.id,'b');assert.equal(f.WB.accountOpen.override,true);assert.equal(f.backend.bindings.codex.accountId,'a');assert.match(f.root.innerHTML,/source CAS rejected/);
 });
-test('fresh discovery can recover missing cached tools without falling back to a CLI',async()=>{
-  const f=fixture();f.S.local.tools=[];await f.open('codex-desktop');assert.match(f.root.innerHTML,/打开 Codex/);assert.equal(f.WB.accountOpen.target,'codex-desktop');assert.equal(f.writes().length,0);
+
+test('matching success receipt with uncertain submitted result remains locked without success toast',async()=>{
+  const f=fixture();await f.open();f.setIntercept((url,body)=>url===safePath?{...receipt(body),result:{uncertain:true,submitted:true}}:undefined);
+  await f.go();await f.go();await f.ACTIONS.wbRecheck();
+  assert.equal(f.writes().length,1);assert.equal(f.WB.accountOpen.id,'b');assert.equal(f.WB.accountOpen.executionUnknown,true);
+  assert.match(f.root.innerHTML,/配置\/启动已提交/);assert.equal(f.notices.some(([text])=>text==='已打开'),false);
 });
-test('fresh unavailable or now-protected sources cannot be confirmed from a stale card',async()=>{
-  for(const mutation of ['missing','unavailable','quota','revision']){const f=fixture();if(mutation==='missing')f.backend.accounts.pop();else if(mutation==='unavailable')f.backend.tools.find(t=>t.id==='codex').available=false;else if(mutation==='revision')delete f.backend.accounts[1].sourceRevision;else f.backend.accounts[1].officialAccount={mode:'chatgpt_web_session'};
-    await f.open();assert.equal(f.WB.accountOpen?.verified,false);f.ready();await f.go();assert.equal(f.writes().length,0);
+
+test('already applied or started error envelopes cannot be replayed from the current panel',async()=>{
+  for(const flag of ['applied','started']){
+    const f=fixture();await f.open();f.setIntercept(url=>{if(url===safePath)throw Object.assign(Error('submitted-state-write-failed'),{[flag]:true});});
+    await f.go();await f.go();await f.ACTIONS.wbRecheck();
+    assert.equal(f.writes().length,1);assert.equal(f.WB.accountOpen.executionUnknown,true);assert.doesNotMatch(f.root.innerHTML,/data-act="wbRecheck"/);
   }
-});
-test('duplicate opening and out-of-order card discovery never replace the new selection',async()=>{
-  const f=fixture(),first=gate();let reads=0;f.setIntercept(url=>{if(url==='/api/local/accounts'&&++reads===1)return first.promise;});
-  const a=f.open('codex','a');await f.open('codex','a');assert.equal(reads,1);await f.open('codex','b');first.resolve(clone(f.backend));await a;
-  assert.equal(f.WB.accountOpen.id,'b');assert.match(f.root.innerHTML,/演示 b/);assert.equal(f.writes().length,0);
-});
-test('closed or navigated discovery cannot restore the modal or overwrite a new view',async()=>{
-  for(const close of [true,false]){const f=fixture(),pending=gate();f.setIntercept(url=>url==='/api/local/accounts'?pending.promise:undefined);const opening=f.open();if(close)f.root.innerHTML='';else f.S.route='overview';pending.resolve(clone(f.backend));await opening;assert.equal(f.WB.accountOpen.verified,false);if(close)assert.equal(f.root.innerHTML,'');assert.equal(f.writes().length,0);}
-});
-test('model reload and picker override are staged without binding or changing the saved model',async()=>{
-  const f=fixture();await f.open();const checkbox=f.root.children.find(node=>node.dataset.wbOverride);checkbox.checked=true;await f.change(checkbox);
-  await f.wbAccountModels(f.WB.accountOpen,false);assert.equal(f.backend.bindings.codex.accountId,'a');assert.equal(f.backend.bindings.codex.model,'gpt-fixture');assert.equal(f.backend.bindings.codex.override,false);assert.equal(f.WB.accountOpen.override,true);assert.equal(f.writes().length,0);
-});
-test('confirmation posts frozen card ID, staged override and keepModel through original tool switch',async()=>{
-  const f=fixture();await f.open('codex-desktop');f.WB.accountOpen.override=true;f.ready();await f.go();
-  assert.deepEqual(f.writes().map(call=>call.url),['/api/local/bind','/api/local/switch']);assert.ok(f.writes().every(call=>call.body.id==='b'&&call.body.expectedSourceRevision==='src-v1-'+'b'.repeat(64)));
-  assert.equal(f.writes()[0].body.override,true);assert.equal(f.writes()[1].body.keepModel,true);assert.equal(f.writes()[1].body.target,'codex-desktop');assert.equal(f.root.innerHTML,'');assert.ok(f.cards.includes('api'));
-});
-test('Claude Desktop only uses dedicated status and switch without model override or generic bind',async()=>{
-  const f=fixture();await f.open('claude-desktop');f.ready();await f.go();const writes=f.writes();assert.equal(writes.length,1);assert.equal(writes[0].url,'/api/local/claude-desktop/switch');assert.equal(writes[0].body.id,'b');assert.equal('model'in writes[0].body,false);assert.equal(writes[0].body.confirmed,true);assert.equal(f.root.innerHTML,'');
-});
-test('same ID with changed source revision, URL or official identity invalidates confirmation',async()=>{
-  for(const mutation of ['revision','url','identity']){const f=fixture();await f.open();if(mutation==='revision')f.backend.accounts[1].sourceRevision='different-key-same-mask';else if(mutation==='url')f.backend.accounts[1].baseUrl='https://other.example.test';else f.backend.accounts[1].officialAccount={id:'official',identityEpoch:2};f.ready();await f.go();assert.equal(f.writes().length,0);assert.equal(f.WB.accountOpen.verified,false);assert.match(f.root.innerHTML,/重新打开后确认/);}
-});
-test('double confirmation and another card cannot interleave with an in-flight bind',async()=>{
-  const f=fixture(),pending=gate();await f.open();f.ready();f.setIntercept(url=>url==='/api/local/bind'?pending.promise:undefined);const first=f.go();await flush();await f.go();await f.open('claude','a');assert.equal(f.WB.accountOpen.id,'b');assert.equal(f.writes().length,1);pending.resolve({ok:true});await first;assert.equal(f.writes().filter(c=>c.url==='/api/local/switch').length,1);
-});
-test('closing during bind cancels the subsequent restart and does not re-open its dialog',async()=>{
-  const f=fixture(),pending=gate();await f.open();f.ready();f.setIntercept(url=>url==='/api/local/bind'?pending.promise:undefined);const start=f.go();await flush();f.root.innerHTML='';pending.resolve({ok:true});await start;assert.equal(f.calls.some(c=>c.url==='/api/local/switch'),false);assert.equal(f.root.innerHTML,'');
-});
-test('late restart success or failure never closes or repaints an unrelated modal',async()=>{
-  for(const failed of [true,false]){const f=fixture(),pending=gate();await f.open();f.ready();f.setIntercept(url=>url==='/api/local/switch'?pending.promise:undefined);const start=f.go();await flush();f.root.innerHTML='<div id="other">new modal</div>';if(failed)pending.reject(Error('late failure'));else pending.resolve({ok:true});await start;assert.match(f.root.innerHTML,/new modal/);assert.equal(f.notices.some(([text])=>text==='已打开'||text==='late failure'),false);}
-});
-test('deleted Claude account during model refresh safely invalidates the modal',async()=>{
-  const f=fixture();await f.open('claude-desktop');f.backend.accounts.pop();await f.wbAccountModels(f.WB.accountOpen,false);assert.equal(f.WB.accountOpen,null);assert.equal(f.root.innerHTML,'');assert.equal(f.writes().length,0);
-});
-test('an older account model read cannot overwrite or bind a newer account-card dialog',async()=>{
-  const f=fixture(),pending=gate();await f.open('codex','a');
-  f.setIntercept(url=>url==='/api/local/models'?pending.promise:undefined);
-  const old=f.wbAccountModels(f.WB.accountOpen,true);await flush();
-  assert.equal(f.calls.at(-1).url,'/api/local/models');assert.equal(f.calls.at(-1).body.id,'a');
-  await f.open('codex','b');const latest=f.WB.accountOpen,revision=f.S.localAccountsRevision;
-  pending.resolve({models:['old-catalog']});await old;
-  assert.equal(f.WB.accountOpen,latest);assert.equal(f.WB.accountOpen.id,'b');assert.equal(f.S.localAccountsRevision,revision);
-  assert.match(f.root.innerHTML,/演示 b/);assert.equal(f.writes().length,0);
-});
-test('unmanaged or unavailable Claude capabilities and mismatched button IDs cannot switch',async()=>{
-  for(const status of [{supported:false},{supported:true,managed:true}]){const f=fixture();f.setIntercept(url=>url.endsWith('/status')?status:undefined);await f.open('claude-desktop');f.ready();await f.go();assert.equal(f.writes().length,0);}
-  const f=fixture();await f.open();f.ready();await f.ACTIONS.wbOpenGo({dataset:{id:'a',target:'codex'},isConnected:true});assert.equal(f.writes().length,0);
-});
-test('source CAS rejection between fresh read and bind/switch never retries or switches a replacement key',async()=>{
-  for(const target of ['codex','claude-desktop'])for(const phase of target==='codex'?['bind','switch']:['switch']){
-    const f=fixture();await f.open(target);f.ready();let attempted=0;
-    f.setIntercept((url,body)=>{
-      if(url==='/api/local/bind'&&phase==='switch'){f.backend.accounts[1].sourceRevision='src-v1-'+'c'.repeat(64);return {ok:true};}
-      if(url.endsWith('/'+phase)&&body){attempted++;assert.equal(body.expectedSourceRevision,'src-v1-'+'b'.repeat(64));f.backend.accounts[1].sourceRevision='src-v1-'+'c'.repeat(64);throw Error('账号来源已变化，请重新确认');}
-    });
-    await f.go();assert.equal(attempted,1);assert.match(f.root.innerHTML,/账号来源已变化/);assert.equal(f.calls.filter(c=>c.url.endsWith('/switch')).length,phase==='bind'?0:1);
-  }
-});
-test('binding completion cannot replace an identical but newly opened account-card modal',async()=>{
-  const f=fixture(),pending=gate();await f.open('codex','b');f.ready();const oldTitle=f.nodes.get('wbOpenTitle'),originalHTML=f.root.innerHTML;
-  f.setIntercept(url=>url==='/api/local/bind'?pending.promise:undefined);const binding=f.go();await flush();
-  assert.equal(f.writes().length,1);assert.equal(f.writes()[0].url,'/api/local/bind');
-  // A replaced dialog can have identical markup/IDs; ownership follows the
-  // original node, never its text or selector alone.
-  f.root.innerHTML=originalHTML;const newTitle=f.nodes.get('wbOpenTitle'),latest=f.WB.accountOpen;
-  assert.ok(newTitle);assert.notEqual(oldTitle,newTitle);assert.equal(latest.verified,true);
-  pending.resolve({ok:true});await binding;
-  assert.equal(f.WB.accountOpen,latest);assert.equal(f.nodes.get('wbOpenTitle'),newTitle);
-  assert.equal(f.calls.some(c=>c.url==='/api/local/switch'),false);assert.equal(f.notices.some(([text])=>text==='已打开'),false);
-});
-test('a late Claude capability response cannot repaint a later Codex card dialog',async()=>{
-  const f=fixture(),pending=gate();f.setIntercept(url=>url.endsWith('/status')?pending.promise:undefined);const old=f.open('claude-desktop');await flush();await f.open('codex','a');pending.resolve({supported:true});await old;
-  assert.equal(f.WB.accountOpen.target,'codex');assert.match(f.root.innerHTML,/演示 a/);assert.doesNotMatch(f.root.innerHTML,/cdTitle/);assert.equal(f.writes().length,0);
-});
-test('early confirmation on cached source is cleared when fresh source first arrives',async()=>{
-  const f=fixture(),pending=gate();f.setIntercept(url=>url==='/api/local/accounts'?pending.promise:undefined);const opening=f.open();
-  const checkbox=f.nodes.get('wbReady');checkbox.checked=true;await f.change(checkbox);assert.equal(f.WB.accountOpen.ready,true);
-  f.backend.accounts[1].sourceRevision='src-v1-'+'c'.repeat(64);f.backend.accounts[1].baseUrl='https://new-source.example.test/v1';pending.resolve(clone(f.backend));await opening;
-  assert.equal(f.WB.accountOpen.ready,false);assert.equal(f.nodes.get('wbReady').checked,false);assert.equal(f.WB.accountOpen.sourceRevision,'src-v1-'+'c'.repeat(64));await f.go();assert.equal(f.writes().length,0);
 });

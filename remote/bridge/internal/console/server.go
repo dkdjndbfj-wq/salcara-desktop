@@ -134,6 +134,10 @@ type Server struct {
 	accountUsage             *accountUsageCache
 	managedLaunchMu          sync.Mutex
 	managedLaunchPreviews    map[string]managedLaunchPreview
+	agentChangeMu            sync.Mutex
+	agentChangeIDMu          sync.Mutex
+	agentChangeIDs           map[string]struct{}
+	nativeConfigurationStop  func(context.Context, launcher.Plan) error // fake-only stop boundary in tests
 	codexProfileMu           sync.Mutex
 	codexProfile             *toolcfg.CodexServiceProfile
 	backgroundMu             sync.Mutex

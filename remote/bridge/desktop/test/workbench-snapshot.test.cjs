@@ -23,7 +23,6 @@ function delayNextSnapshot(f) {
 
 async function selectAndLaunch(f) {
   await f.change('codex', 'api-shared');
-  f.document.getElementById('wbReady').checked = true;
   await f.ACTIONS.wbOpenGo(f.button('wbOpenGo'));
   assert.equal(f.backend.bindings.codex.accountId, 'api-shared');
   assert.equal(f.S.local.bindings.codex.accountId, 'api-shared');

@@ -30,23 +30,24 @@ type codexAgent struct {
 	sideTools     codexSideToolsRegistry
 	privateHome   string // private side-tool worker only; never inherited from phone input
 
-	startMu               sync.Mutex // serializes process start
-	mu                    sync.Mutex
-	conn                  *rpcConn
-	starting              *codexStartupLease // owns initialization before conn is published
-	unconfirmedProcess    *rpcConn           // retired transport is not proof the owned OS worker stopped
-	connSig               string
-	startedAt             time.Time
-	nextStart             time.Time
-	backoff               time.Duration
-	sessionActionsVersion uint64 // fences directory replies across native management writes
-	threads               map[string]*codexThread
-	owned                 map[string]bool
-	turnReverts           map[string][]*codexTurnRevertReceipt
-	revertStoreError      error
-	closed                bool
-	closeCh               chan struct{}
-	wg                    sync.WaitGroup
+	startMu                 sync.Mutex // serializes process start
+	mu                      sync.Mutex
+	conn                    *rpcConn
+	starting                *codexStartupLease // owns initialization before conn is published
+	unconfirmedProcess      *rpcConn           // retired transport is not proof the owned OS worker stopped
+	apiChangeRetiredUnknown bool               // safe configuration changes retain lost subtree proof; ordinary sends are unchanged
+	connSig                 string
+	startedAt               time.Time
+	nextStart               time.Time
+	backoff                 time.Duration
+	sessionActionsVersion   uint64 // fences directory replies across native management writes
+	threads                 map[string]*codexThread
+	owned                   map[string]bool
+	turnReverts             map[string][]*codexTurnRevertReceipt
+	revertStoreError        error
+	closed                  bool
+	closeCh                 chan struct{}
+	wg                      sync.WaitGroup
 }
 
 type codexThread struct {
@@ -354,6 +355,7 @@ func (a *codexAgent) ensureConnection(ctx context.Context, readOnly bool) (*rpcC
 			a.mu.Unlock()
 			return nil, errRPCProcessExitUnconfirmed
 		}
+		a.rememberRetiredCodexTreeLocked(a.unconfirmedProcess)
 		a.unconfirmedProcess = nil
 	}
 	c := a.conn
@@ -540,6 +542,9 @@ func (a *codexAgent) ensureConnection(ctx context.Context, readOnly bool) (*rpcC
 }
 
 func (a *codexAgent) fenceUnconfirmedProcess(c *rpcConn) error {
+	a.mu.Lock()
+	a.rememberRetiredCodexTreeLocked(c)
+	a.mu.Unlock()
 	// done publishes the transport error, while processWaitDone separately
 	// publishes OS exit. Preserve the fence across retries, not only this call.
 	if !errors.Is(c.err, errRPCProcessExitUnconfirmed) || c.processExitConfirmed() {
@@ -592,6 +597,7 @@ func (a *codexAgent) markUnloadedLocked() {
 // onExit handles a dead app-server: running turns fail, approvals are withdrawn, the next call restarts.
 func (a *codexAgent) onExit(c *rpcConn) {
 	a.mu.Lock()
+	a.rememberRetiredCodexTreeLocked(c)
 	if a.conn != c {
 		a.mu.Unlock()
 		return

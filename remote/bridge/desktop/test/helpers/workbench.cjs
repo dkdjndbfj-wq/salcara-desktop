@@ -110,15 +110,16 @@ function fixture() {
 function setup(options = {}) {
   const document = fakeDocument(), backend = fixture(), calls = [], toasts = [];
   const context = vm.createContext({
-    AbortController,
+    AbortController, crypto: crypto.webcrypto,
     document, URL, console, location: { hash: '#overview' },
     window: { addEventListener() {} },
     setTimeout() { throw new Error('Unexpected startup timer'); },
     fetch() { throw new Error('Unexpected real network'); },
   });
   vm.runInContext(appSource, context, { filename: 'app.js' });
+  vm.runInContext(fs.readFileSync(path.join(web, 'launch-progress.js'), 'utf8'), context, { filename: 'launch-progress.js' });
   vm.runInContext(workbenchSource, context, { filename: 'workbench.js' });
-  context.api = async (url, body) => {
+  context.api = async (url, body, method, requestOptions = {}) => {
     calls.push({ url, body: body === undefined ? undefined : clone(body) });
     if (url === '/api/local/accounts' && body === undefined) { if (options.onAccounts) await options.onAccounts(); return clone(backend); }
     if (url === '/api/local/accounts' && body) {
@@ -128,12 +129,12 @@ function setup(options = {}) {
       backend.accounts.push(account);
       return { ok: true, account: clone(account) };
     }
-    if (url === '/api/local/bind') {
-      if (options.onBind) await options.onBind();
+    if (url === '/api/local/agent-change/v1') {
+      if (options.onChange) await options.onChange(body, requestOptions);
+      if (requestOptions.signal?.aborted) throw Object.assign(new Error('cancelled'), { cancelled: true });
       const binding = backend.bindings[body.target];
-      Object.assign(binding, { accountId: body.id, model: body.model, protocol: body.protocol, pending: !!body.id });
-      if ('override' in body) binding.override = body.override;
-      return { ok: true };
+      Object.assign(binding, { accountId: body.id, model: body.model, protocol: body.wireProtocol, override: body.override, pending: false });
+      return { ok: true, protocol: body.protocol, operationId: body.operationId };
     }
     if (url === '/api/local/models') {
       if (options.onModels) await options.onModels();
@@ -142,10 +143,10 @@ function setup(options = {}) {
       return { models: [...account.models] };
     }
     if (url === '/api/local/claude-desktop/status') { if (options.onStatus) return await options.onStatus(); return { supported: true, managed: false, requiresModeChange: true }; }
-    if (url === '/api/local/switch' || url === '/api/local/claude-desktop/switch') { if (options.onSwitch) await options.onSwitch(); return { ok: true }; }
     if (url === '/api/local/claude-desktop/restore' || url === '/api/local/default') return { ok: true };
     throw new Error('Unexpected test API route: ' + url);
   };
+  context.launchAPI = (url, body, progress, requestOptions) => context.api(url, body, undefined, requestOptions);
   if (options.claude) vm.runInContext(fs.readFileSync(path.join(web, 'claude-desktop.js'), 'utf8'), context, { filename: 'claude-desktop.js' });
   context.confirm = async () => true;
   context.toast = (message, kind) => toasts.push({ message, kind });
@@ -161,7 +162,7 @@ function setup(options = {}) {
       return element;
     },
     button(act) { return document.getElementById('modalRoot').querySelector(`[data-act="${act}"]`); },
-    assertNoLaunch() { assert.equal(calls.filter((call) => call.url === '/api/local/switch').length, 0); },
+    assertNoLaunch() { assert.equal(calls.filter((call) => call.url === '/api/local/agent-change/v1').length, 0); },
   };
 }
 

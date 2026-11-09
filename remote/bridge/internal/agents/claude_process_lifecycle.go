@@ -66,6 +66,7 @@ func (a *claudeAgent) hasUnconfirmedWorkerLocked() bool {
 			// final approval and terminal-event cleanup is completely finished.
 			select {
 			case <-p.done:
+				a.rememberRetiredClaudeTreeLocked(p)
 				delete(a.workers, p)
 			default:
 			}

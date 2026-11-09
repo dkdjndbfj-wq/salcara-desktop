@@ -2,8 +2,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import vm from 'node:vm';
+import crypto from 'node:crypto';
 
-const sources = await Promise.all(['codex-accounts.js', 'codex-api-images.js', 'codex-api-network.js', 'codex-api-readiness.js', 'codex-api-observation.js', 'codex-api-connect.js'].map((name) => readFile(new URL('../internal/console/web/' + name, import.meta.url), 'utf8')));
+const sources = await Promise.all(['launch-progress.js', 'codex-accounts.js', 'codex-api-images.js', 'codex-api-network.js', 'codex-api-readiness.js', 'codex-api-observation.js', 'codex-api-connect.js'].map((name) => readFile(new URL('../internal/console/web/' + name, import.meta.url), 'utf8')));
 const shellSource = await readFile(new URL('../internal/console/web/shell.js', import.meta.url), 'utf8');
 function deferred() {
   let resolve, reject;
@@ -40,7 +41,7 @@ function harness(handler) {
   class Element {
     constructor(tag, attrs = {}) {
       this.tagName = tag.toUpperCase(); this.attrs = attrs; this.parent = null; this._nodes = [];
-      this.value = attrs.value || ''; this._html = ''; this.disabled = 'disabled' in attrs; this.hidden = 'hidden' in attrs;
+      this.value = attrs.value || ''; this._html = ''; this.disabled = 'disabled' in attrs; this.hidden = 'hidden' in attrs; this.checked = 'checked' in attrs;
       this.dataset = {};
       for (const [key, value] of Object.entries(attrs)) if (key.startsWith('data-')) this.dataset[key.slice(5).replace(/-([a-z])/g, (_, char) => char.toUpperCase())] = value;
       this.classList = { contains: (name) => (attrs.class || '').split(/\s+/).includes(name) };
@@ -145,9 +146,10 @@ function harness(handler) {
   body = new Element('body');
   const modalRoot = new Element('div', { id: 'modalRoot' }); modalRoot.parent = body; body._nodes.push(modalRoot);
   const context = vm.createContext({
-    api: async (path, payload) => {
-      requests.push({ path, payload });
-      return handler(path, payload);
+    AbortController, crypto: crypto.webcrypto,
+    api: async (path, payload, method, requestOptions) => {
+      requests.push({ path, payload, requestOptions });
+      return handler(path, payload, requestOptions);
     },
     $: (selector) => body.querySelector(selector), ACTIONS: {}, S: { route: 'other' }, icon: () => '', esc: escape,
     busy: async (button, action) => { const wasDisabled = button?.disabled; if (button) button.disabled = true; try { return await action(); } finally { if (button?.isConnected) button.disabled = wasDisabled; } },
@@ -159,11 +161,12 @@ function harness(handler) {
     document: { body, createElement: tag => new Element(tag), addEventListener(event, fn) { if (!listeners.has(event)) listeners.set(event, []); listeners.get(event).push(fn); } },
   });
   for (const source of sources) vm.runInContext(source, context);
+  context.launchAPI = (path, payload, progress, requestOptions) => context.api(path, payload, undefined, requestOptions);
   return {
     context, requests, timers, $: (selector) => body.querySelector(selector),
     run: (source) => vm.runInContext(source, context),
     close: async () => { modalRoot.innerHTML = ''; await settle(); },
-    action: (name) => context.ACTIONS[name](body.querySelector('[data-act="' + name + '"]')),
+    action: (name, applyOnly = false) => context.ACTIONS[name](body.querySelectorAll('[data-act="' + name + '"]').find(node => (node.dataset.applyOnly === 'true') === applyOnly)),
     emit: async (event, target) => { for (const fn of listeners.get(event) || []) await fn({ target }); await settle(); },
     key: async (key) => { const event = { key, preventDefault() {}, stopImmediatePropagation() { this.stopped = true; } }; for (const fn of listeners.get('keydown') || []) { await fn(event); if (event.stopped) break; } return event; },
     tick: async () => { const entry = timers.entries().next().value; if (entry) { timers.delete(entry[0]); await entry[1](); await settle(); } },
@@ -200,21 +203,22 @@ async function open(h) { await h.context.ACTIONS.codexAPI(); await settle(); }
 async function edit(h, id = 'client-one') { await h.context.ACTIONS.codexAPIEdit({ dataset: { id } }); await settle(); }
 
 function installNavigation(h) {
-  const rendered = [], closes = [];
+  const rendered = [], closes = [], homeController = new AbortController();
   h.$('#modalRoot').insertAdjacentHTML('beforebegin', '<div id="view"></div><div id="headActions"></div><div id="pageIco"></div><div id="pageTitle"></div><div id="pageSub"></div>');
   Object.assign(h.context, {
     route() {}, homeCancelLoad() {}, location: { hash: '#accounts', pathname: '/', search: '' },
     history: { replaceState(_state, _title, url) { h.context.location.hash = url.includes('#') ? '#' + url.split('#')[1] : ''; } },
     $$: () => [], ROUTE_ICON: {}, PAGES: { accounts: {}, settings: {}, usage: {} },
     RENDER: Object.fromEntries(['accounts', 'settings', 'usage'].map(name => [name, async () => rendered.push(name)])),
-    openPanel() {}, closePanel() {}, pageSkeleton: () => '',
+    openPanel() {}, closePanel() {}, pageSkeleton: () => '', HOME: { controller: homeController },
     closeLocalEditor: options => { closes.push(options); return h.context.closeAPIManagement(); },
   });
   h.context.S.route = 'accounts';
   const start = shellSource.indexOf('route = async function () {');
   const end = shellSource.indexOf('/* ---------- loading:', start);
+  h.run(shellSource.slice(shellSource.indexOf('function homeCancelLoad()'), shellSource.indexOf('async function homeLoadStats(')));
   h.run(shellSource.slice(start, end));
-  return { rendered, closes };
+  return { rendered, closes, homeController };
 }
 
 test('back navigation protects client and settings drafts, cancel restores the current URL', async () => {
@@ -230,6 +234,8 @@ test('back navigation protects client and settings drafts, cancel restores the c
     assert.equal(h.context.location.hash, '#accounts'); assert.deepEqual(nav.rendered, []);
     assert.equal(h.run('apiManagementHasDraft()'), true);
     assert.equal(nav.closes[0].returnToService, false);
+    assert.equal(nav.homeController.signal.aborted, false);
+    assert.equal(h.context.HOME.controller, nav.homeController);
   }
 });
 
@@ -240,9 +246,11 @@ test('multiple navigation requests share one discard choice and only the latest 
   const notice = h.$('#apiUnsaved');
   h.context.location.hash = '#usage'; const latest = h.context.route(); await settle();
   assert.equal(h.$('#apiUnsaved'), notice);
+  assert.equal(nav.homeController.signal.aborted, false);
   await h.action('apiManagementDiscard'); await Promise.all([first, latest]);
   assert.deepEqual(nav.rendered, ['usage']); assert.equal(h.context.S.route, 'usage');
   assert.equal(h.context.location.hash, '#usage'); assert.equal(h.$('#officialPanel'), null);
+  assert.equal(nav.homeController.signal.aborted, true); assert.equal(h.context.HOME.controller, null);
 });
 
 test('service tabs retain settings drafts and closing offers inline stay or discard', async () => {
@@ -614,22 +622,22 @@ function launchFixture(intercept = () => undefined) {
     const custom = intercept(path, payload); if (custom !== undefined) return custom;
     if (path === '/api/local/codex-api') return { running: true, enabled: true, clients: [{ ...client, disabled: false }] };
     if (path.endsWith('/launch/preview')) return { ready: true, clientId: payload.clientId, target: payload.target, revision: launchRevision, clientName: client.name, models: ['gpt-fixture'], catalogOverride: true, requiresModeChange: false };
-    if (path.endsWith('/launch')) return { ok: true };
+    if (path.endsWith('/launch/safe-v1')) return { ok: true, protocol: payload.protocol, operationId: payload.operationId };
   });
 }
 test('managed launch keeps automatic credentials out of UI and consumes one confirmed preview', async () => {
-  const pending = deferred(), h = harness(launchFixture((path) => path.endsWith('/launch') ? pending.promise : undefined));
+  const pending = deferred(), h = harness(launchFixture((path) => path.endsWith('/launch/safe-v1') ? pending.promise : undefined));
   await h.context.ACTIONS.codexAPIServiceOpen({ dataset: { target: 'codex-desktop' } });
-  await assert.rejects(h.action('codexAPIServiceLaunch'), /确认/);
-  h.$('#apiServiceLaunchReady').checked = true;
+  assert.equal(h.$('#apiServiceLaunchReady'), null);
   h.$('#apiServiceLaunchOverride').checked = true;
   const launching = h.action('codexAPIServiceLaunch'); await settle();
   await h.action('codexAPIServiceLaunch');
-  const calls = h.requests.filter((r) => r.path.endsWith('/launch'));
+  const calls = h.requests.filter((r) => r.path.endsWith('/launch/safe-v1'));
   assert.equal(calls.length, 1);
-  assert.deepEqual(plain(calls[0].payload), { clientId: client.id, target: 'codex-desktop', revision: launchRevision, confirmed: true, catalogOverride: true });
+  assert.deepEqual(plain(calls[0].payload), { protocol: 'safe-agent-change.v1', operationId: calls[0].payload.operationId, clientId: client.id, target: 'codex-desktop', revision: launchRevision, catalogOverride: true, allowModeChange: true, applyOnly: false });
+  assert.match(calls[0].payload.operationId, /^[a-f0-9-]{36}$/);
   assert.equal(h.$('#apiCreatedKey'), null);
-  pending.resolve({ ok: true }); await launching;
+  pending.resolve({ ok: true, protocol: calls[0].payload.protocol, operationId: calls[0].payload.operationId }); await launching;
 });
 test('late managed launch preview cannot populate a replacement dialog', async () => {
   const wait = deferred(), h = harness(launchFixture((path) => path.endsWith('/preview') ? wait.promise : undefined));
@@ -641,11 +649,10 @@ test('late managed launch preview cannot populate a replacement dialog', async (
   assert.match(h.$('#modalRoot').innerHTML, /保留内容/);
 });
 test('ambiguous native launch response cannot blindly restart the tool again', async () => {
-  const h = harness(launchFixture((path) => path.endsWith('/launch') ? Promise.reject(Error('response lost')) : undefined));
+  const h = harness(launchFixture((path) => path.endsWith('/launch/safe-v1') ? Promise.reject(Error('response lost')) : undefined));
   await h.context.ACTIONS.codexAPIServiceOpen({ dataset: { target: 'codex' } });
-  h.$('#apiServiceLaunchReady').checked = true;
   await h.action('codexAPIServiceLaunch'); await h.action('codexAPIServiceLaunch');
-  assert.equal(h.requests.filter((r) => r.path.endsWith('/launch')).length, 1);
+  assert.equal(h.requests.filter((r) => r.path.endsWith('/launch/safe-v1')).length, 1);
   assert.match(h.$('#apiServiceLaunchContent').innerHTML, /response lost/);
 });
 
@@ -660,9 +667,57 @@ test('official local API service only advertises and admits Codex launch targets
   }
   assert.equal(h.requests.length, 0);
   await h.context.ACTIONS.codexAPIServiceOpen({ dataset: { target: 'codex' } });
-  h.$('#apiServiceLaunchReady').checked = true;
   h.run("apiServiceLaunchPanel.target='claude'");
   await assert.rejects(h.action('codexAPIServiceLaunch'), /不支持/);
-  assert.equal(h.requests.filter((r) => r.path.endsWith('/launch')).length, 0);
+  assert.equal(h.requests.filter((r) => r.path.endsWith('/launch/safe-v1')).length, 0);
+});
+
+test('service apply-only uses the same safe transaction and never requests a launch', async () => {
+  const h=harness(launchFixture());
+  await h.context.ACTIONS.codexAPIServiceOpen({dataset:{target:'codex'}});
+  assert.equal(h.$('#apiServiceLaunchReady'),null);assert.equal(h.$('#apiServiceLaunchMode'),null);
+  await h.action('codexAPIServiceLaunch',true);
+  const writes=h.requests.filter(row=>row.path.endsWith('/launch/safe-v1'));
+  assert.equal(writes.length,1);assert.equal(writes[0].payload.applyOnly,true);
+  assert.equal(writes[0].payload.protocol,'safe-agent-change.v1');assert.equal('confirmed' in writes[0].payload,false);
+});
+
+test('service stopping progress stays in its panel and both actions remain disabled', async () => {
+  const h=harness(launchFixture()),wait=deferred();let body;
+  await h.context.ACTIONS.codexAPIServiceOpen({dataset:{target:'codex'}});
+  const original=h.$('#officialPanel');
+  h.context.launchAPI=async(_path,payload,progress)=>{body=payload;progress.event({type:'phase',step:'stop'});await wait.promise;return {ok:true,protocol:payload.protocol,operationId:payload.operationId};};
+  const pending=h.action('codexAPIServiceLaunch');await settle();
+  assert.equal(h.$('#officialPanel'),original);assert.match(h.$('#apiServiceLaunchProgress').textContent,/正在停止/);
+  const buttons=h.$('#apiServiceLaunchContent').querySelectorAll('[data-act="codexAPIServiceLaunch"]');
+  assert.equal(buttons.length,2);assert.ok(buttons.every(button=>button.disabled));
+  await h.action('codexAPIServiceLaunch',true);assert.equal(body.applyOnly,false);
+  wait.resolve();await pending;
+});
+
+test('closing service selection aborts during stop and late errors cannot reopen it', async () => {
+  const h=harness(launchFixture()),wait=deferred();let submitted=0,signal,applied=false;
+  await h.context.ACTIONS.codexAPIServiceOpen({dataset:{target:'codex'}});
+  h.context.launchAPI=async(_path,payload,_progress,options)=>{submitted++;signal=options.signal;await wait.promise;if(signal.aborted)throw Object.assign(Error('cancelled'),{cancelled:true});applied=true;return {ok:true,protocol:payload.protocol,operationId:payload.operationId};};
+  const pending=h.action('codexAPIServiceLaunch');await settle();h.run('closeOfficialPanel()');wait.resolve();await pending;
+  assert.equal(signal.aborted,true);assert.equal(applied,false);assert.equal(submitted,1);assert.equal(h.$('#officialPanel'),null);
+});
+
+test('service receipt mismatch blocks blind replay and retains chosen override', async () => {
+  const h=harness(launchFixture((path)=>path.endsWith('/launch/safe-v1')?{ok:true,protocol:'older',operationId:'wrong'}:undefined));
+  await h.context.ACTIONS.codexAPIServiceOpen({dataset:{target:'codex'}});
+  h.$('#apiServiceLaunchOverride').checked=false;await h.action('codexAPIServiceLaunch');await h.action('codexAPIServiceLaunch');
+  assert.equal(h.requests.filter(row=>row.path.endsWith('/launch/safe-v1')).length,1);
+  assert.equal(h.$('#apiServiceLaunchOverride').checked,false);assert.match(h.$('#apiServiceLaunchContent').innerHTML,/操作结果未确认/);
+  assert.ok(h.$('#apiServiceLaunchContent').querySelectorAll('[data-act="codexAPIServiceLaunch"]').every(button=>button.disabled));
+});
+
+test('service matching receipt with native submitted uncertainty remains locked', async () => {
+  const h=harness(launchFixture((path,payload)=>path.endsWith('/launch/safe-v1')?{ok:true,protocol:payload.protocol,operationId:payload.operationId,result:{submitted:true,uncertain:true}}:undefined));
+  await h.context.ACTIONS.codexAPIServiceOpen({dataset:{target:'codex'}});
+  await h.action('codexAPIServiceLaunch');await h.action('codexAPIServiceLaunch');
+  assert.equal(h.requests.filter(row=>row.path.endsWith('/launch/safe-v1')).length,1);
+  assert.match(h.$('#apiServiceLaunchContent').innerHTML,/配置\/启动已提交/);
+  assert.ok(h.$('#apiServiceLaunchContent').querySelectorAll('[data-act="codexAPIServiceLaunch"]').every(button=>button.disabled));
 });
 

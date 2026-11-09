@@ -175,12 +175,18 @@ function apiServiceLaunchCurrent(owner) {
   return owner && apiServiceLaunchPanel === owner && OFFICIAL_PANEL.epoch === owner.epoch && S.route === owner.route && $('#officialPanel') === owner.element;
 }
 function apiServiceLaunchBusy() { return apiClientWritePending || typeof WB !== 'undefined' && WB.launchPending; }
+function paintAPIServiceLaunchProgress(owner) {
+  if (!apiServiceLaunchCurrent(owner)) return;
+  const output = $('#apiServiceLaunchProgress');
+  if (output) output.textContent = owner.operationStage || '';
+}
 function renderAPIServiceLaunch(owner) {
   if (!apiServiceLaunchCurrent(owner) || !$('#apiServiceLaunchContent')) return;
   const preview = owner.preview, blocked = owner.loading || owner.submitted;
   const select = owner.clients.length > 1 ? `<div class="field"><label for="apiServiceLaunchClient">服务配置</label><select id="apiServiceLaunchClient" class="input" ${blocked ? 'disabled' : ''}><option value="" ${!owner.clientId ? 'selected' : ''} disabled>选择已启用的客户端</option>${owner.clients.map((row) => `<option value="${esc(row.id)}" ${row.id === owner.clientId ? 'selected' : ''}>${esc(row.name)}</option>`).join('')}</select></div>` : '';
-  $('#apiServiceLaunchContent').innerHTML = `${select}${preview ? `<div class="wb-open-sum"><span class="wb-brand empty">${icon('route')}</span><div><b>${esc(preview.clientName)}</b><small>通过本地 API 服务</small></div></div><div class="wb-sec-title"><span>可选模型 · ${preview.models.length}</span></div><div class="wb-models">${preview.models.map((model) => `<span class="wb-mchip">${esc(model)}</span>`).join('')}</div><label class="wb-check-row"><input id="apiServiceLaunchOverride" type="checkbox" ${preview.catalogOverride ? 'checked' : ''} ${blocked ? 'disabled' : ''}>覆盖工具的模型选择栏</label><label class="wb-check-row"><input id="apiServiceLaunchReady" type="checkbox" ${blocked ? 'disabled' : ''}>同系列工具任务已经结束</label>${preview.requiresModeChange ? `<label class="wb-check-row"><input id="apiServiceLaunchMode" type="checkbox" ${blocked ? 'disabled' : ''}>开启 Claude Desktop 第三方模式</label>` : ''}` : `<p class="muted small">${owner.loading ? '正在检查本地配置…' : '选择服务配置后继续'}</p>`}${owner.error ? `<div class="callout warn" role="status">${esc(owner.error)}</div>` : ''}<button class="btn primary" data-act="codexAPIServiceLaunch" ${!preview || blocked ? 'disabled' : ''}>打开 ${esc(API_SERVICE_TOOLS[owner.target])}</button>`;
+  $('#apiServiceLaunchContent').innerHTML = `${select}${preview ? `<div class="wb-open-sum"><span class="wb-brand empty">${icon('route')}</span><div><b>${esc(preview.clientName)}</b><small>通过本地 API 服务</small></div></div><div class="wb-sec-title"><span>可选模型 · ${preview.models.length}</span></div><div class="wb-models">${preview.models.map((model) => `<span class="wb-mchip">${esc(model)}</span>`).join('')}</div><label class="wb-check-row"><input id="apiServiceLaunchOverride" type="checkbox" ${owner.catalogOverride ? 'checked' : ''} ${blocked ? 'disabled' : ''}>覆盖工具的模型选择栏</label>${preview.requiresModeChange ? '<p class="wb-hint">应用时开启 Claude Desktop 第三方模式，原账号聊天不删除。</p>' : ''}<p class="wb-hint">会先停止该 Agent 的当前任务，再应用所选 API。</p>` : `<p class="muted small">${owner.loading ? '正在检查本地配置…' : '选择服务配置后继续'}</p>`}<p id="apiServiceLaunchProgress" class="wb-hint" role="status" aria-live="polite">${esc(owner.operationStage || '')}</p>${owner.error ? `<div class="callout warn" role="status">${esc(owner.error)}${owner.executionUnknown ? '<br>操作结果未确认，请检查原工具状态；不会自动重试。' : '<br>请重新打开并检查配置后再试。'}</div>` : ''}<div class="modal-foot"><button class="btn" data-act="codexAPIServiceLaunch" data-apply-only="true" ${!preview || blocked ? 'disabled' : ''}>仅应用配置</button><button class="btn primary" data-act="codexAPIServiceLaunch" ${!preview || blocked ? 'disabled' : ''}>应用并打开</button></div>`;
 }
+
 async function readAPIServiceLaunchPreview(owner) {
   if (!apiServiceLaunchCurrent(owner) || !owner.clients.some((row) => row.id === owner.clientId) || owner.submitted) return;
   const sequence = ++owner.sequence, clientId = owner.clientId;
@@ -189,6 +195,7 @@ async function readAPIServiceLaunchPreview(owner) {
     const row = await api('/api/local/codex-api/launch/preview', { clientId, target: owner.target });
     if (!apiServiceLaunchCurrent(owner) || sequence !== owner.sequence || owner.clientId !== clientId) return;
     if (row?.ready !== true || row.clientId !== clientId || row.target !== owner.target || !/^mla-v1-[a-f0-9]{64}$/.test(row.revision || '') || typeof row.clientName !== 'string' || typeof row.catalogOverride !== 'boolean' || typeof row.requiresModeChange !== 'boolean' || !Array.isArray(row.models) || !row.models.length || row.models.length > 1000 || row.models.some((model) => typeof model !== 'string' || !model || model.length > 256)) throw new Error('本地配置校验失败，请重新打开');
+    owner.catalogOverride = row.catalogOverride;
     owner.preview = { clientId, target: owner.target, revision: row.revision, clientName: row.clientName, catalogOverride: row.catalogOverride, requiresModeChange: row.requiresModeChange, models: [...row.models] };
   } catch (error) {
     if (apiServiceLaunchCurrent(owner) && sequence === owner.sequence) owner.error = error.message || '本地配置校验失败，请重新打开';
@@ -221,31 +228,38 @@ async function confirmAPIServiceLaunch(button) {
   if (!apiServiceLaunchCurrent(owner) || apiServiceLaunchBusy() || owner.loading || owner.submitted || !owner.preview || button?.isConnected === false) return;
   if (!Object.hasOwn(API_SERVICE_TOOLS, owner.target)) throw new Error('不支持此工具');
   if ($('#apiServiceLaunchClient') && $('#apiServiceLaunchClient').value !== owner.clientId) throw new Error('服务配置已变化，请重新选择');
-  if (!$('#apiServiceLaunchReady')?.checked) throw new Error('请先确认同系列工具任务已经结束');
-  if (owner.preview.requiresModeChange && !$('#apiServiceLaunchMode')?.checked) throw new Error('请确认开启第三方模式');
-  const body = { clientId: owner.clientId, target: owner.target, revision: owner.preview.revision, confirmed: true, catalogOverride: $('#apiServiceLaunchOverride')?.checked === true,
-    ...(owner.preview.requiresModeChange ? { allowModeChange: true } : {}) };
-  owner.submitted = true;
-  const progress = typeof beginLaunchProgress === 'function' ? beginLaunchProgress(owner.target, owner.preview.clientName, ['提交启动请求']) : null;
-  if (typeof WB !== 'undefined') WB.launchPending = true;
+  const operationId = safeAgentOperationId(), controller = new AbortController(), applyOnly = button.dataset.applyOnly === 'true';
+  const body = { protocol: SAFE_AGENT_CHANGE_PROTOCOL, operationId, clientId: owner.clientId, target: owner.target, revision: owner.preview.revision,
+    catalogOverride: $('#apiServiceLaunchOverride')?.checked === true, allowModeChange: true, applyOnly };
+  owner.catalogOverride = body.catalogOverride;
+  owner.submitted = true; owner.controller = controller; owner.operationStage = '正在检查账号与工具…';
+  const operation = { operationId, controller };
+  const progress = inlineAgentProgress(owner, () => paintAPIServiceLaunchProgress(owner), applyOnly);
+  if (typeof WB !== 'undefined') { WB.launchPending = true; WB.activeOperation = operation; }
   try {
     await withAPIClientWrite(async () => {
       renderAPIServiceLaunch(owner);
-      const row = await (typeof launchAPI === 'function' ? launchAPI : ((path, body) => api(path, body)))('/api/local/codex-api/launch', body, progress);
-      if (row?.ok !== true) throw new Error('打开结果待确认');
-      progress?.finish();
+      const row = await launchAPI('/api/local/codex-api/launch/safe-v1', body, progress, { signal: controller.signal });
+      requireSafeAgentReceipt(row, operationId);
+      progress.finish();
       if (!apiServiceLaunchCurrent(owner)) return;
-      closeOfficialPanel(); toast('已打开', 'ok');
+      owner.controller = null;
+      closeOfficialPanel(); toast(applyOnly ? '配置已应用' : '已打开', 'ok');
     });
   } catch (error) {
-    progress?.fail(error);
-    if (apiServiceLaunchCurrent(owner)) { owner.error = error.message || '打开结果待确认'; renderAPIServiceLaunch(owner); }
+    progress.fail(error);
+    if (apiServiceLaunchCurrent(owner)) {
+      owner.executionUnknown = error.uncertain === true || error.started === true || error.applied === true;
+      owner.error = error.message || '操作结果未确认'; renderAPIServiceLaunch(owner);
+    }
   } finally {
-    if (typeof WB !== 'undefined') WB.launchPending = false;
+    owner.controller = null;
+    if (typeof WB !== 'undefined' && WB.activeOperation === operation) { WB.activeOperation = null; WB.launchPending = false; }
     void loadCodexAPIOverview();
     if (typeof wbRefreshLaunchCards === 'function') void wbRefreshLaunchCards().catch(() => undefined);
   }
 }
+
 function codexAPIOverviewHTML() {
   const status = CODEX_API_OVERVIEW.status;
   const title = '<div class="official-card-top"><span class="official-card-name">本地 API 服务</span>';
@@ -701,6 +715,7 @@ function disposeOfficialPanel() {
   if (typeof closeAPIRequests === 'function') closeAPIRequests(false);
   if (typeof accountDailyCancelPanel === 'function') accountDailyCancelPanel();
   apiClientPanel = null;
+  apiServiceLaunchPanel?.controller?.abort();
   apiServiceLaunchPanel = null;
   const key = OFFICIAL_PANEL.keyElement || $('#apiCreatedKey');
   if (key) { key.value = ''; key.type = 'password'; }

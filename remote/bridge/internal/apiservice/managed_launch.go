@@ -45,7 +45,7 @@ func managedAPIPath(path string) (string, string, bool) {
 		return "", canonicalAPIPath(path), true
 	}
 	target, route, ok := strings.Cut(remaining, "/")
-	if !ok || target != "codex" && target != "codex-desktop" && target != "claude" && target != "claude-desktop" {
+	if !ok || target != "codex" && target != "codex-desktop" && target != "claude" && target != "claude-desktop" && !config.IsAdditionalTool(target) {
 		return "", "", false
 	}
 	if !strings.HasPrefix(route, "v1/") {

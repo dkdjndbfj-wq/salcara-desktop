@@ -54,6 +54,21 @@ func main() {
 			}
 			continue
 		}
+		if frame.Method == "initialize" || frame.Method == "session/prompt" {
+			// The synthetic child observes the actual persisted gate, so this
+			// catches regressions that start/send before writing the restart fence.
+			data, err := os.ReadFile(filepath.Join(os.Getenv("DSH_HOME"), "..", "session.json"))
+			var checkpoint struct {
+				RuntimePending bool `json:"runtimePending"`
+				Info           struct {
+					Status string `json:"status"`
+				} `json:"info"`
+			}
+			if err != nil || json.Unmarshal(data, &checkpoint) != nil || !checkpoint.RuntimePending || checkpoint.Info.Status != "running" {
+				fmt.Fprintln(os.Stderr, "missing durable runtime fence before execution")
+				os.Exit(24)
+			}
+		}
 		switch frame.Method {
 		case "initialize":
 			var p struct {

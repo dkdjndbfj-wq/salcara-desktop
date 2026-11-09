@@ -30,27 +30,28 @@ type claudeAgent struct {
 	aps         *approvals
 	hist        *claudeHistory
 
-	startMu           sync.Mutex // serializes owned startup with Close
-	mu                sync.Mutex
-	procs             map[string]*claudeProc
-	workers           map[*claudeProc]struct{}        // includes retired workers without confirmed OS exit
-	live              map[string]protocol.SessionInfo // sessions run by the bridge (this bridge run)
-	policies          map[string]string
-	planRequired      map[string]bool                    // independent of confirmed mode; survives owned worker replacement
-	desktop           map[string]bool                    // sessions that belong to Claude Desktop's Code tab
-	fromPhone         map[string]bool                    // phone-created sessions with an unclaimed Desktop import
-	allowed           map[string]map[string]bool         // "allow_session" tool names per session
-	recentOwned       map[string]time.Time               // when a bridge process for the session last exited
-	continuedTerminal map[string]string                  // terminal CAS reserved by an in-flight Continue
-	elicitationHooks  map[string]*claudeElicitationLease // ephemeral, worker-bound local HTTP hook
-	contextState      claudeContextRegistry
-	sessionActions    claudeSessionActionRegistry
-	sideQuestions     sideQuestionRegistry
-	actionSDKResolve  func(context.Context) (*claudeSessionSDK, error) // test seam; production resolves the installed official SDK
-	actionSDKRun      claudeSessionSDKRunner                           // test seam; production invokes native SDK helpers
-	closed            bool
-	closeCh           chan struct{}
-	wg                sync.WaitGroup
+	startMu                 sync.Mutex // serializes owned startup with Close
+	mu                      sync.Mutex
+	procs                   map[string]*claudeProc
+	workers                 map[*claudeProc]struct{}        // includes retired workers without confirmed OS exit
+	live                    map[string]protocol.SessionInfo // sessions run by the bridge (this bridge run)
+	policies                map[string]string
+	planRequired            map[string]bool                    // independent of confirmed mode; survives owned worker replacement
+	desktop                 map[string]bool                    // sessions that belong to Claude Desktop's Code tab
+	fromPhone               map[string]bool                    // phone-created sessions with an unclaimed Desktop import
+	allowed                 map[string]map[string]bool         // "allow_session" tool names per session
+	recentOwned             map[string]time.Time               // when a bridge process for the session last exited
+	continuedTerminal       map[string]string                  // terminal CAS reserved by an in-flight Continue
+	elicitationHooks        map[string]*claudeElicitationLease // ephemeral, worker-bound local HTTP hook
+	contextState            claudeContextRegistry
+	sessionActions          claudeSessionActionRegistry
+	sideQuestions           sideQuestionRegistry
+	actionSDKResolve        func(context.Context) (*claudeSessionSDK, error) // test seam; production resolves the installed official SDK
+	actionSDKRun            claudeSessionSDKRunner                           // test seam; production invokes native SDK helpers
+	closed                  bool
+	apiChangeRetiredUnknown bool // safe-only fence for an exited root without descendant-exit evidence
+	closeCh                 chan struct{}
+	wg                      sync.WaitGroup
 }
 
 type claudeProc struct {
@@ -989,6 +990,7 @@ func (a *claudeAgent) finishExit(p *claudeProc, werr error) {
 		a.hist.recordOwnedExit(p, werr == nil || p.wasStopped())
 		a.mu.Lock()
 		if p.processExitConfirmed() {
+			a.rememberRetiredClaudeTreeLocked(p)
 			delete(a.workers, p)
 		}
 		close(p.done)

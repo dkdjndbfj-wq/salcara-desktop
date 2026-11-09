@@ -132,6 +132,12 @@ func startPlatform(ctx context.Context, p Plan) (int, error) {
 }
 
 func startTerminal(ctx context.Context, p Plan) (int, error) {
+	return startManagedTerminal(ctx, p)
+}
+
+// Kept for receipt compatibility tests; production CLI launches always use the
+// durable Job supervisor, including launches from the separate history page.
+func startLegacyTerminal(ctx context.Context, p Plan) (int, error) {
 	ctx, cancel := context.WithTimeout(ctx, 12*time.Second)
 	defer cancel()
 	if err := ctx.Err(); err != nil {

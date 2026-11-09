@@ -25,7 +25,7 @@ function setup(fetch) {
     setInterval() {}, clearInterval() {}, setTimeout() {}, clearTimeout() {},
   });
   vm.runInContext(source, context);
-  const api = vm.runInContext('({beginLaunchProgress, launchAPI})', context);
+  const api = vm.runInContext('({beginLaunchProgress, launchAPI, inlineAgentProgress, requireSafeAgentReceipt})', context);
   return { ...api, body, text: () => {
     const collect = node => [node.textContent, ...node.children.map(collect)].join(' ');
     return collect(body);
@@ -103,4 +103,55 @@ test('stream integrity failures retain apply-only wording and release the reader
 test('launchAPI callers without progress keep the existing default', async () => {
   const ui = setup(async () => ({ ok: false, status: 500, headers: new Headers(), json: async () => ({ ok: false }) }));
   await assert.rejects(ui.launchAPI('/fixture/switch', {}), /启动失败 \(500\)/);
+});
+
+test('safe routes reject old JSON and plain-text backends without ambiguous status or fallback', async () => {
+  for (const status of [404,405]) for (const json of [true,false]) {
+    let calls=0;
+    const ui=setup(async()=>{calls++;return {ok:false,status,headers:new Headers({'Content-Type':json?'application/json':'text/plain'}),json:async()=>{if(!json)throw new SyntaxError('plain text');return {ok:false,error:'Unknown route'};}};});
+    await assert.rejects(ui.launchAPI('/api/local/agent-change/v1',{protocol:'safe-agent-change.v1'}),error=>error.status===status&&!error.uncertain&&/更新电脑端/.test(error.message));
+    assert.equal(calls,1);
+  }
+});
+
+test('external cancellation aborts the same POST, removes its listener and never retries', async () => {
+  let calls=0,removed=0,received;
+  const controller=new AbortController(),signal=controller.signal;
+  const remove=signal.removeEventListener.bind(signal);
+  signal.removeEventListener=(...args)=>{removed++;remove(...args);};
+  const ui=setup(async(_path,options)=>{calls++;received=options.signal;return await new Promise((_,reject)=>options.signal.addEventListener('abort',()=>reject(Error('aborted'))));});
+  const pending=ui.launchAPI('/api/local/agent-change/v1',{protocol:'safe-agent-change.v1'},null,{signal});
+  controller.abort();
+  await assert.rejects(pending,error=>error.cancelled===true&&error.uncertain===true);
+  assert.equal(received.aborted,true);assert.equal(calls,1);assert.equal(removed,1);
+});
+
+test('an already cancelled operation cannot dispatch a POST', async () => {
+  let calls=0;const controller=new AbortController();controller.abort();
+  const ui=setup(async()=>{calls++;throw Error('must not fetch');});
+  await assert.rejects(ui.launchAPI('/safe',{},null,{signal:controller.signal}),error=>error.cancelled===true);
+  assert.equal(calls,0);
+});
+
+test('known stop rejection preserves server code and status while lost receipt stays unknown', async () => {
+  const ui=setup(async()=>({ok:false,status:409,headers:new Headers(),json:async()=>({ok:false,error:'stop timed out',code:'safe_agent_change_stop_timeout'})}));
+  await assert.rejects(ui.launchAPI('/safe',{}),error=>error.status===409&&error.code==='safe_agent_change_stop_timeout'&&!error.uncertain);
+  assert.throws(()=>ui.requireSafeAgentReceipt({ok:true,protocol:'safe-agent-change.v1',operationId:'other'},'expected'),error=>error.uncertain===true);
+  assert.equal(ui.requireSafeAgentReceipt({ok:true,protocol:'safe-agent-change.v1',operationId:'expected'},'expected').ok,true);
+});
+
+test('submitted or applied outcomes preserve the authoritative uncertainty envelope', async () => {
+  for(const started of [false,true]){
+    const ui=setup(async()=>({ok:false,status:500,headers:new Headers(),json:async()=>({ok:false,error:'submitted',started,applied:true,uncertain:true,result:{submitted:true,uncertain:true}})}));
+    await assert.rejects(ui.launchAPI('/safe',{}),error=>error.applied===true&&error.started===started&&error.uncertain===true&&error.result.submitted===true);
+    assert.throws(()=>ui.requireSafeAgentReceipt({ok:true,protocol:'safe-agent-change.v1',operationId:'expected',result:{submitted:true,uncertain:true}},'expected'),error=>error.uncertain===true&&error.submitted===true);
+  }
+});
+
+test('inline phases update the owner without creating any progress overlay', () => {
+  const ui=setup(),owner={},stages=[];
+  const progress=ui.inlineAgentProgress(owner,()=>stages.push(owner.operationStage),false);
+  for(const step of ['stop','catalog','profile','start','record'])progress.event({type:'phase',step});
+  assert.deepEqual(stages,['正在停止该 Agent 的当前任务…','正在读取模型目录…','正在应用所选 API…','正在打开 Agent…','正在保存操作结果…']);
+  assert.equal(ui.body.children.length,0);
 });

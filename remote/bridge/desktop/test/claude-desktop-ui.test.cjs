@@ -4,7 +4,7 @@ const assert = require('node:assert/strict');
 const vm = require('node:vm');
 const { setup, deferred } = require('./helpers/workbench.cjs');
 const fixture = options => setup({ claude: true, ...options });
-const ready = f => { f.document.getElementById('cdReady').checked = true; };
+const ready = f => assert.equal(f.document.getElementById('cdReady'), null);
 
 test('Claude Desktop card keeps original styling and dedicated restore route', async () => {
   const f = fixture();
@@ -20,9 +20,9 @@ test('Claude selection checks capability without saving or launching; cancellati
   const f = fixture();
   await f.change('claude-desktop', 'api-shared');
   assert.match(f.modal.innerHTML, /打开 Claude Desktop/);
-  assert.match(f.modal.innerHTML, /配置并打开/);
-  assert.equal(f.document.getElementById('cdReady').checked, false);
-  assert.equal(f.button('cdGo').disabled, true);
+  assert.match(f.modal.innerHTML, /应用并打开/);
+  assert.equal(f.document.getElementById('cdReady'), null);
+  assert.equal(f.button('cdGo').disabled, false);
   assert.equal(f.calls.filter(c => c.body).length, 0);
   assert.equal(f.backend.bindings['claude-desktop'].accountId, '');
   f.ACTIONS.closeModal(f.button('closeModal'), { target: { closest: () => null } });
@@ -41,17 +41,20 @@ test('unbound and non-callable Claude choices show the selected placeholder', ()
 });
 
 test('explicit Claude confirmation uses the dedicated source-bound transaction once', async () => {
-  const gate = deferred(), f = fixture({ onSwitch: () => gate.promise });
+  const gate = deferred(), f = fixture({ onChange: () => gate.promise });
   await f.change('claude-desktop', 'api-shared'); ready(f);
   const button = f.button('cdGo');
   const first = f.ACTIONS.cdGo(button);
   await Promise.resolve(); await Promise.resolve();
   const second = f.ACTIONS.cdGo(button);
   gate.resolve(); await Promise.all([first, second]);
-  const writes = f.calls.filter(c => c.url.endsWith('/switch'));
+  const writes = f.calls.filter(c => c.url === '/api/local/agent-change/v1');
   assert.equal(writes.length, 1);
-  assert.equal(writes[0].url, '/api/local/claude-desktop/switch');
-  assert.deepEqual(writes[0].body, { id: 'api-shared', confirmed: true, allowModeChange: true, catalogOverride: true, expectedSourceRevision: 'src-v1-' + 'a'.repeat(64) });
+  assert.equal(writes[0].url, '/api/local/agent-change/v1');
+  assert.equal(writes[0].body.target, 'claude-desktop');
+  assert.equal(writes[0].body.protocol, 'safe-agent-change.v1');
+  assert.equal(writes[0].body.expectedSourceRevision, 'src-v1-' + 'a'.repeat(64));
+  assert.equal(writes[0].body.override, true);
   assert.equal(f.calls.some(c => c.url === '/api/local/bind'), false);
   assert.equal(f.modal.innerHTML, '');
 });
@@ -61,7 +64,7 @@ test('unsupported or managed Claude configuration cannot launch', async () => {
     const f = fixture({ onStatus: () => status });
     await f.change('claude-desktop', 'api-shared'); ready(f);
     await f.ACTIONS.cdGo(f.button('cdGo'));
-    assert.equal(f.calls.some(c => c.url.endsWith('/switch')), false);
+    assert.equal(f.calls.some(c => c.url === '/api/local/agent-change/v1'), false);
   }
 });
 
@@ -74,7 +77,7 @@ test('late Claude status and catalog reads cannot reopen a closed dialog', async
     f.ACTIONS.closeModal(f.button('closeModal'), { target: { closest: () => null } });
     gate.resolve({ supported: true }); await request;
     assert.equal(f.modal.innerHTML, '');
-    assert.equal(f.calls.some(c => c.url.endsWith('/switch')), false);
+    assert.equal(f.calls.some(c => c.url === '/api/local/agent-change/v1'), false);
   }
 });
 
@@ -90,9 +93,9 @@ test('Claude menu preference is a draft until explicit confirmation and preserve
   assert.equal(f.WB.accountOpen.override, false);
   assert.match(f.modal.innerHTML, /grok-test/);
   ready(f); await f.ACTIONS.cdGo(f.button('cdGo'));
-  const mutation = f.calls.find(c => c.url === '/api/local/claude-desktop/switch');
-  assert.equal(mutation.body.catalogOverride, false);
-  assert.equal('model' in mutation.body, false);
+  const mutation = f.calls.find(c => c.url === '/api/local/agent-change/v1');
+  assert.equal(mutation.body.override, false);
+  assert.equal(mutation.body.model, 'grok-test');
   assert.equal(f.backend.accounts[0].model, 'grok-test');
 });
 
@@ -105,5 +108,5 @@ test('Claude capability read failure has a recoverable recheck action', async ()
   fail = false; await f.ACTIONS.wbRecheck();
   assert.equal(f.WB.accountOpen.verified, true);
   assert.equal(f.WB.accountOpen.status.supported, true);
-  assert.equal(f.document.getElementById('cdReady').checked, false);
+  assert.equal(f.document.getElementById('cdReady'), null);
 });

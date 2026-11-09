@@ -5,7 +5,6 @@ import (
 	"errors"
 	"os"
 	"regexp"
-	"strings"
 
 	"salcara/bridge/internal/config"
 )
@@ -31,22 +30,22 @@ func (s *Service) Resume(ctx context.Context, a config.LocalAccount, target, id,
 	if err != nil {
 		return Result{}, err
 	}
-	// Preserve a normalized npm shim's JS prefix, but replace only resume args.
-	matched := false
+	// Normal launches enter the Agent directly. Only this explicit history
+	// action requests a resume; preserve a normalized npm shim's JS prefix.
+	prefix := append([]string(nil), p.Args...)
 	for i, arg := range p.Args {
-		if (target == "codex" && arg == "resume") || (target == "claude" && arg == "--resume") {
-			prefix := append([]string{}, p.Args[:i]...)
-			if target == "codex" {
-				p.Args = append(prefix, "resume", id, "--model", a.Model)
-			} else {
-				p.Args = append(prefix, "--resume", id, "--model", a.Model)
-			}
-			matched = true
+		if arg == "--model" {
+			prefix = append([]string(nil), p.Args[:i]...)
 			break
 		}
 	}
-	if !matched || strings.Join(p.Args, " ") == "" {
-		return Result{}, errors.New("无法解析原工具恢复入口")
+	if target == "codex" {
+		p.Args = append(prefix, "resume", id)
+	} else {
+		p.Args = append(prefix, "--resume", id)
+	}
+	if a.Model != "" {
+		p.Args = append(p.Args, "--model", a.Model)
 	}
 	if err := os.MkdirAll(p.RuntimeDir, 0o700); err != nil {
 		return Result{}, err

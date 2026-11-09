@@ -6,8 +6,8 @@ import vm from 'node:vm';
 // Execute the shipped handlers, request fallback, busy helper and router.
 // Only DOM, transport and page renderers are synthetic; no native app opens.
 const source = fs.readFileSync(new URL('../internal/console/web/app.js', import.meta.url), 'utf8').replaceAll('\r\n', '\n');
-const names = ['resumeSession', 'localLaunch', 'localSwitchConfirm'];
-const endpoints = { resumeSession: '/api/local/resume', localLaunch: '/api/local/launch', localSwitchConfirm: '/api/local/switch' };
+const names = ['resumeSession'];
+const endpoints = { resumeSession: '/api/local/resume' };
 const clone = value => JSON.parse(JSON.stringify(value));
 const gate = () => { let resolve, reject; const promise = new Promise((a, b) => { resolve = a; reject = b; }); return { promise, resolve, reject }; };
 const flush = async () => { for (let i = 0; i < 20; i++) await Promise.resolve(); };
@@ -176,7 +176,7 @@ for (const name of names) {
 }
 
 test('session-detail resume with no modal and independent launch ignore replaced same-route content', async () => {
-  for (const name of ['resumeSession', 'localLaunch']) for (const fails of [false, true]) {
+  for (const name of ['resumeSession']) for (const fails of [false, true]) {
     const f = fixture(name, { detail: true }), running = settled(f.call());
     assert.equal(f.nodes.has('restoreError'), false);
     await f.navigate('settings'); await f.navigate('accounts');
@@ -190,27 +190,28 @@ test('session-detail resume with no modal and independent launch ignore replaced
   }
 });
 
-test('switch completion cannot paint after navigation or a new dialog during its own page refresh', async () => {
-  for (const changed of ['navigation', 'roundtrip', 'new-dialog']) {
-    const f = fixture('localSwitchConfirm'), render = gate();
-    let first = true;
-    f.setRender(async () => { if (first) { first = false; await render.promise; } });
-    const running = settled(f.call()); f.pending.resolve(success()); await flush();
-    assert.equal(f.renders.length, 1); assert.equal(f.WB.launchPending, true);
-    if (changed === 'new-dialog') f.reopen();
-    else { await f.navigate('settings'); if (changed === 'roundtrip') await f.navigate('accounts'); }
-    const viewHTML = f.view.innerHTML, modalHTML = f.modal.innerHTML;
-    render.resolve(); const result = await running;
-    assert.equal(result.error, undefined); assert.equal(f.notices.length, 0); assert.equal(f.view.children.length, 0);
-    assert.equal(f.view.innerHTML, viewHTML); assert.equal(f.modal.innerHTML, modalHTML);
-    assert.equal(f.WB.launchPending, false); assert.equal(f.calls.length, 1);
+test('legacy launch and switch delegate to the current Agent panel without a second confirmation or a bind', async () => {
+  for (const name of ['localLaunch', 'localSwitch', 'toolRestart', 'toolReadModels']) {
+    const f = fixture('resumeSession'), delegated = [];
+    f.context.confirm = () => { throw new Error('unexpected confirmation'); };
+    f.context.wbOpenAccount = async (...args) => delegated.push(args);
+    f.context.toolForm = () => ({ target: 'codex', id: 'synthetic-account' });
+    vm.runInContext(`Object.assign(ACTIONS, {${actionSource(name)}});`, f.context);
+    await f.context.ACTIONS[name](f.button);
+    assert.equal(delegated.length, 1);
+    assert.deepEqual(delegated[0].slice(0, 2), ['codex', 'synthetic-account']);
+    assert.equal(delegated[0][2], f.button);
+    assert.equal(f.calls.length, 0);
+    assert.equal(f.progressEvents.length, 0);
   }
 });
 
-test('cancelled isolation confirmation and unchecked switch make no launch request', async () => {
-  const isolated = fixture('localLaunch'); isolated.setConfirmation(false); await isolated.call();
-  assert.equal(isolated.calls.length, 0); assert.equal(isolated.progressEvents.length, 0); assert.equal(isolated.WB.launchPending, false);
-  const switching = fixture('localSwitchConfirm'); switching.nodes.get('switchReady').checked = false;
-  await assert.rejects(switching.call(), /确认/);
-  assert.equal(switching.calls.length, 0); assert.equal(switching.progressEvents.length, 0); assert.equal(switching.WB.launchPending, false);
+test('obsolete apply/confirm handlers fail closed without invoking old bind or switch routes', async () => {
+  for (const name of ['localApply', 'localSwitchConfirm']) {
+    const f = fixture('resumeSession');
+    vm.runInContext(`Object.assign(ACTIONS, {${actionSource(name)}});`, f.context);
+    await assert.rejects(f.context.ACTIONS[name](f.button), /过期/);
+    assert.equal(f.calls.length, 0);
+    assert.equal(f.progressEvents.length, 0);
+  }
 });

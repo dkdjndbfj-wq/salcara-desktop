@@ -73,7 +73,6 @@ func (s *Service) PrepareSwitch(ctx context.Context, a config.LocalAccount, targ
 		if isDesktop(t.ID) {
 			p.AppData = originalAppData(t)
 		} else {
-			p.Args = []string{"resume", "--all"}
 			if a.Model != "" {
 				p.Args = append(p.Args, "--model", a.Model)
 			}
@@ -94,7 +93,6 @@ func (s *Service) PrepareSwitch(ctx context.Context, a config.LocalAccount, targ
 		if isDesktop(t.ID) {
 			p.AppData = originalAppData(t)
 		} else {
-			p.Args = []string{"--resume"}
 			if a.Model != "" {
 				p.Args = append(p.Args, "--model", a.Model)
 			}
@@ -121,7 +119,7 @@ func (s *Service) PreviewSwitch(ctx context.Context, a config.LocalAccount, targ
 		}
 	}
 	if target == "codex" || target == "claude" {
-		info.Message += " 终端中的旧进程请先手动退出；新终端会打开原有会话的恢复列表。"
+		info.Message += " 新终端会直接打开 Agent；已有聊天可从独立的历史入口查看和恢复。"
 	} else if config.IsAdditionalTool(target) {
 		info.Message += " 请先退出此 Agent；打开后可在原工具选择已有会话。"
 	}
@@ -181,7 +179,8 @@ func (s *Service) SwitchAuthorized(ctx context.Context, a config.LocalAccount, t
 }
 
 // ApplyAuthorized writes the same leased connection and transactional backup as
-// SwitchAuthorized, without stopping or starting the user's native application.
+// SwitchAuthorized, without starting the user's native application. A safe
+// configuration transaction still confirms all affected workers have stopped.
 func (s *Service) ApplyAuthorized(ctx context.Context, a config.LocalAccount, target, workspace string, paths map[string]string, authorize func() error) (Result, error) {
 	return s.configureAuthorized(ctx, a, target, workspace, paths, authorize, false)
 }
@@ -252,7 +251,12 @@ func (s *Service) configureAuthorized(ctx context.Context, a config.LocalAccount
 	if err := saveSnapshot(manifest, originals); err != nil {
 		return Result{}, err
 	}
-	if start && isDesktop(target) {
+	if safeConfigurationChange(ctx) {
+		LaunchPhase(ctx, "stop", "等待同配置工具安全退出")
+		if err := s.stopNativeConfigurationFamily(ctx, p, paths); err != nil {
+			return Result{}, err
+		}
+	} else if start && isDesktop(target) {
 		LaunchPhase(ctx, "stop", "等待原工具退出")
 		if s.Stop == nil {
 			return Result{}, errors.New("没有可用的安全退出方式，请先手动关闭原工具")
@@ -293,6 +297,9 @@ func (s *Service) configureAuthorized(ctx context.Context, a config.LocalAccount
 		return Result{}, err
 	}
 	LaunchPhase(ctx, "profile", "写入 API 与模型配置", "写入连接配置")
+	if err := configurationGuard(ctx); err != nil {
+		return Result{}, err
+	}
 	_, v1, _ := config.APIBase(a.BaseURL)
 	if target == "claude-desktop" {
 		err = toolcfg.ApplySwitchClaudeDesktop(p.AppData, a.Name, a.BaseURL, a.Key, a.AuthMode, a.Model)
@@ -311,6 +318,9 @@ func (s *Service) configureAuthorized(ctx context.Context, a config.LocalAccount
 		return rollback(err)
 	}
 	LaunchPhase(ctx, "profile", "写入 API 与模型配置", "保存配置备份状态")
+	if err := configurationGuard(ctx); err != nil {
+		return rollback(err)
+	}
 	for i := range originals {
 		b, e := os.ReadFile(originals[i].Path)
 		if os.IsNotExist(e) && !originals[i].Existed {
@@ -343,19 +353,19 @@ func (s *Service) configureAuthorized(ctx context.Context, a config.LocalAccount
 		return Result{Target: target, ProfileDir: p.ProfileDir, Workspace: p.Workspace, Message: "API 配置已应用；未启动或重启工具。已打开的工具可能需要重新打开才能读取新配置。使用期间请保持 Bridge 运行；尚未验证上游推理。"}, nil
 	}
 	LaunchPhase(ctx, "start", "创建工具进程")
+	if err := configurationGuard(ctx); err != nil {
+		return rollback(err)
+	}
 	pid, err := s.startWithClaudeAPIPin(ctx, p, a)
 	if err != nil {
 		return rollback(err)
 	}
-	if target == "claude" && pid == 0 {
-		return Result{Target: target, ProfileDir: p.ProfileDir, Workspace: p.Workspace, Message: "API 配置已保留，启动请求已提交；进程状态尚未确认，请检查终端后再重试。"}, nil
+	if !isDesktop(target) && pid == 0 {
+		return Result{Target: target, Uncertain: true, Submitted: true, ProfileDir: p.ProfileDir, Workspace: p.Workspace, Message: "API 配置已保留，启动请求已提交；进程状态尚未确认，请先检查原工具，不会自动重发。"}, nil
 	}
 	msg := "已切换并打开原工具，沿用原数据目录；聊天记录、项目文件未删除或迁移。"
-	if target == "codex" || target == "claude" {
-		msg += " 请从恢复列表选择原会话继续。"
-	}
 	msg += " 启动成功不代表服务商模型已经通过实际请求验证。"
-	return Result{Target: target, PID: pid, ProfileDir: p.ProfileDir, Workspace: p.Workspace, Message: msg}, nil
+	return Result{Target: target, PID: pid, Submitted: true, ProfileDir: p.ProfileDir, Workspace: p.Workspace, Message: msg}, nil
 }
 
 func defaultAppData(t Tool) string {

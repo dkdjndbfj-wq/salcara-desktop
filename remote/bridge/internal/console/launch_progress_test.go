@@ -2,6 +2,7 @@ package console
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -9,9 +10,80 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"salcara/bridge/internal/launcher"
 )
+
+type failedProgressWriter struct{ header http.Header }
+
+func (w *failedProgressWriter) Header() http.Header       { return w.header }
+func (w *failedProgressWriter) WriteHeader(int)           {}
+func (w *failedProgressWriter) Write([]byte) (int, error) { return 0, io.ErrClosedPipe }
+func (w *failedProgressWriter) Flush()                    {}
+
+func TestSafeLaunchProgressLostWriterCancelsBeforeMutation(t *testing.T) {
+	for _, path := range []string{"/api/local/agent-change/v1", "/api/local/codex-api/launch/safe-v1", "/api/local/switch"} {
+		t.Run(path, func(t *testing.T) {
+			called := 0
+			handler := launchProgressEndpoint(func(w http.ResponseWriter, r *http.Request) {
+				called++
+				if safe := strings.Contains(path, "v1"); safe != (r.Context().Err() == context.Canceled) {
+					t.Fatalf("safe=%v context=%v", safe, r.Context().Err())
+				}
+			})
+			r := httptest.NewRequest("POST", path, strings.NewReader("{}"))
+			r.Header.Set("Accept", "application/x-ndjson")
+			handler(&failedProgressWriter{header: make(http.Header)}, r)
+			if called != 1 {
+				t.Fatalf("mutation replayed: %d", called)
+			}
+		})
+	}
+}
+
+func TestSafeLaunchProgressRealHTTPCancellationReachesStopBoundary(t *testing.T) {
+	for _, path := range []string{"/api/local/agent-change/v1", "/api/local/codex-api/launch/safe-v1"} {
+		t.Run(path, func(t *testing.T) {
+			stopped := make(chan error, 1)
+			server := httptest.NewServer(launchProgressEndpoint(func(w http.ResponseWriter, r *http.Request) {
+				launcher.LaunchPhase(r.Context(), "stop", "synthetic stop boundary")
+				select {
+				case <-r.Context().Done():
+					stopped <- r.Context().Err()
+				case <-time.After(3 * time.Second):
+					stopped <- nil
+				}
+			}))
+			defer server.Close()
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			req, err := http.NewRequestWithContext(ctx, "POST", server.URL+path, strings.NewReader("{}"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			req.Header.Set("Accept", "application/x-ndjson")
+			resp, err := server.Client().Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer resp.Body.Close()
+			scanner := bufio.NewScanner(resp.Body)
+			if !scanner.Scan() || !scanner.Scan() || !strings.Contains(scanner.Text(), `"step":"stop"`) {
+				t.Fatal("stop boundary did not flush")
+			}
+			cancel()
+			select {
+			case err := <-stopped:
+				if err != context.Canceled {
+					t.Fatalf("stop did not receive cancellation: %v", err)
+				}
+			case <-time.After(4 * time.Second):
+				t.Fatal("stop boundary hung after client cancellation")
+			}
+		})
+	}
+}
 
 func TestLaunchProgressReadsRealHTTPPostBodyBeforeFirstFlush(t *testing.T) {
 	server := httptest.NewServer(launchProgressEndpoint(func(w http.ResponseWriter, r *http.Request) {

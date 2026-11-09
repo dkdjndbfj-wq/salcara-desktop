@@ -2,6 +2,7 @@ package console
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -43,6 +44,12 @@ func launchProgressEndpoint(next http.HandlerFunc) http.HandlerFunc {
 		var mu sync.Mutex
 		closed := false
 		sequence := 0
+		progressContext := r.Context()
+		cancelDelivery := func() {}
+		if r.URL.Path == "/api/local/agent-change/v1" || r.URL.Path == "/api/local/codex-api/launch/safe-v1" {
+			progressContext, cancelDelivery = context.WithCancel(progressContext)
+		}
+		defer cancelDelivery()
 		controller := http.NewResponseController(w)
 		emit := func(value any) {
 			mu.Lock()
@@ -63,9 +70,10 @@ func launchProgressEndpoint(next http.HandlerFunc) http.HandlerFunc {
 			_ = controller.SetWriteDeadline(time.Time{})
 			if err != nil {
 				closed = true
+				cancelDelivery()
 			}
 		}
-		ctx := launcher.WithLaunchProgress(r.Context(), func(event launcher.LaunchProgress) { emit(event) })
+		ctx := launcher.WithLaunchProgress(progressContext, func(event launcher.LaunchProgress) { emit(event) })
 		launcher.LaunchPhase(ctx, "source", "核对账号与启动配置")
 		result := &launchResponse{header: make(http.Header), status: http.StatusOK}
 		next(result, r.WithContext(ctx))
