@@ -12,7 +12,11 @@ const gate = () => { let resolve, reject; const promise = new Promise((a,b)=>{re
 const flush = async () => { for(let i=0;i<12;i++)await Promise.resolve(); };
 function fixture() {
   const nodes=new Map(),listeners=new Map(),calls=[],notices=[],cards=[];
-  const root={children:[],_html:'',get innerHTML(){return this._html;},set innerHTML(html){
+  const root={children:[],_html:'',querySelector(selector){
+    if(selector.startsWith('#'))return nodes.get(selector.slice(1))||null;
+    const action=selector.match(/^\[data-act="([^"]+)"\]$/)?.[1];
+    return this.children.find(node=>node.dataset.act===action)||null;
+  },get innerHTML(){return this._html;},set innerHTML(html){
     for(const node of this.children)node.isConnected=false;nodes.clear();this.children=[];this._html=String(html);
     for(const match of this._html.matchAll(/<([a-z][\w-]*)\b([^>]*)>/gi)){
       const attrs=match[2],get=name=>attrs.match(new RegExp('(?:^|\\s)'+name+'="([^"]*)"'))?.[1];
@@ -41,7 +45,7 @@ function fixture() {
     },
   });
   vm.runInContext(workbench,context);vm.runInContext(claude,context);
-  const api=vm.runInContext('({wbOpenAccount,wbAccountModels,WB,wbBind,wbLoadModels})',context);
+  const api=vm.runInContext('({wbOpenAccount,wbAccountModels,WB})',context);
   const button=act=>root.children.find(node=>node.dataset.act===act);
   const ready=()=>{const node=nodes.get('wbReady')||nodes.get('cdReady');assert.ok(node);node.checked=true;};
   const change=async node=>{for(const listener of listeners.get('change')||[])await listener({target:node});};
@@ -91,7 +95,7 @@ test('Agent-page launches reuse progress and reject unconfirmed success envelope
   for(const target of ['codex-desktop','codex','claude','claude-desktop'])for(const ok of [true,false]) {
     const f=fixture(),events=[];f.context.beginLaunchProgress=()=>({step(){},finish:()=>events.push('done'),fail:()=>events.push('failed'),cancel(){}});
     await f.ACTIONS.wbOpen({dataset:{target}});
-    if(target!=='claude-desktop')f.ready();
+    assert.equal(f.writes().length,0);f.ready();
     if(!ok)f.setIntercept(url=>url.endsWith('/switch')?{}:undefined);
     await f.go();assert.deepEqual(events,[ok?'done':'failed']);assert.equal(f.calls.filter(c=>c.url.endsWith('/switch')).length,1);
   }
@@ -144,8 +148,15 @@ test('late restart success or failure never closes or repaints an unrelated moda
 test('deleted Claude account during model refresh safely invalidates the modal',async()=>{
   const f=fixture();await f.open('claude-desktop');f.backend.accounts.pop();await f.wbAccountModels(f.WB.accountOpen,false);assert.equal(f.WB.accountOpen,null);assert.equal(f.root.innerHTML,'');assert.equal(f.writes().length,0);
 });
-test('legacy directory reads cannot overwrite or bind a newer account-card dialog',async()=>{
-  const f=fixture(),pending=gate();f.setIntercept(url=>url==='/api/local/models'?pending.promise:undefined);const old=f.wbLoadModels('codex','a',true);await f.open('codex','b');pending.resolve({models:['old-catalog']});await old;assert.equal(f.WB.accountOpen.id,'b');assert.match(f.root.innerHTML,/演示 b/);assert.equal(f.writes().length,0);
+test('an older account model read cannot overwrite or bind a newer account-card dialog',async()=>{
+  const f=fixture(),pending=gate();await f.open('codex','a');
+  f.setIntercept(url=>url==='/api/local/models'?pending.promise:undefined);
+  const old=f.wbAccountModels(f.WB.accountOpen,true);await flush();
+  assert.equal(f.calls.at(-1).url,'/api/local/models');assert.equal(f.calls.at(-1).body.id,'a');
+  await f.open('codex','b');const latest=f.WB.accountOpen,revision=f.S.localAccountsRevision;
+  pending.resolve({models:['old-catalog']});await old;
+  assert.equal(f.WB.accountOpen,latest);assert.equal(f.WB.accountOpen.id,'b');assert.equal(f.S.localAccountsRevision,revision);
+  assert.match(f.root.innerHTML,/演示 b/);assert.equal(f.writes().length,0);
 });
 test('unmanaged or unavailable Claude capabilities and mismatched button IDs cannot switch',async()=>{
   for(const status of [{supported:false},{supported:true,managed:true}]){const f=fixture();f.setIntercept(url=>url.endsWith('/status')?status:undefined);await f.open('claude-desktop');f.ready();await f.go();assert.equal(f.writes().length,0);}
@@ -161,11 +172,17 @@ test('source CAS rejection between fresh read and bind/switch never retries or s
     await f.go();assert.equal(attempted,1);assert.match(f.root.innerHTML,/账号来源已变化/);assert.equal(f.calls.filter(c=>c.url.endsWith('/switch')).length,phase==='bind'?0:1);
   }
 });
-test('legacy binding completion cannot replace an identical but newly opened tool modal',async()=>{
-  const f=fixture(),pending=gate();vm.runInContext("wbOpenModal('codex')",f.context);const oldTitle=f.nodes.get('wbOpenTitle');
-  f.setIntercept(url=>url==='/api/local/bind'?pending.promise:undefined);const binding=f.wbBind('codex',{id:'b'});
-  f.root.innerHTML='';vm.runInContext("wbOpenModal('codex')",f.context);const newTitle=f.nodes.get('wbOpenTitle');assert.notEqual(oldTitle,newTitle);
-  pending.resolve({ok:true});assert.equal(await binding,false);assert.equal(f.nodes.get('wbOpenTitle'),newTitle);assert.equal(f.calls.filter(c=>c.url==='/api/local/accounts').length,0);
+test('binding completion cannot replace an identical but newly opened account-card modal',async()=>{
+  const f=fixture(),pending=gate();await f.open('codex','b');f.ready();const oldTitle=f.nodes.get('wbOpenTitle'),originalHTML=f.root.innerHTML;
+  f.setIntercept(url=>url==='/api/local/bind'?pending.promise:undefined);const binding=f.go();await flush();
+  assert.equal(f.writes().length,1);assert.equal(f.writes()[0].url,'/api/local/bind');
+  // A replaced dialog can have identical markup/IDs; ownership follows the
+  // original node, never its text or selector alone.
+  f.root.innerHTML=originalHTML;const newTitle=f.nodes.get('wbOpenTitle'),latest=f.WB.accountOpen;
+  assert.ok(newTitle);assert.notEqual(oldTitle,newTitle);assert.equal(latest.verified,true);
+  pending.resolve({ok:true});await binding;
+  assert.equal(f.WB.accountOpen,latest);assert.equal(f.nodes.get('wbOpenTitle'),newTitle);
+  assert.equal(f.calls.some(c=>c.url==='/api/local/switch'),false);assert.equal(f.notices.some(([text])=>text==='已打开'),false);
 });
 test('a late Claude capability response cannot repaint a later Codex card dialog',async()=>{
   const f=fixture(),pending=gate();f.setIntercept(url=>url.endsWith('/status')?pending.promise:undefined);const old=f.open('claude-desktop');await flush();await f.open('codex','a');pending.resolve({supported:true});await old;

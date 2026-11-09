@@ -21,7 +21,7 @@ function actionSource(name) {
   return rest.slice(0, next + 1);
 }
 function functionSource(name) {
-  const start = source.indexOf(`async function ${name}(`);
+  const start = source.search(new RegExp(`^(?:async )?function ${name}\\(`, 'm'));
   assert.ok(start >= 0, `missing shipped helper ${name}`);
   const end = source.indexOf('\n}', start);
   assert.ok(end > start, `missing helper boundary after ${name}`);
@@ -83,7 +83,9 @@ function fixture(entry, { fallback = false, detail = false } = {}) {
     calls.push({ kind: 'stream', path, body: clone(body), handle });
     return transport(path, body);
   };
-  vm.runInContext(`${functionSource('api')}\n${functionSource('busy')}\n${functionSource('route')}\nObject.assign(ACTIONS, {\n${names.map(actionSource).join('\n')}\n});`, context);
+  const buttonOperations = source.match(/^const BUTTON_OPERATIONS = new WeakMap\(\);$/m)?.[0];
+  assert.ok(buttonOperations, 'missing shipped button operation registry');
+  vm.runInContext(`${buttonOperations}\n${functionSource('exclusiveUIOperation')}\n${functionSource('api')}\n${functionSource('busy')}\n${functionSource('route')}\nObject.assign(ACTIONS, {\n${names.map(actionSource).join('\n')}\n});`, context);
   return { context, S, WB, button, view, modal, nodes, calls, notices, progress, progressEvents, renders, pending,
     call: (name = entry, target = button) => context.ACTIONS[name](target),
     setTransport: fn => { transport = fn; }, setRender: fn => { render = fn; }, setConfirmation: value => { confirmation = value; },
