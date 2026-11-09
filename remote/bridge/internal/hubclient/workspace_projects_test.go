@@ -106,7 +106,9 @@ func TestProjectDirectoryRevalidatesAuthorizationBeforeMutation(t *testing.T) {
 			checks := 0
 			ctx := WithDirectExecutionValidator(context.Background(), "project-lease", func() error {
 				checks++
-				if checks < 3 {
+				// Dispatch checks the direct lease twice before this operation's
+				// initial guard. Inject at the final guard after its handle opens.
+				if checks < 4 {
 					return nil
 				}
 				switch change {
@@ -115,6 +117,12 @@ func TestProjectDirectoryRevalidatesAuthorizationBeforeMutation(t *testing.T) {
 				case "grant-removed":
 					return c.o.Store.Update(func(cfg *config.Config) error { cfg.Projects = nil; return nil })
 				case "directory-replaced":
+					// The authorization validator may run again while checking the
+					// pinned directory. Replace it once; later checks must exercise
+					// the real stale-handle rejection, not fail in this fixture.
+					if checks > 4 {
+						return nil
+					}
 					if err := os.Rename(parent, filepath.Join(root, "moved")); err != nil {
 						if runtime.GOOS == "windows" && errors.Is(err, os.ErrPermission) {
 							t.Skip("Windows prevents replacing this open directory handle")
