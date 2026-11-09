@@ -121,10 +121,13 @@ function featureInputs(features) {
 function renderSessionNavigation() {
   const el = $('#cxSessionNav');
   if (!el) return;
-  el.innerHTML = `<div class="cx-seg">${Object.keys(AGENT_INFO).map((t) => `<button class="${RM.tool === t ? 'on' : ''}" data-act="cxTool" data-t="${t}">${AGENT_INFO[t].name}</button>`).join('')}</div>
+  const focused = document.activeElement?.closest?.('[data-act="cxTool"]');
+  const focusedTool = focused && el.contains(focused) ? focused.dataset.t : '';
+  el.innerHTML = `<div class="cx-seg cx-agent-switch" role="group" aria-label="选择 Agent">${Object.keys(AGENT_INFO).map((t) => `<button type="button" class="${RM.tool === t ? 'on' : ''}" data-act="cxTool" data-t="${t}" title="${esc(AGENT_INFO[t].name)}" aria-label="${esc(AGENT_INFO[t].name)}" aria-pressed="${RM.tool === t}"><img src="agent-brand/${t}-app-official.png" alt="" aria-hidden="true" width="24" height="24"></button>`).join('')}</div>
     <button class="cx-new" data-act="cxNew"><span class="plus">${icon('plus')}</span>新对话</button>
     ${sessionCapabilities(RM.tool).archivedSessions ? `<button class="cx-archive-toggle" data-act="cxArchived">${RM.archivedOpen ? '收起归档' : '归档会话'}</button>` : ''}
     <input class="cx-search" id="cxSearch" placeholder="搜索对话" value="${esc(RM.query)}">`;
+  if (focusedTool) el.querySelector(`[data-act="cxTool"][data-t="${focusedTool}"]`)?.focus({ preventScroll: true });
 }
 
 /* ---------------- 手机远程 ---------------- */

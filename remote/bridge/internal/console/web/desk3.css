@@ -169,7 +169,7 @@ body #view .btn.primary:disabled, body #headActions .btn.primary:disabled, body 
 .head-actions .account-daily-filters .btn { height: 34px; min-height: 34px; }
 .account-daily-selection { padding: 8px 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); }
 .account-daily-selection[hidden], .acct-bar[hidden] { display: none; }
-#localAccountList.wb-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); align-items: start; gap: 14px; border: 0; border-radius: 0; background: transparent; overflow: visible; }
+#localAccountList.wb-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); align-items: stretch; gap: 14px; border: 0; border-radius: 0; background: transparent; overflow: visible; }
 #localAccountList > .wb-card, #localAccountList > .account-card { display: flex; flex-direction: column; align-items: stretch; min-width: 0; gap: 0; margin: 0; padding: 0; border: 1px solid var(--border) !important; border-radius: 12px; background: var(--surface) !important; box-shadow: var(--shadow) !important; text-align: left; overflow: hidden; transform: none !important; transition: border-color .15s, box-shadow .15s; }
 #localAccountList > .wb-card + .wb-card { border-top: 1px solid var(--border) !important; }
 #localAccountList > .wb-card:hover, #localAccountList > .account-card:hover { border-color: #c6cee3 !important; box-shadow: 0 4px 14px rgba(37, 48, 87, .065) !important; transform: none !important; }
@@ -202,6 +202,7 @@ body #view .btn.primary:disabled, body #headActions .btn.primary:disabled, body 
 .key-line { display: flex; align-items: center; gap: 8px; }
 .key-line code { flex: 1; overflow: hidden; padding: 0; background: transparent; color: inherit; font-family: var(--mono); font-size: 11px; letter-spacing: .4px; opacity: .9; text-overflow: ellipsis; white-space: nowrap; }
 .key-body { display: flex; flex-direction: column; gap: 11px; padding: 14px 16px; }
+.api-provider-card > .key-body { flex: 1; }
 .key-card .account-daily-meta { display: flex; align-items: center; flex-wrap: wrap; gap: 5px; min-height: 0; margin: 0; padding: 0; border: 0; }
 .key-card .account-daily-meta:empty { display: none; }
 .key-card .account-daily-tags { display: contents; }
@@ -222,7 +223,7 @@ body #view .btn.primary:disabled, body #headActions .btn.primary:disabled, body 
 .api-speed-control { display: inline-flex; align-items: center; gap: 7px; flex: none; color: var(--muted); font-size: 11px; }
 .api-speed-control select { width: 84px; height: 30px; padding: 0 7px; border: 1px solid #dce0ef; border-radius: 8px; background: #fff; color: var(--text-2); font-family: var(--font); font-size: 12px; cursor: pointer; }
 .api-speed-control select:disabled { opacity: .55; cursor: default; }
-.key-card .api-provider-foot { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; margin: 2px 0 0; padding: 11px 0 0; border-top: 1px solid var(--line-2); }
+.key-card .api-provider-foot { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; margin: auto 0 0; padding: 11px 0 0; border-top: 1px solid var(--line-2); }
 #localAccountList .account-launch-buttons { display: flex; flex-wrap: wrap; gap: 5px; margin: 0; padding: 0; border: 0; }
 #localAccountList .account-open-button { display: grid; place-items: center; width: 32px; height: 32px; min-height: 32px; padding: 0; border: 1px solid var(--border); border-radius: 8px; background: var(--surface-2); box-shadow: none; }
 #localAccountList .account-open-button img { display: block; width: 19px; height: 19px; border-radius: 5px; }
@@ -237,13 +238,13 @@ body #view .btn.primary:disabled, body #headActions .btn.primary:disabled, body 
 #localAccountList .api-provider-card .account-open-button { width: 28px; height: 28px; min-height: 28px; border-radius: 7px; }
 #localAccountList .api-provider-card .account-open-button img { width: 17px; height: 17px; }
 .api-provider-card .api-icon-button { width: 26px; height: 28px; }
-.key-add { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; min-height: 162px; padding: 20px; border: 1px dashed #cbd3e4; border-radius: 12px; background: var(--surface); color: var(--muted); font: inherit; font-size: 13px; cursor: pointer; }
+.key-add { display: flex; flex-direction: column; align-items: center; align-self: start; justify-content: center; gap: 12px; min-height: 162px; padding: 20px; border: 1px dashed #cbd3e4; border-radius: 12px; background: var(--surface); color: var(--muted); font: inherit; font-size: 13px; cursor: pointer; }
 .key-add span { display: grid; place-items: center; width: 36px; height: 36px; border-radius: 10px; background: var(--primary-soft); color: var(--primary); }
 .key-add svg { width: 18px; height: 18px; }
 .key-add:hover { border-color: var(--primary); background: #fafaff; color: var(--primary); }
 
 /* Local API service and official accounts. */
-#localAccountList > .api-service-card { position: relative; gap: 14px; padding: 18px; background: linear-gradient(135deg, #eef3ff, #f3effc) !important; color: var(--text); }
+#localAccountList > .api-service-card { position: relative; gap: 14px; padding: 16px; background: linear-gradient(135deg, #eef3ff, #f3effc) !important; color: var(--text); }
 .api-service-card .official-card-top { display: flex; align-items: center; gap: 8px; }
 .api-service-card .official-card-name { flex: 1; min-width: 0; color: var(--text); font-size: 14px; font-weight: 600; }
 .api-service-card .account-state, .api-service-card .chip { min-height: 20px; height: auto; padding: 2px 7px; border-radius: 5px; background: #e2e5fa; color: var(--primary-strong); font-size: 11px; }
@@ -252,6 +253,7 @@ body #view .btn.primary:disabled, body #headActions .btn.primary:disabled, body 
 .api-service-card .api-service-metrics > div { display: flex; flex-direction: column-reverse; align-items: flex-start; justify-content: flex-end; gap: 5px; min-width: 0; padding: 11px 9px; border: 1px solid #e1e6f4; border-radius: 8px; background: rgba(255,255,255,.75); }
 .api-service-card .api-service-metrics b { color: var(--text); font-size: 22px; font-weight: 700; font-variant-numeric: tabular-nums; }
 .api-service-card .api-service-metrics span { color: var(--muted); font-size: 11px; }
+.api-service-card .api-service-plan-list, .api-service-card .api-service-plan-list:has(.api-service-plan[open]) { max-height: 18rem; }
 .api-service-empty { padding: 10px 12px; border: 1px dashed var(--border-strong); border-radius: 8px; background: rgba(255,255,255,.5); color: var(--muted); font-size: 12px; }
 .api-service-actions { display: flex; align-items: center; gap: 8px; margin-top: auto; padding-top: 12px; border-top: 1px solid #dfe4f4; }
 .api-service-card .btn { height: 32px; min-height: 32px; padding: 0 12px; border-radius: 7px; font-size: 12px; }
@@ -275,43 +277,40 @@ body #view .btn.primary:disabled, body #headActions .btn.primary:disabled, body 
 .official-card.key-card .official-card-action:hover { background: var(--tile); color: var(--text); }
 .official-card.key-card > .account-launch-buttons { margin-top: 10px; }
 
-/* Agent workspace: two substantial tool cards per row at normal desktop widths. */
+/* Agent workspace: content-sized cards adapt to the available width. */
 .panel .view:has(> .agent-grid) { padding-top: 8px; }
-.panel .wb-grid.agent-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: stretch; gap: 14px; border: 0; border-radius: 0; background: transparent; overflow: visible; }
-.panel .agent-grid > .agent-tile { --agent-glow: rgba(111,105,222,.065); display: flex; flex-direction: column; align-items: stretch; justify-content: flex-start; gap: 0; min-width: 0; min-height: 204px; padding: 0; border: 1px solid var(--border); border-radius: 14px; background: radial-gradient(ellipse at 100% 0, var(--agent-glow), transparent 60%) var(--surface); box-shadow: 0 3px 14px rgba(37,48,87,.035); text-align: left; overflow: visible; opacity: 1; grid-template-columns: none; grid-template-areas: none; }
-.panel .agent-grid > .agent-tile[data-family="claude"] { --agent-glow: rgba(211,139,112,.06); }
-.panel .agent-grid > .agent-tile[data-family="deepseek"] { --agent-glow: rgba(76,126,230,.065); }
-.panel .agent-grid > .agent-tile[data-available="false"] { --agent-glow: rgba(120,129,152,.035); }
+.panel .wb-grid.agent-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(300px, 100%), 1fr)); align-items: stretch; gap: 14px; border: 0; border-radius: 0; background: transparent; overflow: visible; }
+.panel .agent-grid > .agent-tile { display: flex; flex-direction: column; align-items: stretch; justify-content: flex-start; gap: 0; min-width: 0; min-height: 0; padding: 0; border: 1px solid var(--border); border-radius: 12px; background: var(--surface); box-shadow: var(--shadow); text-align: left; overflow: visible; opacity: 1; grid-template-columns: none; grid-template-areas: none; }
 .panel .agent-grid > .agent-tile + .agent-tile { border-top: 1px solid var(--border); }
 .panel .agent-grid > .agent-tile > * { grid-area: auto; }
-.panel .agent-grid > .agent-tile:hover { border-color: #d2d7e8; box-shadow: 0 5px 18px rgba(37,48,87,.055); }
-.agent-head { position: relative; display: flex; align-items: center; gap: 12px; width: auto; min-width: 0; min-height: 72px; padding: 16px 18px 10px; }
-.agent-icon { position: relative; flex: none; width: 48px; height: 48px; }
-.agent-icon img { display: block; width: 48px; height: 48px; border-radius: 12px; box-shadow: 0 2px 5px rgba(37,48,87,.07); }
+.panel .agent-grid > .agent-tile:hover { border-color: #c6cee3; box-shadow: var(--lift); }
+.agent-head { position: relative; display: flex; align-items: center; gap: 10px; width: auto; min-width: 0; padding: 14px 16px 10px; }
+.agent-icon { position: relative; flex: none; width: 40px; height: 40px; }
+.agent-icon img { display: block; width: 40px; height: 40px; border-radius: 10px; box-shadow: none; }
 .agent-tile[data-available="false"] .agent-icon img { filter: grayscale(.8); opacity: .65; }
-.agent-letter { display: grid; place-items: center; width: 48px; height: 48px; border-radius: 12px; background: var(--g-blue); color: #fff; font-size: 16px; font-weight: 700; }
-.agent-cli { position: absolute; right: -4px; bottom: -4px; display: grid; place-items: center; width: 21px; height: 21px; border: 2px solid #fff; border-radius: 6px; background: #54617d; color: #fff; }
-.agent-cli svg { width: 12px; height: 12px; }
+.agent-letter { display: grid; place-items: center; width: 40px; height: 40px; border-radius: 10px; background: var(--g-blue); color: #fff; font-size: 16px; font-weight: 700; }
+.agent-cli { position: absolute; right: -3px; bottom: -3px; display: grid; place-items: center; width: 18px; height: 18px; border: 2px solid var(--surface); border-radius: 5px; background: #54617d; color: #fff; }
+.agent-cli svg { width: 10px; height: 10px; }
 .agent-tile .wb-main { flex: 1; min-width: 0; }
-.agent-tile .wb-name { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; overflow: visible; font-size: 17px; font-weight: 600; line-height: 1.5; letter-spacing: -.2px; text-overflow: clip; white-space: normal; }
-.agent-tile .wb-sub { display: flex; flex-wrap: wrap; gap: 4px 8px; margin-top: 3px; overflow: visible; color: var(--muted); font-size: 12px; line-height: 1.5; text-overflow: clip; white-space: normal; }
+.agent-tile .wb-name { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 7px; overflow: visible; font-size: 15px; font-weight: 600; line-height: 1.4; letter-spacing: -.2px; text-overflow: clip; white-space: normal; overflow-wrap: anywhere; }
+.agent-tile .wb-sub { display: flex; flex-wrap: wrap; gap: 4px 8px; margin-top: 2px; overflow: visible; color: var(--muted); font-size: 12px; line-height: 1.5; text-overflow: clip; white-space: normal; }
 .agent-tile .wb-sub > span { max-width: 100%; }
 .agent-tile .remote-lamp { max-width: 100%; gap: 7px; font-size: 12px; font-weight: 400; line-height: 1.5; white-space: normal; overflow-wrap: anywhere; }
 .agent-tile .wb-card-more { flex: none; align-self: flex-start; }
-.agent-tile .wb-card-more > summary { width: 28px; height: 28px; border: 0; border-radius: 7px; background: transparent; }
+.agent-tile .wb-card-more > summary { width: 32px; height: 32px; border: 0; border-radius: 7px; background: transparent; }
 .agent-tile .wb-card-more > summary:hover, .agent-tile .wb-card-more[open] > summary { background: #eceefa; color: var(--text); }
 .agent-tile .wb-more-body { min-width: 220px; max-width: min(300px, calc(100vw - 50px)); border-radius: 9px; box-shadow: var(--shadow-lg); }
 .agent-tile .wb-more-body .btn { justify-content: flex-start; height: auto; min-height: 34px; padding: 8px 10px; border: 0; border-radius: 6px; white-space: normal; text-align: left; }
-.agent-body { display: flex; flex: 1; flex-direction: column; gap: 6px; padding: 2px 18px 10px; }
+.agent-body { display: flex; flex: 1; flex-direction: column; gap: 5px; padding: 0 16px 12px; }
 .agent-body .agent-api-label { margin: 0; color: var(--muted); font-size: 11px; font-weight: 400; line-height: 16px; }
 .wb-key-wrap { position: relative; display: block; min-width: 0; }
 .wb-key-face { position: absolute; z-index: 1; top: 50%; left: 12px; width: 22px; height: 16px; margin-top: -8px; border-radius: 4px; background: var(--face); pointer-events: none; }
 .panel .agent-body .wb-key, .panel .agent-body .cs-btn { width: 100%; height: 38px; min-width: 0; padding-left: 44px; border: 1px solid #e9ecf4; border-radius: 8px; background: #f7f8fc; font-size: 13px; font-weight: 400; }
 .panel .agent-body .wb-key:hover, .panel .agent-body .cs-btn:hover { border-color: #ccd3e6; background: #f4f6fc; }
 .panel .agent-body .wb-key:focus, .panel .agent-body .cs-btn:focus-visible { border-color: var(--primary); box-shadow: 0 0 0 3px rgba(91,92,226,.1); }
-.agent-foot { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 0 18px; padding: 10px 0 12px; border-top: 1px solid var(--line-2); }
+.agent-foot { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin: 0 16px; padding: 10px 0 12px; border-top: 1px solid var(--line-2); }
 .agent-remote { flex: 1; min-width: 0; }
-.panel .agent-foot > .btn { flex: none; justify-content: center; width: 96px; height: 34px; min-height: 34px; padding: 0 10px; border-radius: 8px; font-size: 12px; }
+.panel .agent-foot > .btn { flex: none; justify-content: center; min-width: 88px; height: 36px; min-height: 36px; padding: 0 12px; border-radius: 8px; font-size: 12px; }
 .panel .agent-foot > .btn svg { width: 13px; height: 13px; }
 .agent-body .wb-missing { display: flex; align-items: center; min-height: 38px; overflow: visible; color: var(--muted); font-size: 12px; line-height: 1.65; white-space: normal; }
 .panel .agent-foot .wb-install { border-color: #d8dff0; background: #f3f5fc; color: var(--primary-strong); box-shadow: none; }
@@ -451,6 +450,12 @@ body #view .btn.primary:disabled, body #headActions .btn.primary:disabled, body 
 .cx { grid-template-columns: 260px minmax(0, 1fr); border-radius: 12px; box-shadow: none; }
 .cx-side { background: var(--surface-2); }
 .cx-seg, .cx-seg button { border-radius: 7px; }
+.cx-agent-switch { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.cx-agent-switch button { display: grid; place-items: center; min-width: 0; height: 40px; padding: 6px 0; border: 1px solid transparent; }
+.cx-agent-switch button:hover { background: var(--surface); }
+.cx-agent-switch button.on { border-color: var(--primary); background: var(--primary-soft); box-shadow: none; }
+.cx-agent-switch button:focus-visible { outline-offset: 1px; }
+.cx-agent-switch img { display: block; width: 24px; height: 24px; border-radius: 5px; object-fit: contain; }
 .cx-new, .cx-search { border-radius: 8px; font-size: 12px; }
 .cx-head { padding: 16px 20px; }
 .cx-head .title { font-size: 15px; font-weight: 600; }
@@ -579,14 +584,14 @@ body #view .btn.primary:disabled, body #headActions .btn.primary:disabled, body 
 .sk-num { display: inline-block; width: 64px; height: 24px; vertical-align: middle; }
 .page-skeleton { display: flex; flex-direction: column; gap: 18px; }
 .sk-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 18px; }
-.sk-grid:has(> .sk-tile) { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px; }
+.sk-grid:has(> .sk-tile) { grid-template-columns: repeat(auto-fit, minmax(min(300px, 100%), 1fr)); gap: 14px; }
 .sk-grid.sk-stats { grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); }
 .sk-card { border: 1px solid var(--border); border-radius: 12px; background: var(--surface); box-shadow: none; overflow: hidden; }
 .sk-key .sk-face { height: 162px; border-radius: 0; background-image: linear-gradient(90deg, #e4e8f1 0%, #f0f3f9 40%, #e4e8f1 80%); }
 .sk-body { display: flex; flex-direction: column; gap: 12px; padding: 18px 20px; }
 .sk-row { display: flex; align-items: center; gap: 6px; padding-top: 5px; }
 .sk-row i { flex: 1; }
-.sk-tile .sk-head { display: flex; align-items: center; gap: 16px; min-height: 90px; padding: 18px 20px; background: #f7f8fc; }
+.sk-tile .sk-head { display: flex; align-items: center; gap: 10px; padding: 14px 16px 10px; background: var(--surface); }
 .sk-col { display: flex; flex: 1; flex-direction: column; gap: 8px; min-width: 0; }
 .sk-list .sk-line { display: flex; align-items: center; gap: 14px; padding: 16px 20px; border-top: 1px solid var(--line-2); }
 .sk-list .sk-line:first-child { border-top: 0; }
@@ -594,12 +599,6 @@ body #view .btn.primary:disabled, body #headActions .btn.primary:disabled, body 
 
 /* Window resizing keeps essential controls and status text available. */
 @media (min-width: 1500px) {
-  .panel .wb-grid.agent-grid, .sk-grid:has(> .sk-tile) { grid-template-columns: repeat(4, minmax(0, 1fr)); }
-  .agent-head { gap: 12px; padding: 16px 16px 10px; }
-  .agent-icon, .agent-icon img, .agent-letter { width: 44px; height: 44px; }
-  .agent-tile .wb-name { font-size: 15px; }
-  .agent-body { padding: 2px 16px 10px; }
-  .agent-foot { margin: 0 16px; }
   .panel .su-list { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 }
 @media (max-width: 960px) {
@@ -610,11 +609,6 @@ body #view .btn.primary:disabled, body #headActions .btn.primary:disabled, body 
   .head-actions .us-controls { flex-wrap: wrap; }
   .panel .su-row { grid-template-columns: 30px minmax(0, 1fr); grid-template-areas: "mark text" ". act"; gap: 8px 10px; }
   .panel .su-row > .row { justify-content: flex-start; max-width: none; }
-  .agent-head { gap: 12px; padding: 16px 18px 10px; }
-  .agent-body { padding: 2px 18px 10px; }
-  .agent-foot { margin: 0 18px; }
-  .agent-icon, .agent-icon img, .agent-letter { width: 44px; height: 44px; }
-  .agent-tile .wb-name { font-size: 16px; }
   .mcp-row { flex-wrap: wrap; }
   .mcp-agents { margin-left: 52px; }
   .cx { grid-template-columns: 220px minmax(0, 1fr); }
@@ -626,8 +620,6 @@ body #view .btn.primary:disabled, body #headActions .btn.primary:disabled, body 
   .panel .view { gap: 12px; padding: 8px 18px 14px; }
   .panel .wb-grid.agent-grid, .panel .su-list, .sk-grid:has(> .sk-tile) { grid-template-columns: minmax(0, 1fr); gap: 12px; }
   #localAccountList.wb-grid, .sk-grid { grid-template-columns: minmax(0, 1fr); }
-  .panel .agent-grid > .agent-tile { min-height: 204px; }
-  .agent-head { min-height: 72px; }
   .panel .setting-row { align-items: flex-start; gap: 12px; }
   .panel .setting-row > .input { max-width: 48%; }
   .panel .wb-empty { flex-wrap: wrap; }
