@@ -31,6 +31,7 @@ const deepSeekID = "deepseek-harness"
 type deepSeekAgent struct {
 	settings func() Settings
 	stateDir string
+	boot     deepSeekBootProof
 	mu       sync.Mutex
 	sink     Sink
 	sessions map[string]*deepSeekSession
@@ -38,21 +39,25 @@ type deepSeekAgent struct {
 }
 
 type deepSeekSession struct {
-	control      sync.Mutex
-	Info         protocol.SessionInfo `json:"info"`
-	Events       []protocol.Event     `json:"events"`
-	Started      bool                 `json:"started"`
-	Policy       string               `json:"policy"`
-	Unconfirmed  bool                 `json:"runtimeUnconfirmed,omitempty"`
-	conn         *rpcConn
-	source       [32]byte
-	busy         bool
-	failedTurn   bool
-	nativeStatus string
-	runtimeID    string
-	children     map[string]bool
-	unknownChild bool
-	approvals    map[string]deepSeekApproval
+	control        sync.Mutex
+	stopControl    sync.Mutex
+	Info           protocol.SessionInfo `json:"info"`
+	Events         []protocol.Event     `json:"events"`
+	Started        bool                 `json:"started"`
+	Policy         string               `json:"policy"`
+	Unconfirmed    bool                 `json:"runtimeUnconfirmed,omitempty"`
+	RuntimePending bool                 `json:"runtimePending,omitempty"`
+	RuntimeBoot    deepSeekBootProof    `json:"runtimeBoot,omitempty"`
+	conn           *rpcConn
+	stoppedConn    *rpcConn
+	source         [32]byte
+	busy           bool
+	failedTurn     bool
+	nativeStatus   string
+	runtimeID      string
+	children       map[string]bool
+	unknownChild   bool
+	approvals      map[string]deepSeekApproval
 }
 
 type deepSeekApproval struct {
@@ -62,7 +67,11 @@ type deepSeekApproval struct {
 }
 
 func newDeepSeekAgent(settings func() Settings, stateDir string) *deepSeekAgent {
-	a := &deepSeekAgent{settings: settings, stateDir: filepath.Join(stateDir, deepSeekID), sessions: map[string]*deepSeekSession{}}
+	return newDeepSeekAgentWithBoot(settings, stateDir, deepSeekCurrentBoot())
+}
+
+func newDeepSeekAgentWithBoot(settings func() Settings, stateDir string, boot deepSeekBootProof) *deepSeekAgent {
+	a := &deepSeekAgent{settings: settings, stateDir: filepath.Join(stateDir, deepSeekID), boot: boot, sessions: map[string]*deepSeekSession{}}
 	if stateDir == "" {
 		a.stateDir = ""
 		return a
@@ -88,15 +97,6 @@ func newDeepSeekAgent(settings func() Settings, stateDir string) *deepSeekAgent 
 		if !filepath.IsAbs(s.Info.Cwd) {
 			continue
 		}
-		// A restarted Bridge cannot prove that a previous worker/tree exited.
-		// Preserve this fence instead of admitting another writer to its history.
-		s.Unconfirmed = s.Unconfirmed || s.Info.Status == "running" || s.Info.Status == "waiting_approval" || s.Info.Status == "unknown" || s.Info.ActiveTurnID != ""
-		s.Info.Status = "idle"
-		s.Info.ActiveTurnID = ""
-		s.Info.Controllable = !s.Unconfirmed
-		if s.Unconfirmed {
-			s.Info.Status = "unknown"
-		}
 		s.approvals = map[string]deepSeekApproval{}
 		if len(s.Events) > 400 {
 			s.Events = s.Events[len(s.Events)-400:]
@@ -108,6 +108,7 @@ func newDeepSeekAgent(settings func() Settings, stateDir string) *deepSeekAgent 
 			}
 		}
 		s.Events = filtered
+		a.restoreDeepSeekRuntime(entry.Name(), &s)
 		a.sessions[entry.Name()] = &s
 	}
 	return a
@@ -159,18 +160,9 @@ func (a *deepSeekAgent) Sessions(context.Context) ([]protocol.SessionInfo, error
 	sort.Slice(out, func(i, j int) bool { return out[i].UpdatedAt > out[j].UpdatedAt })
 	return out, nil
 }
-func (a *deepSeekAgent) Open(_ context.Context, id string) (protocol.SessionInfo, []protocol.Event, error) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	s := a.sessions[id]
-	if s == nil {
-		return protocol.SessionInfo{}, nil, errors.New("DeepSeek Harness 会话不存在")
-	}
-	events := append([]protocol.Event(nil), s.Events...)
-	if s.Unconfirmed {
-		events = append(events, protocol.Event{Tool: deepSeekID, SessionKey: s.Info.SessionKey, Type: "notice", ID: "deepseek-runtime-unconfirmed", Level: "warning", Text: "此前 DeepSeek 任务的进程退出未确认，旧记录已保留。请在电脑检查原进程；不会自动重发或启动第二个实例。"})
-	}
-	return s.Info, events, nil
+func (a *deepSeekAgent) Open(ctx context.Context, id string) (protocol.SessionInfo, []protocol.Event, error) {
+	info, events, _, err := a.OpenPage(ctx, id, "", maxHistoryEvents)
+	return info, events, err
 }
 
 func extensionSource(s ExtensionSettings, model string) [32]byte {
@@ -326,6 +318,7 @@ func (a *deepSeekAgent) send(ctx context.Context, id, text string, opts TurnOpti
 		a.mu.Unlock()
 		return errors.New("会话已关闭或仍在运行，请先停止当前任务")
 	}
+	previousInfo, previousBoot := s.Info, s.RuntimeBoot
 	s.busy = true
 	s.failedTurn = false
 	if opts.Model != "" {
@@ -333,6 +326,15 @@ func (a *deepSeekAgent) send(ctx context.Context, id, text string, opts TurnOpti
 	}
 	s.Info.Status = "running"
 	s.Info.UpdatedAt = time.Now().UnixMilli()
+	s.RuntimeBoot = a.boot
+	// A prompt cannot reach an existing or a new runtime before its restart
+	// fence is durable. session.updated is a live notification, not a disk write.
+	if err := a.persistDeepSeekFenceLocked(id, s); err != nil {
+		s.busy, s.Info = false, previousInfo
+		s.RuntimeBoot = previousBoot
+		a.mu.Unlock()
+		return errors.New("无法保存 DeepSeek 运行状态，任务未发送：" + err.Error())
+	}
 	info := s.Info
 	a.mu.Unlock()
 	a.emit(id, protocol.Event{Type: "session.updated", Session: &info})
@@ -375,6 +377,7 @@ func (a *deepSeekAgent) send(ctx context.Context, id, text string, opts TurnOpti
 func (a *deepSeekAgent) waitRuntime(id string, s *deepSeekSession, conn *rpcConn) {
 	err := conn.Call(context.Background(), "session/wait", map[string]string{"sessionId": id}, nil)
 	if err != nil {
+		_ = a.stopRuntime(s, conn)
 		a.finish(id, s, conn, "failed", "DeepSeek Harness 运行中断，请检查会话")
 	} else {
 		a.mu.Lock()
@@ -414,6 +417,24 @@ func (a *deepSeekAgent) runtime(ctx context.Context, id string, s *deepSeekSessi
 			return nil, err
 		}
 	}
+	if !started {
+		// A process may have saved native history before Bridge saved the prompt
+		// receipt. Never create over that identity or replay its earlier prompt.
+		exists, err := a.deepSeekNativeSessionExists(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		if exists {
+			a.mu.Lock()
+			s.Started = true
+			err = a.persistLocked(id, s)
+			a.mu.Unlock()
+			if err != nil {
+				return nil, errors.New("无法保存 DeepSeek 原生会话身份：" + err.Error())
+			}
+			started = true
+		}
+	}
 	exe, ok := findExecutable("dsh", settings.DeepSeekPath)
 	if !ok {
 		return nil, errors.New("未找到 DeepSeek Harness；请先安装 @deepseek-ai/dsh")
@@ -444,19 +465,31 @@ func (a *deepSeekAgent) runtime(ctx context.Context, id string, s *deepSeekSessi
 	cmd.Dir = cwd
 	cmd.Env = childEnv(exe, map[string]string{"DSH_HOME": filepath.Join(dir, "native"), "DSH_PERMISSION_MODE": mode, "SALCARA_DSH_API_KEY": api.Key}, []string{"DEEPSEEK_API_KEY", "DEEPSEEK_BASE_URL"})
 	prepareCmd(cmd)
+	// Persist ownership before starting the process, even while it is idle or
+	// initializing. A later Bridge crash must not mistake it for a stopped writer.
+	a.mu.Lock()
+	s.RuntimePending, s.RuntimeBoot = true, a.boot
+	err = a.persistDeepSeekFenceLocked(id, s)
+	a.mu.Unlock()
+	if err != nil {
+		return nil, errors.New("无法保存 DeepSeek 进程隔离状态，未启动工具：" + err.Error())
+	}
 	var conn *rpcConn
 	ready := make(chan struct{})
 	conn, err = startRPCProtocol(cmd, "2.0", func(method string, raw json.RawMessage) { <-ready; a.notify(id, s, conn, method, raw) }, func(rpcID json.RawMessage, method string, raw json.RawMessage) {
 		go func() { <-ready; a.request(id, s, conn, rpcID, method, raw) }()
 	})
 	if err != nil {
+		// startRPCProtocol returns an error only before cmd.Start succeeds.
+		// No process owns this reservation; keep storage failures fenced.
+		_ = a.confirmDeepSeekRuntimeStopped(s, nil)
 		return nil, err
 	}
 	a.mu.Lock()
 	if a.closed {
 		a.mu.Unlock()
 		close(ready)
-		conn.Kill()
+		_ = a.stopRuntime(s, conn)
 		return nil, errors.New("Agent 已关闭")
 	}
 	s.conn, s.source = conn, source
@@ -484,9 +517,10 @@ func (a *deepSeekAgent) runtime(ctx context.Context, id string, s *deepSeekSessi
 	go func() {
 		<-conn.done
 		a.mu.Lock()
-		active := s.conn == conn && s.busy
+		active := s.conn == conn
 		a.mu.Unlock()
 		if active {
+			_ = a.stopRuntime(s, conn)
 			a.finish(id, s, conn, "failed", "DeepSeek Harness 进程已退出")
 		}
 	}()
@@ -611,8 +645,25 @@ func (a *deepSeekAgent) finish(id string, s *deepSeekSession, conn *rpcConn, sta
 }
 
 func (a *deepSeekAgent) stopRuntime(s *deepSeekSession, conn *rpcConn) error {
-	if conn.rootProcessExitConfirmed() && !conn.treeTermination.unconfirmed() {
+	s.stopControl.Lock()
+	defer s.stopControl.Unlock()
+	a.mu.Lock()
+	if s.stoppedConn == conn && conn.rootProcessExitConfirmed() && !conn.treeTermination.unconfirmed() {
+		// A late waiter for the retired runtime must not touch a successor's
+		// pre-spawn reservation while its connection slot is still nil.
+		a.mu.Unlock()
 		return nil
+	}
+	if s.conn != nil && s.conn != conn {
+		a.mu.Unlock()
+		return errors.New("DeepSeek 运行实例已变化")
+	}
+	// Transport/root exit alone must not briefly admit an API change while
+	// we still lack descendant-exit evidence.
+	s.Unconfirmed = true
+	a.mu.Unlock()
+	if conn.rootProcessExitConfirmed() && !conn.treeTermination.unconfirmed() {
+		return errors.New("DeepSeek 主进程已退出，但子进程退出未确认；仍保留隔离")
 	}
 	// The SDK shutdown request cancels owned work and flushes native session
 	// storage. A bounded forced tree stop remains the fallback for a hung SDK.
@@ -625,21 +676,26 @@ func (a *deepSeekAgent) stopRuntime(s *deepSeekSession, conn *rpcConn) error {
 		case <-time.After(2 * time.Second):
 		}
 		if conn.rootProcessExitConfirmed() && !conn.treeTermination.unconfirmed() {
-			return nil
+			return a.confirmDeepSeekRuntimeStopped(s, conn)
 		}
 	}
-	conn.Kill()
+	treeStopped := false
+	conn.killWithTreeKiller(func(cmd *exec.Cmd) error {
+		err := killTreeResult(cmd)
+		treeStopped = err == nil
+		return err
+	})
 	select {
 	case <-conn.processWaitDone:
 	case <-time.After(4 * time.Second):
 	}
-	if conn.treeTermination.unconfirmed() || !conn.rootProcessExitConfirmed() {
+	if !treeStopped || conn.treeTermination.unconfirmed() || !conn.rootProcessExitConfirmed() {
 		a.mu.Lock()
 		s.Unconfirmed = true
 		a.mu.Unlock()
 		return errors.New("DeepSeek Harness 进程树退出未确认，已禁止继续启动；请在电脑检查")
 	}
-	return nil
+	return a.confirmDeepSeekRuntimeStopped(s, conn)
 }
 
 func (a *deepSeekAgent) Interrupt(context.Context, string) error { return ErrExpectedTurnRequired }
@@ -904,7 +960,7 @@ func (a *deepSeekAgent) notify(id string, s *deepSeekSession, conn *rpcConn, met
 
 func (a *deepSeekAgent) request(id string, s *deepSeekSession, conn *rpcConn, rpcID json.RawMessage, method string, raw json.RawMessage) {
 	a.mu.Lock()
-	current, source := s.conn == conn, s.source
+	current, source := s.conn == conn && !s.Unconfirmed && !a.closed, s.source
 	a.mu.Unlock()
 	if !current {
 		return
@@ -924,7 +980,7 @@ func (a *deepSeekAgent) request(id string, s *deepSeekSession, conn *rpcConn, rp
 	}
 	approval := deepSeekID + ":" + id + ":" + deepSeekNewID()
 	a.mu.Lock()
-	if s.conn != conn || !s.busy || a.closed {
+	if s.conn != conn || !s.busy || s.Unconfirmed || a.closed {
 		a.mu.Unlock()
 		_ = conn.Reply(rpcID, map[string]string{"outcome": "cancelled"})
 		return
@@ -959,12 +1015,17 @@ func (a *deepSeekAgent) respond(ctx context.Context, sessionKey, approval, decis
 	}
 	a.mu.Lock()
 	s := a.sessions[id]
+	a.mu.Unlock()
 	if s == nil {
-		a.mu.Unlock()
 		return false
 	}
+	// Serialize the actual approval reply with stopping, not only its lookup.
+	// A shutdown cannot race between the final admission check and the write.
+	s.stopControl.Lock()
+	defer s.stopControl.Unlock()
+	a.mu.Lock()
 	request, ok := s.approvals[approval]
-	if !ok || s.conn != request.conn || !s.busy || a.closed {
+	if !ok || s.conn != request.conn || !s.busy || s.Unconfirmed || a.closed || s.stoppedConn == request.conn {
 		a.mu.Unlock()
 		return false
 	}
@@ -974,7 +1035,7 @@ func (a *deepSeekAgent) respond(ctx context.Context, sessionKey, approval, decis
 		return false
 	}
 	a.mu.Lock()
-	if current, ok := s.approvals[approval]; !ok || current.conn != request.conn || s.conn != request.conn {
+	if current, ok := s.approvals[approval]; !ok || current.conn != request.conn || s.conn != request.conn || !s.busy || s.Unconfirmed || a.closed || s.stoppedConn == request.conn {
 		a.mu.Unlock()
 		return false
 	}
@@ -988,7 +1049,7 @@ func (a *deepSeekAgent) respond(ctx context.Context, sessionKey, approval, decis
 		return false
 	}
 	a.mu.Lock()
-	if s.conn == request.conn && s.busy {
+	if s.conn == request.conn && s.busy && !s.Unconfirmed && !a.closed {
 		s.Info.Status = "running"
 	}
 	info := s.Info
