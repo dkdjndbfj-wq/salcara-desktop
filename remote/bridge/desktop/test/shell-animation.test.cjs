@@ -11,7 +11,7 @@ const start = source.indexOf("addEventListener('pointermove'");
 const end = source.indexOf('\n(function blinkLoop', start);
 assert.ok(start >= 0 && end > start, 'orb tracking block exists');
 
-function fixture() {
+function fixture(reduced = false) {
   const events = new Map(), frames = [], styles = new Map();
   let nextFrame = 0, rectReads = 0, panelOpen = false;
   const document = {
@@ -26,6 +26,7 @@ function fixture() {
   };
   const face = { style: { setProperty: (name, value) => styles.set(name, value) } };
   const context = vm.createContext({
+    matchMedia: () => ({ matches: reduced, addEventListener() {} }),
     SHELL: { mouse: { x: 512, y: 384 }, eye: { x: 0, y: 0 }, tilt: { x: 0, y: 0 } },
     orb, document,
     $: (selector) => selector === '#orbFace' ? face : null,
@@ -74,4 +75,12 @@ test('visibility changes cancel hidden work and schedule one bounded resume', ()
   assert.ok(f.frames.length <= 1);
   f.flush();
   assert.equal(f.frames.length, 0);
+});
+
+test('reduced motion avoids pointer-driven animation frames', () => {
+  const f = fixture(true);
+  f.events.get('pointermove')({ clientX: 900, clientY: 120 });
+  f.events.get('resize')();
+  assert.equal(f.frames.length, 0);
+  assert.equal(f.rectReads(), 0);
 });

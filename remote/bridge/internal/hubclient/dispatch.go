@@ -1425,8 +1425,12 @@ func (c *Client) dispatchDesktop(ctx context.Context, cmd map[string]any) (any, 
 func ListSessions(ctx context.Context, m agents.Manager, tool string) (map[string]any, error) {
 	var all []protocol.SessionInfo
 	var errs []string
+	var failedTools []string
 	agentsList := m.Agents()
 	for _, a := range agentsList {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		if a == nil {
 			continue
 		}
@@ -1442,6 +1446,7 @@ func ListSessions(ctx context.Context, m agents.Manager, tool string) (map[strin
 		ss, err := a.Sessions(ctx)
 		if err != nil {
 			errs = append(errs, a.Name()+"："+err.Error())
+			failedTools = append(failedTools, a.ID())
 			continue
 		}
 		if err := requireAgentCapability(a, "list"); err != nil {
@@ -1470,7 +1475,12 @@ func ListSessions(ctx context.Context, m agents.Manager, tool string) (map[strin
 	if all == nil {
 		all = []protocol.SessionInfo{}
 	}
-	return map[string]any{"sessions": all}, nil
+	result := map[string]any{"sessions": all}
+	if len(errs) > 0 {
+		result["errors"] = errs
+		result["failedTools"] = failedTools
+	}
+	return result, nil
 }
 
 // allowedProjects is the configured allow-list plus the working folders of

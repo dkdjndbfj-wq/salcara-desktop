@@ -16,6 +16,7 @@ function fixture() {
   const nodes = new Map();
   const node = id => { if (!nodes.has(id)) nodes.set(id, { id, innerHTML: '', textContent: '', isConnected: true, classList: { toggle() {}, remove() {} } }); return nodes.get(id); };
   const context = vm.createContext({
+    AbortController,
     PAGES: { login: {}, sessions: {}, projects: {} },
     ICONS: {}, ACTIONS: {}, S: { route: 'sessions', approvals: [], sessions: [], openKey: null, tl: [] },
     document: { addEventListener(type, fn) { const handlers = listeners.get(type) || []; handlers.push(fn); listeners.set(type, handlers); }, getElementById: id => node(id), querySelector() { return null; }, querySelectorAll() { return []; } },
@@ -255,7 +256,7 @@ test('a stale session detail cannot overwrite a newly selected conversation', as
   f.context.S.openKey = 'new';
   pendingFor(f, '/api/session?key=old').resolve({ session: { sessionKey: 'old', title: 'old' }, events: [] });
   await first;
-  assert.equal(f.context.S.openInfo, undefined, 'late detail must not replace the selected conversation');
+  assert.equal(f.context.S.openInfo, null, 'late detail must not replace the selected conversation');
 });
 
 test('the conversations page renders before capability discovery finishes', async () => {
@@ -284,6 +285,66 @@ test('opening a conversation does not wait for optional controls to load', async
   assert.equal(f.context.S.openInfo.title, 'thread', 'core conversation should be usable before optional capability discovery');
   assert.doesNotMatch(f.node('sessDetail').innerHTML, /class="rm-error"/);
   assert.ok(f.pending.some(item => item.path === '/api/remote/agents'), 'optional capability discovery remains in the background');
+});
+
+test('a late capability response cannot turn a history failure into an empty list', async () => {
+  const f = fixture();
+  const read = f.context.RENDER_sessions({ isConnected: true, innerHTML: '' });
+  pendingFor(f, '/api/sessions').reject(new Error('history denied'));
+  await read;
+  pendingFor(f, '/api/remote/agents').resolve({ agents: [] }); await tick();
+  assert.match(f.node('sessList').innerHTML, /history denied/);
+  assert.match(f.node('sessList').innerHTML, /data-act="reloadSessions"/);
+  assert.doesNotMatch(f.node('sessList').innerHTML, /还没有 .* 对话/);
+});
+
+test('same-page refreshes preserve rows, cancel older reads, and merge newer events', async () => {
+  const f = fixture();
+  const initial = f.context.loadSessions();
+  pendingFor(f, '/api/sessions').resolve({ sessions: [{ sessionKey: 'codex:one', tool: 'codex', title: 'Initial row', updatedAt: 1 }] }); await initial;
+  const old = f.context.loadSessions(), oldResponse = pendingFor(f, '/api/sessions');
+  assert.match(f.node('sessList').innerHTML, /Initial row/);
+  const latest = f.context.loadSessions(), newResponse = pendingFor(f, '/api/sessions');
+  f.context.sessionReadUpdated({ sessionKey: 'codex:one', tool: 'codex', title: 'Latest event', updatedAt: 3 });
+  newResponse.resolve({ sessions: [{ sessionKey: 'codex:one', tool: 'codex', title: 'Older snapshot', updatedAt: 2 }] }); await latest;
+  oldResponse.resolve({ sessions: [] }); await old;
+  assert.match(f.node('sessList').innerHTML, /Latest event/);
+  const failed = f.context.loadSessions(); pendingFor(f, '/api/sessions').reject(new Error('refresh unavailable')); await failed;
+  assert.match(f.node('sessList').innerHTML, /Latest event/);
+  assert.match(f.node('sessList').innerHTML, /refresh unavailable/);
+});
+
+test('reopening the same key cannot accept an older detail response and read cancellation aborts transport', async () => {
+  const f = fixture(), signals = [], original = f.context.api;
+  f.context.api = (path, body, method, options) => { if (options?.signal) signals.push(options.signal); return original(path, body); };
+  const first = f.context.openSession('codex:one'), old = pendingFor(f, '/api/session?key=codex%3Aone');
+  const second = f.context.openSession('codex:one'), fresh = pendingFor(f, '/api/session?key=codex%3Aone');
+  assert.equal(signals[0].aborted, true);
+  fresh.resolve({ session: { sessionKey: 'codex:one', tool: 'codex', title: 'Fresh detail' }, events: [] }); await second;
+  old.resolve({ session: { sessionKey: 'codex:one', tool: 'codex', title: 'Stale detail' }, events: [] }); await first;
+  assert.equal(f.context.S.openInfo.title, 'Fresh detail');
+  f.context.cancelSessionReads(); assert.equal(signals.at(-1).aborted, true);
+});
+
+test('partial list failures preserve only failed sources and mark their rows stale', async () => {
+  const f = fixture();
+  const initial = f.context.loadSessions(); pendingFor(f, '/api/sessions').resolve({ sessions: [
+    { sessionKey: 'codex:old', tool: 'codex' }, { sessionKey: 'claude:kept', tool: 'claude' },
+  ] }); await initial;
+  const partial = f.context.loadSessions(); pendingFor(f, '/api/sessions').resolve({ sessions: [{ sessionKey: 'codex:new', tool: 'codex' }], errors: ['Claude failed'], failedTools: ['claude'] }); await partial;
+  assert.deepEqual(Array.from(f.context.S.sessions, s => s.sessionKey).sort(), ['claude:kept', 'codex:new']);
+  assert.equal(f.context.S.sessions.find(s => s.tool === 'claude').historyStale, true);
+});
+
+test('opening snapshot merge keeps a final message newer than the buffered stream', async () => {
+  const f = fixture();
+  const app = fs.readFileSync(path.resolve(__dirname, '../../internal/console/web/app.js'), 'utf8');
+  vm.runInContext(app.slice(app.indexOf('function tlKey('), app.indexOf('const KIND_ICON =')), f.context);
+  const read = f.context.openSession('codex:one');
+  vm.runInContext("SESSION_READS.detailChanges.events.push({type:'message',id:'same',text:'Hel',final:false,ts:10})", f.context);
+  pendingFor(f, '/api/session?key=codex%3Aone').resolve({ session: { sessionKey: 'codex:one', tool: 'codex' }, events: [{ type: 'message', id: 'same', text: 'Hello', final: true, ts: 20 }] });
+  await read;
+  assert.equal(f.context.S.tl[0].text, 'Hello'); assert.equal(f.context.S.tl[0].final, true);
 });
 
 test('new-thread feature controls appear when the background catalog arrives', async () => {

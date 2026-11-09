@@ -110,6 +110,7 @@ function fixture() {
 function setup(options = {}) {
   const document = fakeDocument(), backend = fixture(), calls = [], toasts = [];
   const context = vm.createContext({
+    AbortController,
     document, URL, console, location: { hash: '#overview' },
     window: { addEventListener() {} },
     setTimeout() { throw new Error('Unexpected startup timer'); },

@@ -9,8 +9,8 @@ const ROUTE_ICON = { overview: 'spark', accounts: 'key', setup: 'box', login: 'p
 const zone = $('#orbZone');
 const orb = $('#orb');
 function setMenu() { /* kept for callers from the radial-menu era */ }
-$$('#nav a').forEach((a) => a.addEventListener('click', () => {
-  if (a.dataset.route === 'home') { goHome(); }
+$$('#nav a').forEach((a) => a.addEventListener('click', (e) => {
+  if (a.dataset.route === 'home') { e.preventDefault(); goHome(); }
 }));
 
 /* ---------- eyes follow the pointer ---------- */
@@ -21,6 +21,7 @@ addEventListener('pointermove', (e) => {
 }, { passive: true });
 
 const orbFace = $('#orbFace');
+const orbMotionQuery = typeof matchMedia === 'function' ? matchMedia('(prefers-reduced-motion: reduce)') : null;
 let orbFrame = 0;
 const orbStyles = new Map();
 function measureOrb() {
@@ -28,7 +29,7 @@ function measureOrb() {
   SHELL.orbCenter = { x: r.left + r.width / 2, y: r.top + r.height / 2 };
 }
 function scheduleOrbFrame() {
-  if (orbFrame || document.hidden || document.body.classList.contains('panel-open')) return;
+  if (orbFrame || orbMotionQuery?.matches || document.hidden || document.body.classList.contains('panel-open')) return;
   orbFrame = requestAnimationFrame(animateOrb);
 }
 function orbStyle(node, name, value) {
@@ -37,7 +38,7 @@ function orbStyle(node, name, value) {
 }
 function animateOrb() {
   orbFrame = 0;
-  if (document.hidden || document.body.classList.contains('panel-open')) { orbFrame = 0; return; }
+  if (orbMotionQuery?.matches || document.hidden || document.body.classList.contains('panel-open')) { orbFrame = 0; return; }
   if (!SHELL.orbCenter) measureOrb();
   const { x: cx, y: cy } = SHELL.orbCenter;
   let tx = SHELL.mouse.x, ty = SHELL.mouse.y;
@@ -67,10 +68,20 @@ document.addEventListener('visibilitychange', () => {
   scheduleOrbFrame();
 });
 addEventListener('resize', () => { SHELL.orbCenter = null; scheduleOrbFrame(); }, { passive: true });
+orbMotionQuery?.addEventListener('change', () => {
+  if (orbFrame) cancelAnimationFrame(orbFrame);
+  orbFrame = 0;
+  if (orbMotionQuery.matches) {
+    SHELL.eye = { x: 0, y: 0 }; SHELL.tilt = { x: 0, y: 0 };
+    for (const name of ['--ex', '--ey']) orbStyle(orbFace, name, '0px');
+    for (const name of ['--rx', '--ry']) orbStyle(orb, name, '0deg');
+  } else scheduleOrbFrame();
+});
 scheduleOrbFrame();
 
 (function blinkLoop() {
   setTimeout(() => {
+    if (document.hidden || document.body.classList.contains('panel-open') || orbMotionQuery?.matches) { blinkLoop(); return; }
     orb.classList.add('blink');
     setTimeout(() => orb.classList.remove('blink'), 200);
     if (Math.random() < 0.25) setTimeout(() => { orb.classList.add('blink'); setTimeout(() => orb.classList.remove('blink'), 200); }, 280);
@@ -118,6 +129,8 @@ route = async function () {
     }
   }
   S.routeRevision = (S.routeRevision || 0) + 1;
+  homeCancelLoad();
+  if (typeof cancelSessionReads === 'function') cancelSessionReads();
   if (typeof accountDailyDispose === 'function') accountDailyDispose();
   let r = requestedHash.slice(1).split('/')[0];
   // Every render replaces the page owner, including a refresh of this route.
@@ -235,12 +248,19 @@ document.addEventListener('click', (e) => {
 
 
 /* ---------- home: local status, recent work and decisions ---------- */
-const HOME = { seq: 0, needsSetup: false, sessions: null, sessionChanges: null };
+const HOME = { seq: 0, needsSetup: false, sessions: null, sessionChanges: null, controller: null, error: '', loading: false };
 function homeGreeting() {
   const h = new Date().getHours();
   return h < 5 ? '夜深了' : h < 11 ? '早上好' : h < 13 ? '中午好' : h < 18 ? '下午好' : '晚上好';
 }
-function homeSet(id, html) { const el = document.getElementById(id); if (el) el.innerHTML = html; }
+function homeSet(id, html) {
+  const el = document.getElementById(id);
+  if (el && el.homeMarkup !== html) {
+    if (typeof patchSessionMarkup === 'function') patchSessionMarkup(el, html, 'home:' + id);
+    else el.innerHTML = html;
+    el.homeMarkup = html;
+  }
+}
 function homeRemoteStatus() {
   homeSet('hsRemote', `<small>${esc($('#connPill .conn-label')?.textContent || '读取中')}</small>`);
 }
@@ -261,24 +281,26 @@ function homePending() {
   homeSet('homePendingList', rows.length ? rows.join('') : `<div class="home-pending-empty"><span>${icon('check')}</span><b>暂无待处理事项</b><p>需要你确认时，会显示在这里</p></div>`);
 }
 function homeRenderRecent() {
-  if (!HOME.sessions) return;
   const box = $('#homeRecent');
   if (!box) return;
+  if (!HOME.sessions && HOME.loading) return;
   box.hidden = false; box.removeAttribute('aria-busy');
+  const error = HOME.error ? `<div class="home-empty" role="status">${icon('chat')}<div><b>${HOME.sessions ? '最近对话刷新失败，保留上次记录' : '暂时无法读取最近对话'}</b><p>${esc(HOME.error)}</p></div><button type="button" class="home-retry" data-act="homeRetry">重试</button></div>` : '';
+  if (!HOME.sessions) { if (error) homeSet('homeRecentList', error); return; }
   const list = HOME.sessions.slice(0, 4);
   if (!list.length) {
-    homeSet('homeRecentList', `<div class="home-empty">${icon('chat')}<div><b>还没有最近的对话</b><p>开始工作后，最近的对话会出现在这里。</p></div></div>`);
+    homeSet('homeRecentList', error || `<div class="home-empty">${icon('chat')}<div><b>还没有最近的对话</b><p>开始工作后，最近的对话会出现在这里。</p></div></div>`);
     return;
   }
   const approvals = new Set((S.approvals || []).map((a) => a.sessionKey));
   homeSet('homeRecentList', list.map((s) => {
     const family = s.tool === 'claude' ? 'claude' : s.tool === 'codex' ? 'codex' : '';
     const state = approvals.has(s.sessionKey) || s.status === 'waiting_approval' ? ['warn', '等待处理']
-      : s.status === 'running' ? ['run', '进行中'] : s.status === 'failed' ? ['warn', '失败']
+      : s.historyStale ? ['warn', '待刷新'] : s.status === 'running' ? ['run', '进行中'] : s.status === 'failed' ? ['warn', '失败']
       : s.status === 'unknown' ? ['', '状态未知'] : ['', typeof relTime === 'function' ? relTime(s.updatedAt) : ''];
     const mark = family ? `<img src="agent-brand/${family}-app-official.png" alt="" width="28" height="28">` : `<span class="hr-icon">${icon('chat')}</span>`;
     return `<button type="button" class="home-row" data-act="homeOpenSession" data-k="${esc(s.sessionKey)}" data-tool="${esc(s.tool || '')}">${mark}<span class="hr-main"><b>${esc(s.title || '无标题对话')}</b><small>${esc(s.cwd ? (typeof projectOf === 'function' ? projectOf(s.cwd) : s.cwd) : '未关联项目')}</small></span><span class="hr-state ${state[0]}">${esc(state[1])}</span><span class="hr-go">继续</span></button>`;
-  }).join(''));
+  }).join('') + error);
 }
 function homeMergeSessions(snapshot, changes) {
   const sessions = new Map(snapshot.map((s) => [s.sessionKey, s]));
@@ -298,49 +320,70 @@ function homeSessionUpdated(session) {
   HOME.sessions = homeMergeSessions(HOME.sessions, [[session.sessionKey, session]]);
   homeRenderRecent(); homePending();
 }
+function homeCancelLoad() {
+  HOME.controller?.abort();
+  HOME.controller = null;
+}
+async function homeLoadStats(live, signal) {
+  let local = S.local;
+  if (!local) {
+    const revision = S.localAccountsRevision = (S.localAccountsRevision || 0) + 1;
+    const snapshot = await api('/api/local/accounts', undefined, undefined, { signal, timeoutMs: 15000 }).catch(() => null);
+    if (!live()) return;
+    if (revision === S.localAccountsRevision && snapshot) S.local = snapshot;
+    local = S.local;
+  }
+  if (!live()) return;
+  if (!local) { homeSet('hsAgents', '<small>暂不可用</small>'); homeSet('hsKeys', '<small>暂不可用</small>'); }
+  else {
+    homeSet('hsAgents', `${(local.tools || []).filter((t) => t.available).length}<small>个已就绪</small>`);
+    const keys = (local.accounts || []).length;
+    homeSet('hsKeys', keys ? `${keys}<small>把已保存</small>` : '<small>还没有密钥</small>');
+  }
+}
 async function renderHome() {
+  homeCancelLoad();
+  const controller = new AbortController();
+  HOME.controller = controller;
   const seq = ++HOME.seq, routeRevision = S.routeRevision, live = () => seq === HOME.seq && S.route === 'home' && S.routeRevision === routeRevision;
   const changes = new Map();
   HOME.sessionChanges = changes;
+  HOME.loading = true;
+  HOME.error = '';
+  if (!HOME.sessions && seq > 1) homeSet('homeRecentList', '<div class="home-empty" role="status" aria-busy="true"><span class="spin"></span>正在读取本机对话…</div>');
   try {
     const title = $('#homeTitle');
     if (title) title.textContent = `${homeGreeting()}，开始今天的工作`;
     homePending(); homeRemoteStatus();
-    let local = S.local;
-    if (!local) {
-      const revision = S.localAccountsRevision = (S.localAccountsRevision || 0) + 1;
-      const snapshot = await api('/api/local/accounts').catch(() => null);
-      if (!live()) return;
-      if (revision === S.localAccountsRevision && snapshot) S.local = snapshot;
-      local = S.local;
-    }
-    if (!live()) return;
-    if (!local) { homeSet('hsAgents', '<small>暂不可用</small>'); homeSet('hsKeys', '<small>暂不可用</small>'); }
-    if (local) {
-      const ready = (local.tools || []).filter((t) => t.available).length;
-      const keys = (local.accounts || []).length;
-      homeSet('hsAgents', `${ready}<small>个已就绪</small>`);
-      homeSet('hsKeys', keys ? `${keys}<small>把已保存</small>` : '<small>还没有密钥</small>');
-    }
-    homeRemoteStatus();
+    homeRenderRecent();
+    // Local history must start before optional configuration/usage discovery.
+    const recent = api('/api/sessions', undefined, undefined, { signal: controller.signal, timeoutMs: 35000 });
+    void homeLoadStats(live, controller.signal);
     if (typeof USAGE !== 'undefined') {
-      USAGE.load(1, false).then((u) => {
+      Promise.resolve().then(() => USAGE.load(1, false, '', controller.signal)).then((u) => {
         if (!live()) return;
         const t = u.today;
         homeSet('hsTokens', t && t.tokens !== null ? `${USAGE.fmtTokens(t.tokens)}<small>${t.requests !== null ? ' · ' + t.requests.toLocaleString('zh-CN') + ' 次' : ''}</small>` : '<small>暂无数据</small>');
       }).catch(() => { if (live()) homeSet('hsTokens', '<small>暂无数据</small>'); });
     }
     try {
-      const r = await api('/api/sessions');
+      const r = await recent;
       if (!live()) return;
-      HOME.sessions = homeMergeSessions(r.sessions || [], changes);
+      if (!Array.isArray(r.sessions)) throw new Error('本机会话响应不完整，请重试');
+      const partial = Array.isArray(r.errors) && r.errors.length > 0;
+      const failed = new Set(Array.isArray(r.failedTools) ? r.failedTools : []);
+      const retained = partial ? (HOME.sessions || []).filter(s => !failed.size || failed.has(s.tool)).map(s => ({ ...s, historyStale: true })) : [];
+      const snapshot = new Map(retained.map(s => [s.sessionKey, s]));
+      for (const session of r.sessions) snapshot.set(session.sessionKey, session);
+      HOME.sessions = homeMergeSessions([...snapshot.values()], changes);
+      HOME.loading = false;
+      HOME.error = (r.errors || []).join('；');
       homeRenderRecent(); homePending();
-    } catch (_) {
-      const box = $('#homeRecent');
-      if (box && live()) {
-        HOME.sessions = null;
-        box.hidden = false; box.removeAttribute('aria-busy');
-        homeSet('homeRecentList', `<div class="home-empty">${icon('chat')}<div><b>暂时无法读取最近对话</b><p>已有记录仍保存在原工具中。</p></div><button type="button" class="home-retry" data-act="homeRetry">重试</button></div>`);
+    } catch (error) {
+      if (live() && !controller.signal.aborted) {
+        HOME.loading = false;
+        HOME.error = error.message || '已有记录仍保存在原工具中，请重试。';
+        homeRenderRecent();
       }
     }
   } finally {

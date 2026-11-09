@@ -45,15 +45,82 @@ func sortSessions(list []protocol.SessionInfo) {
 }
 
 func (h *claudeHistory) files() []string {
-	m, _ := filepath.Glob(filepath.Join(h.dir, "*", "*.jsonl"))
-	out := m[:0]
-	for _, p := range m {
-		if strings.HasPrefix(filepath.Base(p), "agent-") || !validChildID(strings.TrimSuffix(filepath.Base(p), ".jsonl")) || !h.safeTranscriptPath(p) {
-			continue // sub-agent transcripts of older versions
-		}
-		out = append(out, p)
+	files, _ := h.filesContext(context.Background())
+	return files
+}
+
+// Resolve directory boundaries once per project, rather than walking every
+// ancestor again for every transcript. Links still receive the full check.
+func (h *claudeHistory) filesContext(ctx context.Context) ([]string, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
-	return out
+	root, err := filepath.EvalSymlinks(h.dir)
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("读取 Claude 本地历史目录失败: %w", err)
+	}
+	root, err = filepath.Abs(root)
+	if err != nil {
+		return nil, err
+	}
+	projects, err := os.ReadDir(root)
+	if err != nil {
+		return nil, fmt.Errorf("读取 Claude 本地历史目录失败: %w", err)
+	}
+	var out []string
+	for _, project := range projects {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if !project.IsDir() && project.Type()&os.ModeSymlink == 0 {
+			continue
+		}
+		dir := filepath.Join(root, project.Name())
+		if project.Type()&os.ModeSymlink != 0 {
+			dir, err = filepath.EvalSymlinks(dir)
+			if err != nil || !claudeHistoryWithin(root, dir) {
+				continue
+			}
+			st, err := os.Stat(dir)
+			if err != nil || !st.IsDir() {
+				continue
+			}
+		}
+		entries, err := os.ReadDir(dir)
+		if os.IsNotExist(err) {
+			continue
+		} // a project removed during discovery
+		if err != nil {
+			return nil, fmt.Errorf("读取 Claude 本地项目历史失败: %w", err)
+		}
+		for _, entry := range entries {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			name := entry.Name()
+			if !strings.HasSuffix(name, ".jsonl") || strings.HasPrefix(name, "agent-") || !validChildID(strings.TrimSuffix(name, ".jsonl")) {
+				continue
+			}
+			p := filepath.Join(dir, name)
+			if entry.Type()&os.ModeSymlink != 0 {
+				if !h.safeTranscriptPath(p) {
+					continue
+				}
+			} else if !entry.Type().IsRegular() {
+				continue
+			}
+			out = append(out, p)
+		}
+	}
+	return out, nil
+}
+
+func claudeHistoryWithin(root, path string) bool {
+	rel, err := filepath.Rel(root, path)
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && !filepath.IsAbs(rel)
 }
 
 func (h *claudeHistory) path(id string) (string, error) {
@@ -121,6 +188,11 @@ func (h *claudeHistory) modTime(id string) (time.Time, error) {
 
 // summary returns the cached SessionInfo of a transcript (status fields are filled by the agent).
 func (h *claudeHistory) summary(path string, st os.FileInfo) (protocol.SessionInfo, bool) {
+	// Discovery is batched, but revalidate the selected transcript before using
+	// even a cached summary: a project can be replaced by a link between reads.
+	if !h.safeTranscriptPath(path) {
+		return protocol.SessionInfo{}, false
+	}
 	h.mu.Lock()
 	e := h.cache[path]
 	h.mu.Unlock()
@@ -150,19 +222,36 @@ func (h *claudeHistory) info(id string) (protocol.SessionInfo, bool) {
 }
 
 func (h *claudeHistory) list() []protocol.SessionInfo {
+	list, _ := h.listContext(context.Background())
+	return list
+}
+
+func (h *claudeHistory) listContext(ctx context.Context) ([]protocol.SessionInfo, error) {
 	type fi struct {
 		path string
 		st   os.FileInfo
 	}
 	var files []fi
-	for _, p := range h.files() {
+	paths, err := h.filesContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for _, p := range paths {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		if st, err := os.Stat(p); err == nil {
 			files = append(files, fi{p, st})
+		} else if !os.IsNotExist(err) {
+			return nil, fmt.Errorf("读取 Claude 会话信息失败: %w", err)
 		}
 	}
 	sort.Slice(files, func(i, j int) bool { return files[i].st.ModTime().After(files[j].st.ModTime()) })
 	var out []protocol.SessionInfo
 	for _, f := range files {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		if len(out) >= maxSessions {
 			break
 		}
@@ -170,7 +259,7 @@ func (h *claudeHistory) list() []protocol.SessionInfo {
 			out = append(out, info)
 		}
 	}
-	return out
+	return out, ctx.Err()
 }
 
 func claudeClient(entrypoint string) string {

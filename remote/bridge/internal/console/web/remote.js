@@ -21,6 +21,68 @@ Object.assign(ICONS, {
 });
 
 const RM = { tool: 'codex', query: '', expanded: {}, newThread: false, newPrompt: '', agents: null, agentsPromise: null, projects: [], archived: null, archivedOpen: false, qrTimer: null, poll: null, model: '', effort: '', loginEpoch: 0, sessionsEpoch: 0, controlEpoch: 0, controls: null, controlPromise: null, newFeatures: null, featureChoice: { mode: '', skills: [] }, sideChain: null, controlPanel: '', remoteMode: 'station', direct: null, directPromise: null, directGeneration: 0, connectionAction: null, connectionRevision: 0, stationDraft: null, botDraft: '' };
+const SESSION_READS = { list: null, detail: null, listState: 'idle', listError: '', hasSnapshot: false, changes: null, detailChanges: null };
+function cancelSessionReads() {
+  if (typeof cancelSessionRender === 'function') cancelSessionRender();
+  SESSION_READS.list?.abort(); SESSION_READS.detail?.abort();
+  SESSION_READS.list = SESSION_READS.detail = null;
+  SESSION_READS.changes = SESSION_READS.detailChanges = null;
+}
+const sessionMarkup = new WeakMap();
+// Keep existing inputs, focus, open disclosures and scroll containers alive.
+// The cache belongs to a DOM node and an exact session key, never another page.
+function patchSessionMarkup(node, html, owner = '') {
+  if (!node) return;
+  const previous = sessionMarkup.get(node);
+  if (previous?.owner === owner && previous.html === html) return;
+  if (previous?.owner !== owner || !document.createElement || !node.childNodes) node.innerHTML = html;
+  else {
+    const template = document.createElement('template'); template.innerHTML = html;
+    patchSessionChildren(node, template.content);
+  }
+  sessionMarkup.set(node, { owner, html });
+}
+function sessionNodeKey(node) {
+  return node.nodeType === 1 ? node.id || node.getAttribute('data-session-block') || (node.getAttribute('data-k') && node.getAttribute('data-act') + ':' + node.getAttribute('data-k')) || '' : '';
+}
+function patchSessionChildren(parent, source) {
+  let current = parent.firstChild;
+  let keyed;
+  for (const next of [...source.childNodes]) {
+    const key = sessionNodeKey(next);
+    if (key && sessionNodeKey(current || {}) !== key) {
+      if (!keyed) keyed = new Map([...parent.childNodes].map(node => [sessionNodeKey(node), node]).filter(([key]) => key));
+      const match = keyed.get(key);
+      if (match) { parent.insertBefore(match, current); current = match; }
+      else if (current) { parent.insertBefore(next, current); continue; }
+    }
+    if (!current) { parent.appendChild(next); continue; }
+    if (sessionNodeKey(current) && sessionNodeKey(current) !== key) { parent.insertBefore(next, current); continue; }
+    if (current.nodeType !== next.nodeType || current.nodeName !== next.nodeName || sessionNodeKey(current) !== key) {
+      const old = current; current = current.nextSibling; parent.replaceChild(next, old); continue;
+    }
+    if (!current.isEqualNode(next)) {
+      if (current.nodeType !== 1) current.nodeValue = next.nodeValue;
+      else {
+        for (const attr of [...current.attributes]) {
+          if (attr.name === 'open' && current.tagName === 'DETAILS') continue;
+          if (!next.hasAttribute(attr.name)) current.removeAttribute(attr.name);
+        }
+        for (const attr of [...next.attributes]) if (current.getAttribute(attr.name) !== attr.value) current.setAttribute(attr.name, attr.value);
+        // A live textarea contains the user's draft, including IME composition.
+        if (current.tagName !== 'TEXTAREA') patchSessionChildren(current, next);
+      }
+    }
+    current = current.nextSibling;
+  }
+  while (current) { const old = current; current = current.nextSibling; old.remove(); }
+}
+function sessionReadUpdated(session) {
+  const changes = SESSION_READS.changes;
+  if (!changes || !session?.sessionKey) return;
+  const old = changes.get(session.sessionKey);
+  if (!old || !(old.updatedAt > session.updatedAt)) changes.set(session.sessionKey, session);
+}
 const AGENT_INFO = { codex: { name: 'Codex', badge: '>_', detail: 'Codex App、CLI 与 IDE 的全部对话' }, claude: { name: 'Claude Code', badge: 'CC', detail: 'Claude Code 会话' }, 'deepseek-harness': { name: 'DeepSeek Harness', badge: 'DS', detail: 'Bridge 与手机发起的会话' }, hermes: { name: 'Hermes', badge: 'H', detail: 'Bridge 与手机发起的会话' } };
 const host = (u) => { try { return new URL(u).host; } catch (_) { return u || ''; } };
 const projectOf = (cwd) => String(cwd || '').replace(/[\\/]+$/, '').split(/[\\/]/).pop() || '未关联项目';
@@ -775,6 +837,9 @@ RENDER_sessions = async function (view) {
   </div>`;
   renderSessionNavigation();
   renderDetail(true);
+  SESSION_READS.listState = 'loading';
+  SESSION_READS.listError = '';
+  renderSessionList();
   const agentsPromise = loadAgentCatalog().then((r) => {
     if (pageEpoch === RM.sessionsEpoch && S.route === 'sessions') {
       RM.agents = r;
@@ -793,14 +858,35 @@ RENDER_sessions = async function (view) {
 };
 
 async function loadSessions(pageEpoch = RM.sessionsEpoch) {
+  SESSION_READS.list?.abort();
+  const controller = new AbortController(), changes = new Map();
+  SESSION_READS.list = controller;
+  SESSION_READS.changes = changes;
+  SESSION_READS.listState = 'loading';
+  SESSION_READS.listError = '';
+  const current = () => SESSION_READS.list === controller && !controller.signal.aborted && pageEpoch === RM.sessionsEpoch && S.route === 'sessions';
+  renderSessionList();
   try {
-    const r = await api('/api/sessions');
-    if (pageEpoch !== RM.sessionsEpoch || S.route !== 'sessions') return false;
-    S.sessions = r.sessions || [];
+    const r = await api('/api/sessions', undefined, undefined, { signal: controller.signal, timeoutMs: 35000 });
+    if (!current()) return false;
+    if (!Array.isArray(r.sessions)) throw new Error('本机会话响应不完整，请重试');
+    const partial = Array.isArray(r.errors) && r.errors.length > 0;
+    const failed = new Set(Array.isArray(r.failedTools) ? r.failedTools : []);
+    const rows = new Map((partial ? S.sessions.filter(s => !failed.size || failed.has(s.tool)).map(s => ({ ...s, historyStale: true })) : []).map(s => [s.sessionKey, s]));
+    for (const session of r.sessions) rows.set(session.sessionKey, session);
+    for (const [key, session] of changes) if (!rows.has(key) || !(rows.get(key).updatedAt > session.updatedAt)) rows.set(key, session);
+    S.sessions = [...rows.values()];
+    SESSION_READS.hasSnapshot = true;
+    SESSION_READS.listState = 'ready';
+    SESSION_READS.listError = (r.errors || []).join('；');
   } catch (e) {
-    const el = $('#sessList');
-    if (pageEpoch === RM.sessionsEpoch && S.route === 'sessions' && el && el.isConnected !== false) el.innerHTML = `<div class="rm-error" style="margin:8px">${esc(e.message)}</div>`;
+    if (current()) {
+      SESSION_READS.listState = 'error'; SESSION_READS.listError = e.message || '本机会话读取失败';
+      renderSessionList();
+    }
     return false;
+  } finally {
+    if (SESSION_READS.changes === changes) SESSION_READS.changes = null;
   }
   if (pageEpoch !== RM.sessionsEpoch || S.route !== 'sessions') return false;
   renderSessionList();
@@ -813,20 +899,27 @@ function renderSessionList() {
   const q = RM.query.toLowerCase().trim();
   const pending = new Set(S.approvals.map((a) => a.sessionKey));
   const list = S.sessions.filter((s) => s.tool === RM.tool && (!q || [s.title, s.cwd, s.model].some((v) => String(v || '').toLowerCase().includes(q))));
-  if (!list.length) { el.innerHTML = `<div class="empty">${q ? '没有匹配的对话' : `还没有 ${AGENT_INFO[RM.tool].name} 对话`}</div>${renderArchivedSessions(q)}`; return; }
+  const error = SESSION_READS.listError ? `<div class="rm-error" role="status" style="margin:8px">${esc(SESSION_READS.listError)}${S.sessions.length ? ' · 保留上次读取的对话。' : ''} <button class="rm-link" data-act="reloadSessions">重试</button></div>` : '';
+  if (!list.length) {
+    const loading = !SESSION_READS.hasSnapshot && SESSION_READS.listState === 'loading';
+    patchSessionMarkup(el, error || `<div class="empty"${loading ? ' role="status" aria-busy="true"' : ''}>${loading ? '<span class="spin"></span>正在读取本机对话…' : q ? '没有匹配的对话' : `还没有 ${AGENT_INFO[RM.tool].name} 对话`}</div>${renderArchivedSessions(q)}`, RM.tool);
+    return;
+  }
   const groups = new Map();
   list.slice().sort((a, b) => b.updatedAt - a.updatedAt).forEach((s) => {
-    const k = (s.cwd || '').replace(/[\\/]+$/, '').toLowerCase() || '__none';
+    const cwd = (s.cwd || '').replace(/[\\/]+$/, '');
+    const k = ((OSX() === 'windows' || OSX() === 'win') ? cwd.toLowerCase() : cwd) + '|' + (s.workspaceMode || 'code');
     if (!groups.has(k)) groups.set(k, { k, name: s.cwd ? projectOf(s.cwd) : '未关联项目', items: [] });
     groups.get(k).items.push(s);
   });
-  el.innerHTML = [...groups.values()].map((g) => {
+  const markup = [...groups.values()].map((g) => {
     const shown = q || RM.expanded[g.k] ? g.items : g.items.slice(0, 8);
     return `<div class="cx-proj">${icon('folder')}<span>${esc(g.name)}</span></div>${shown.map((s) => {
-      const lead = pending.has(s.sessionKey) ? '<span class="rm-dot" style="background:var(--rm-warn)"></span>' : s.status === 'running' ? '<span class="rm-dot wait" style="background:var(--rm-blue)"></span>' : '';
-      return `<div class="cx-row ${s.sessionKey === S.openKey && !RM.newThread ? 'sel' : ''}" data-act="openSess" data-k="${esc(s.sessionKey)}" title="${esc(s.title || '')}"><span class="lead">${lead}</span><span class="t">${esc(s.title || '无标题对话')}</span><span class="time">${pending.has(s.sessionKey) ? '待批准' : s.status === 'running' ? '运行中' : esc(relTime(s.updatedAt))}</span></div>`;
+      const lead = pending.has(s.sessionKey) ? '<span class="rm-dot" style="background:var(--rm-warn)"></span>' : !s.historyStale && s.status === 'running' ? '<span class="rm-dot wait" style="background:var(--rm-blue)"></span>' : '';
+      return `<div class="cx-row ${s.sessionKey === S.openKey && !RM.newThread ? 'sel' : ''}" data-act="openSess" data-k="${esc(s.sessionKey)}" title="${esc(s.title || '')}"><span class="lead">${lead}</span><span class="t">${esc(s.title || '无标题对话')}</span><span class="time">${pending.has(s.sessionKey) ? '待批准' : s.historyStale ? '待刷新' : s.status === 'running' ? '运行中' : esc(relTime(s.updatedAt))}</span></div>`;
     }).join('')}${!q && g.items.length > 8 ? `<button class="cx-more" data-act="cxMore" data-k="${esc(g.k)}">${RM.expanded[g.k] ? '收起' : `显示全部 ${g.items.length} 个`}</button>` : ''}`;
-  }).join('') + renderArchivedSessions(q);
+  }).join('') + renderArchivedSessions(q) + error;
+  patchSessionMarkup(el, markup, RM.tool);
 }
 
 function renderArchivedSessions(query = '') {
@@ -1021,8 +1114,9 @@ async function loadFeaturesForCwd(cwd, tool = RM.tool) {
 function renderDetail(scroll) {
   const el = $('#sessDetail');
   if (!el) return;
-  if (RM.newThread) { cxRenderNew(el); return; }
+  if (RM.newThread) { sessionMarkup.delete(el); cxRenderNew(el); return; }
   if (!S.openKey) {
+    sessionMarkup.delete(el);
     el.innerHTML = `<div class="cx-empty"><div class="rm-hero-icon" style="margin:0 auto">${icon('code')}</div><h3>选择一个对话</h3><div>或者新建一个，让 ${AGENT_INFO[RM.tool].name} 在电脑上开始工作</div></div>`;
     return;
   }
@@ -1036,27 +1130,28 @@ function renderDetail(scroll) {
   const last = blocks[blocks.length - 1];
   const thinking = s.status === 'running' && !(last && last.type === 'work' && last.live) && !(last && last.type === 'bot' && !last.ev.final);
   const features = currentControl(s.sessionKey)?.features;
-  el.innerHTML = `<div class="cx-head"><div style="flex:1;min-width:0"><div class="title">${esc(s.title || '对话')}</div>
+  const markup = `<div class="cx-head" id="cxDetailHeader"><div style="flex:1;min-width:0"><div class="title">${esc(s.title || '对话')}</div>
       <div class="meta">${esc([s.cwd ? projectOf(s.cwd) : '', s.client, s.model].filter(Boolean).join(' · '))}</div><div class="meta">在此发送使用电脑当前 API 设置；手机单独选择的 API 仍保留在手机远程设置中。</div></div>
       ${s.tool === 'codex' && s.sessionKey ? `<button class="btn sm" data-act="cxNavigate" title="让 Codex 桌面端跳到这个对话">${icon('laptop')}在 Codex 中打开</button>` : ''}
       ${canOpenNativeSession(s) ? `<button class="btn sm" data-act="resumeSession" data-k="${esc(s.sessionKey)}" data-target="${esc(s.tool)}" title="在终端里用原工具打开同一个对话">${icon('terminal')}终端打开</button>` : ''}</div>
       <div id="cxControlMount">${cxControlTools(s)}</div>
-    <div class="cx-thread" id="cxThread"><div class="cx-col">${blocks.map((b) => b.type === 'user' ? `<div class="cx-user">${esc(b.ev.text)}</div>`
-      : b.type === 'bot' ? `<div class="cx-bot">${renderText(b.ev.text)}</div>`
+    <div class="cx-thread" id="cxThread"><div class="cx-col">${blocks.map((b, i) => b.type === 'user' ? `<div class="cx-user" data-session-block="${esc('user:' + (b.ev.id || i))}">${esc(b.ev.text)}</div>`
+      : b.type === 'bot' ? `<div class="cx-bot" data-session-block="${esc('bot:' + (b.ev.id || i))}">${renderText(b.ev.text)}</div>`
         : b.type === 'work' ? cxWork(b)
           : b.type === 'turn' ? `<div class="cx-notice">${b.ev.status === 'failed' ? '出错了' + (b.ev.error ? '：' + esc(b.ev.error) : '') : '已停止'}</div>`
             : `<div class="cx-notice">${esc(b.ev.text)}</div>`).join('') || '<div class="empty">还没有内容</div>'}
       ${thinking ? '<div class="cx-live"><span class="spin" style="width:12px;height:12px"></span>正在处理</div>' : ''}</div></div>
-    ${pending.length ? `<div class="cx-composer-wrap" style="padding-bottom:0"><div class="cx-col" style="padding:0"><div class="cx-appr"><div class="k">${esc(AGENT_INFO[s.tool] ? AGENT_INFO[s.tool].name : s.tool)} 请求批准${pending.length > 1 ? ` · 还有 ${pending.length - 1} 个` : ''}</div><div class="t">${esc(pending[0].title || '需要批准')}</div>
+    ${pending.length ? `<div class="cx-composer-wrap" id="cxDetailApproval" style="padding-bottom:0"><div class="cx-col" style="padding:0"><div class="cx-appr"><div class="k">${esc(AGENT_INFO[s.tool] ? AGENT_INFO[s.tool].name : s.tool)} 请求批准${pending.length > 1 ? ` · 还有 ${pending.length - 1} 个` : ''}</div><div class="t">${esc(pending[0].title || '需要批准')}</div>
       ${pending[0].detail ? `<pre>${esc(pending[0].detail)}</pre>` : ''}${pending[0].diff ? cxDiff(pending[0].diff) : ''}
       <div class="row"><button class="btn sm primary" data-act="approve" data-id="${esc(pending[0].approvalId)}" data-d="allow">允许</button><button class="btn sm" data-act="approve" data-id="${esc(pending[0].approvalId)}" data-d="allow_session">本对话都允许</button><button class="btn sm danger" data-act="approve" data-id="${esc(pending[0].approvalId)}" data-d="deny">拒绝</button></div></div></div></div>` : ''}
-    <div class="cx-composer-wrap"><div class="cx-composer">
+    <div class="cx-composer-wrap" id="cxDetailComposer"><div class="cx-composer">
       <textarea id="sendText" rows="2" ${s.controllable === false ? 'disabled' : ''} placeholder="${s.controllable === false ? '当前只能查看，请先核对原任务状态' : running ? '补充说明，完成后接着做' : '继续对话'}（${OSX() === 'darwin' ? '⌘' : 'Ctrl+'}Enter 发送）">${esc(draft)}</textarea>
       <div class="cx-bar">${s.tool === 'codex' ? `<select class="cx-chip" id="cxEffort" title="推理强度"><option value="">推理：默认</option>${[['low', '低'], ['medium', '中'], ['high', '高']].map(([v, l]) => `<option value="${v}" ${RM.effort === v ? 'selected' : ''}>推理：${l}</option>`).join('')}</select>` : ''}<div id="cxFeatureMount">${featureInputs(features)}</div>
         <span class="grow"></span>
         ${running && s.controllable !== false ? `<button class="cx-send stop" data-act="interrupt" title="停止">${icon('stop')}</button>` : ''}
         <button class="cx-send" data-act="send" title="发送" ${s.controllable === false ? 'disabled' : ''}>${icon('arrowUp')}</button></div>
     </div></div>`;
+  patchSessionMarkup(el, markup, S.openKey);
   const t = $('#cxThread');
   if (t && (scroll || atBottom)) t.scrollTop = t.scrollHeight;
 }
@@ -1072,29 +1167,40 @@ function cxRenderNew(el) {
 }
 
 async function openSession(key, keepScroll, pageEpoch = RM.sessionsEpoch) {
+  SESSION_READS.detail?.abort();
+  const controller = new AbortController(), changes = [];
+  SESSION_READS.detail = controller;
+  SESSION_READS.detailChanges = { key, events: changes };
   RM.newThread = false;
   ++RM.controlEpoch;
   RM.controls = null;
   RM.controlPromise = null;
   RM.controlPanel = '';
   RM.sideChain = null;
+  if (S.openKey !== key) { S.openInfo = null; S.tl = []; S.tlIndex = new Map(); }
   S.openKey = key;
   renderSessionList();
   const el = $('#sessDetail');
-  if (el && !keepScroll) el.innerHTML = '<div class="cx-empty"><span class="spin"></span></div>';
+  if (el && !keepScroll) { sessionMarkup.delete(el); el.innerHTML = '<div class="cx-empty"><span class="spin"></span></div>'; }
   try {
-    const r = await api('/api/session?key=' + encodeURIComponent(key));
-    if (pageEpoch !== RM.sessionsEpoch || S.route !== 'sessions' || S.openKey !== key) return;
+    const r = await api('/api/session?key=' + encodeURIComponent(key), undefined, undefined, { signal: controller.signal, timeoutMs: 50000 });
+    if (controller.signal.aborted || SESSION_READS.detail !== controller || pageEpoch !== RM.sessionsEpoch || S.route !== 'sessions' || S.openKey !== key) return;
     S.openInfo = r.session;
     S.tl = [];
     S.tlIndex = new Map();
     (r.events || []).forEach(tlApply);
+    changes.forEach(event => tlApply(event, { snapshotReplay: true }));
     S.approvals.filter((a) => a.sessionKey === key).forEach(tlApply);
     renderDetail(true);
     RM.controlPromise = loadSessionControls(key, pageEpoch);
     void RM.controlPromise;
   } catch (e) {
-    if (pageEpoch === RM.sessionsEpoch && S.route === 'sessions' && S.openKey === key && el && el.isConnected !== false) el.innerHTML = `<div class="rm-error" style="margin:20px">${esc(e.message)}</div>`;
+    if (!controller.signal.aborted && SESSION_READS.detail === controller && pageEpoch === RM.sessionsEpoch && S.route === 'sessions' && S.openKey === key && el && el.isConnected !== false) {
+      sessionMarkup.delete(el);
+      el.innerHTML = `<div class="rm-error" style="margin:20px">${esc(e.message)} <button class="rm-link" data-act="openSess" data-k="${esc(key)}">重试</button></div>`;
+    }
+  } finally {
+    if (SESSION_READS.detailChanges?.events === changes) SESSION_READS.detailChanges = null;
   }
 }
 

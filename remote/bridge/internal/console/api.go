@@ -668,7 +668,7 @@ func (s *Server) handleFS(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 	m := s.manager()
 	if m == nil {
-		writeJSON(w, map[string]any{"sessions": []any{}})
+		writeErr(w, http.StatusServiceUnavailable, "本机会话读取器还在启动，请稍后重试")
 		return
 	}
 	ctx, cancel := ctxTimeout(r, 30*time.Second)

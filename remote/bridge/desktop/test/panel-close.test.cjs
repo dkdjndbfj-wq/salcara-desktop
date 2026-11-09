@@ -24,6 +24,7 @@ function fixture() {
   const location = { hash: '#overview', pathname: '/', search: '' }, state = { route: 'overview' };
   const pages = Object.fromEntries(['setup','overview','accounts','login','sessions','settings','usage'].map(key => [key, { title: key }]));
   const context = vm.createContext({
+    homeCancelLoad() {},
     $: selector => elements.get(selector.slice(1)), $$: () => [],
     document: { body }, location, PAGES: pages, S: state, RENDER: {}, ROUTE_ICON: {}, SHELL: {},
     innerWidth: 1000, innerHeight: 900, icon: () => '', setMenu() {},

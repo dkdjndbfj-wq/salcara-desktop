@@ -103,9 +103,12 @@ const S = {
 
 /* ---------------- utilities ---------------- */
 
-async function api(path, body, method) {
+async function api(path, body, method, options = {}) {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 65000);
+  const abort = () => controller.abort();
+  if (options.signal?.aborted) abort();
+  else options.signal?.addEventListener('abort', abort, { once: true });
+  const timer = setTimeout(abort, options.timeoutMs || 65000);
   const opts = { method: method || (body !== undefined ? 'POST' : 'GET'), headers: {}, credentials: 'same-origin', signal: controller.signal };
   if (body !== undefined) {
     opts.headers['Content-Type'] = 'application/json';
@@ -119,10 +122,11 @@ async function api(path, body, method) {
     if (data === null) throw new Error('本机响应不完整，请重试');
     return data;
   } catch (e) {
+    if (options.signal?.aborted) throw Object.assign(new Error('读取已取消'), { name: 'AbortError' });
     if (controller.signal.aborted) throw new Error('本机响应超时，请重试');
     if (e instanceof TypeError) throw new Error('连不上 Salcara Bridge，程序可能已经退出');
     throw e;
-  } finally { clearTimeout(timer); }
+  } finally { clearTimeout(timer); options.signal?.removeEventListener('abort', abort); }
 }
 
 /* 系统相关的文案：Finder / 资源管理器 / 文件管理器 */
@@ -1357,9 +1361,27 @@ function tlKey(ev) {
   return 'x:' + Math.random();
 }
 
-function tlApply(ev) {
+function timelineEventIsOlder(previous, event, snapshotReplay) {
+  // seq is scoped to a device; native history without seq uses source time.
+  if (previous.seq > 0 && event.seq > 0 && previous.deviceId === event.deviceId) {
+    if (event.seq < previous.seq) return true;
+  } else if (previous.ts > 0 && event.ts > 0 && event.ts < previous.ts) return true;
+  if (previous.final && !event.final) return true;
+  if (previous.outputFinal && !event.outputFinal && typeof event.output === 'string' && event.output !== previous.output) return true;
+  const terminal = new Set(['completed', 'failed', 'interrupted', 'cancelled']);
+  if (terminal.has(previous.status) && ['running', 'started', 'pending'].includes(event.status)) return true;
+  if (typeof previous.text === 'string' && typeof event.text === 'string' && previous.text !== event.text) {
+    const newer = previous.seq > 0 && event.seq > previous.seq && previous.deviceId === event.deviceId
+      || previous.ts > 0 && event.ts > previous.ts;
+    if (!newer && previous.text.startsWith(event.text)) return true;
+    if (snapshotReplay && !newer && !event.text.startsWith(previous.text)) return true;
+  }
+  return false;
+}
+function tlApply(ev, options) {
   if (ev.type === 'session.updated') {
-    if (ev.session) S.openInfo = ev.session;
+    if (options?.snapshotReplay && S.openInfo?.sessionKey === ev.session?.sessionKey && !(ev.session.updatedAt > S.openInfo.updatedAt)) return;
+    if (ev.session && !(S.openInfo?.sessionKey === ev.session.sessionKey && S.openInfo.updatedAt > ev.session.updatedAt)) S.openInfo = ev.session;
     return;
   }
   const k = tlKey(ev);
@@ -1369,6 +1391,7 @@ function tlApply(ev) {
   }
   if (S.tlIndex.has(k)) {
     const i = S.tlIndex.get(k);
+    if (timelineEventIsOlder(S.tl[i], ev, options?.snapshotReplay)) return;
     S.tl[i] = Object.assign({}, S.tl[i], ev);
   } else {
     S.tlIndex.set(k, S.tl.length);
@@ -1611,12 +1634,16 @@ function renderSettingsPage(view, st) {
 RENDER_settings = function (view) {
   const target = view;
   const startedAt = SETTINGS_UI.revision;
+  const previous = S.state;
+  const presentation = (st) => JSON.stringify([st.config, st.version, st.os, st.appBundle, st.exe, st.installedFrom]);
+  const cachedPresentation = previous ? presentation(settingsSnapshot(previous)) : null;
   // Without a real state, wait on the skeleton instead of painting default switches that then flip.
   if (S.state) renderSettingsPage(target, settingsSnapshot(S.state));
   void loadState().then((st) => {
     if (target.isConnected === false || S.route !== 'settings') return;
     const snapshot = settingsSnapshot(st, startedAt);
     if (S.state === st) S.state = snapshot;
+    if (cachedPresentation === presentation(snapshot)) { projectSettingsState(); return; }
     renderSettingsPage(target, snapshot);
     if (typeof window.__salcaraAttachSettingsPrefs === 'function') window.__salcaraAttachSettingsPrefs(target);
   }).catch((e) => {
@@ -2274,6 +2301,31 @@ document.addEventListener('keydown', (e) => {
 /* ---------------- live stream ---------------- */
 
 let bootApprovalChanges = null;
+let sessionRenderFrame = 0, sessionRenderDirty = null;
+function cancelSessionRender() {
+  if (sessionRenderFrame && typeof cancelAnimationFrame === 'function') cancelAnimationFrame(sessionRenderFrame);
+  sessionRenderFrame = 0; sessionRenderDirty = null;
+}
+function scheduleSessionRender(list, detail) {
+  if (S.route !== 'sessions') return;
+  const owner = S.routeRevision;
+  if (!sessionRenderDirty || sessionRenderDirty.owner !== owner) sessionRenderDirty = { owner, list: false, detail: false };
+  sessionRenderDirty.list ||= list; sessionRenderDirty.detail ||= detail;
+  if (typeof document !== 'undefined' && document.hidden || sessionRenderFrame) return;
+  const paint = () => {
+    sessionRenderFrame = 0;
+    const dirty = sessionRenderDirty; sessionRenderDirty = null;
+    if (!dirty || S.route !== 'sessions' || S.routeRevision !== dirty.owner) return;
+    if (dirty.list) renderSessionList();
+    if (dirty.detail) renderDetail(false);
+  };
+  if (typeof requestAnimationFrame === 'function') sessionRenderFrame = requestAnimationFrame(paint);
+  else paint();
+}
+if (typeof document !== 'undefined') document.addEventListener('visibilitychange', () => {
+  if (document.hidden && sessionRenderFrame) { cancelAnimationFrame(sessionRenderFrame); sessionRenderFrame = 0; }
+  else if (!document.hidden && sessionRenderDirty) scheduleSessionRender(false, false);
+});
 function connectStream() {
   const es = new EventSource('/api/stream');
   es.addEventListener('status', (m) => {
@@ -2299,11 +2351,13 @@ function connectStream() {
       if (i >= 0) S.sessions[i] = ev.session; else if (!S.sessFilter || S.sessFilter === ev.session.tool) S.sessions.unshift(ev.session);
       S.sessions.sort((a, b) => b.updatedAt - a.updatedAt);
       if (typeof homeSessionUpdated === 'function') homeSessionUpdated(ev.session);
-      if (S.route === 'sessions') renderSessionList();
+      if (typeof sessionReadUpdated === 'function') sessionReadUpdated(ev.session);
+      if (S.route === 'sessions') scheduleSessionRender(true, false);
     }
     if (S.route === 'sessions' && S.openKey && ev.sessionKey === S.openKey) {
+      if (typeof SESSION_READS !== 'undefined' && SESSION_READS.detailChanges?.key === S.openKey) SESSION_READS.detailChanges.events.push(ev);
       tlApply(ev);
-      renderDetail(false);
+      if (S.openInfo?.sessionKey === S.openKey) scheduleSessionRender(false, true);
     }
   });
   es.onerror = () => {

@@ -1570,7 +1570,10 @@ func (a *claudeAgent) WatchdogSessions(ctx context.Context) ([]protocol.SessionI
 
 // Sessions merges transcripts on disk with sessions the bridge is running.
 func (a *claudeAgent) Sessions(ctx context.Context) ([]protocol.SessionInfo, error) {
-	list := a.hist.list()
+	list, err := a.hist.listContext(ctx)
+	if err != nil {
+		return nil, err
+	}
 	a.mu.Lock()
 	seen := map[string]bool{}
 	for i := range list {
