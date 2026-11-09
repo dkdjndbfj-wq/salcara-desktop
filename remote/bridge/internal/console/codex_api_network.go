@@ -225,12 +225,13 @@ func (s *Server) apiListenerHandler(port int, n config.CodexAPINetwork, binding 
 			return
 		}
 		path := r.URL.Path
-		if !strings.HasPrefix(path, "/v1/") && !strings.HasPrefix(path, "/backend-api/codex/") && !strings.HasPrefix(path, "/codex-api/") {
+		native := strings.HasPrefix(path, "/v1beta/models") || path == "/api/chat" || path == "/api/generate" || path == "/api/tags"
+		if !native && !strings.HasPrefix(path, "/v1/") && !strings.HasPrefix(path, "/backend-api/codex/") && !strings.HasPrefix(path, "/codex-api/") {
 			writeErr(w, 404, "API 路由不存在")
 			return
 		}
 		request := r.Clone(context.WithValue(r.Context(), apiListenerContext{}, apiListenerPermit{manager: s.apiNetwork, epoch: c.CodexAPI.AuthEpoch, binding: binding, port: port}))
-		if strings.HasPrefix(path, "/v1/") {
+		if native || strings.HasPrefix(path, "/v1/") {
 			u := *r.URL
 			u.Path = "/codex-api" + path
 			request.URL = &u

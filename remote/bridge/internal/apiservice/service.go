@@ -181,6 +181,11 @@ func fail(w http.ResponseWriter, status int) {
 	_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]string{"type": "salcara_local_api_error", "message": http.StatusText(status)}})
 }
 func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	managedTarget, path, validPath := managedAPIPath(r.URL.Path)
+	native := parseNativeRoute(path)
+	if native != nil {
+		w = &nativeErrorWriter{ResponseWriter: w, kind: native.kind}
+	}
 	if s.admissionClosed.Load() || s.Config == nil {
 		fail(w, 503)
 		return
@@ -207,8 +212,6 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		fail(w, 503)
 		return
 	}
-	key := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-	managedTarget, path, validPath := managedAPIPath(r.URL.Path)
 	if !validPath {
 		fail(w, 404)
 		return
@@ -217,9 +220,30 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		fail(w, 403)
 		return
 	}
-	if key == "" || len(key) > 256 {
-		fail(w, 401)
+	key, keyStatus := localAPIKey(r, path, managedTarget, native)
+	if keyStatus != 0 {
+		fail(w, keyStatus)
 		return
+	}
+	// Keep only the public path in observations, never query credentials. The
+	// inner gateway sees the canonical authenticated request without native keys.
+	observationPath := path
+	if native != nil {
+		if native.kind == "gemini" && !native.models {
+			observationPath = "v1beta/models/{model}:generateContent"
+			if native.stream {
+				observationPath = "v1beta/models/{model}:streamGenerateContent"
+			}
+		}
+		if managedTarget != "" {
+			fail(w, 404)
+			return
+		}
+		if native.models {
+			path = "v1/models"
+		} else {
+			path = "v1/chat/completions"
+		}
 	}
 	digest := config.APIClientDigest(key)
 	var selected config.NamedAPIClient
@@ -280,7 +304,7 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		return func() {}
 	}
-	ledgerObservation := usageledger.Observation{StartedAt: started, AccountID: selected.AccountID, ClientID: selected.ID, Route: "codex-api/" + path, State: "rejected"}
+	ledgerObservation := usageledger.Observation{StartedAt: started, AccountID: selected.AccountID, ClientID: selected.ID, Route: "codex-api/" + observationPath, State: "rejected"}
 	status := 200
 	tracked := &statusWriter{ResponseWriter: w, status: &status}
 	w = tracked
@@ -323,7 +347,7 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	textVirtualGroup := ""
-	if r.URL.RawQuery != "" || (path != "v1/models" && path != "v1/responses" && path != "v1/responses/compact" && path != "v1/chat/completions" && !messages && !imagePath(path)) {
+	if path != "v1/models" && path != "v1/responses" && path != "v1/responses/compact" && path != "v1/chat/completions" && !messages && !imagePath(path) {
 		fail(w, 404)
 		return
 	}
@@ -444,6 +468,13 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if readStatus != 0 {
 			fail(tracked, readStatus)
 			return
+		}
+		if native != nil {
+			body, err = native.request(body)
+			if err != nil {
+				fail(tracked, 400)
+				return
+			}
 		}
 		if path == "v1/chat/completions" && !gateway.ValidChatEnvelope(body) {
 			fail(tracked, 400)
@@ -584,7 +615,11 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		tracked.Header().Set("Content-Type", "application/json")
 		ledgerObservation.State = "read_only"
-		_ = json.NewEncoder(tracked).Encode(response)
+		if native != nil {
+			_ = json.NewEncoder(tracked).Encode(native.catalog(data))
+		} else {
+			_ = json.NewEncoder(tracked).Encode(response)
+		}
 		return
 	}
 	imagePreAdmitted := false
@@ -752,7 +787,7 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				o.AccountID = a.ID
 				o.AccountEpoch = a.CredentialEpoch
 			}
-			o.ClientID, o.Route = selected.ID, "codex-api/"+path
+			o.ClientID, o.Route = selected.ID, "codex-api/"+observationPath
 			if webSocketRequest && tracked.hijacked {
 				// Gateway skips its upgrade envelope and invokes this only for
 				// real inner HTTP turns. Preserve each turn's time and duration.
@@ -773,19 +808,36 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	inner := r.Clone(r.Context())
 	u := *r.URL
 	u.Path = "/gateway/codex/" + path
+	u.RawQuery, u.RawPath = "", ""
 	if messages {
 		u.Path = "/gateway/claude/" + path
 	}
 	inner.URL = &u
+	inner.RequestURI = u.RequestURI()
 	inner.Body = io.NopCloser(bytes.NewReader(body))
 	inner.ContentLength = int64(len(body))
 	inner.Header = r.Header.Clone()
 	inner.Header.Set("Authorization", "Bearer "+key)
+	if native != nil {
+		inner.Header.Set("Content-Type", "application/json")
+	}
+	inner.Header.Del("x-api-key")
+	inner.Header.Del("x-goog-api-key")
 	// The outer service already authenticated the real socket and optional LAN
 	// listener epoch. The internal gateway remains loopback-only for every other
 	// caller and receives no generic remote bypass.
 	inner.RemoteAddr = "127.0.0.1:0"
-	h.ServeHTTP(tracked, inner)
+	if native != nil {
+		adapter := newNativeResponseWriter(tracked, native)
+		h.ServeHTTP(adapter, inner)
+		adapter.Finish()
+		if adapter.failed {
+			ledgerObservation.State = "failed"
+			ledgerObservation.UsageFinal = false
+		}
+	} else {
+		h.ServeHTTP(tracked, inner)
+	}
 }
 
 // Preserve streaming; the gateway checks this interface before flushing SSE.

@@ -39,6 +39,9 @@
 .api-management-modal .api-service-plan-list{max-height:none;overflow:visible}
 .api-management-modal .api-service-launch-buttons,.api-management-modal .api-service-toolbar{display:flex;flex-wrap:wrap;gap:8px}
 .api-first-setup:empty{display:none}
+.api-connect-example{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;font-size:12px;line-height:1.7;padding:14px;border-radius:10px;background:var(--bg-soft,var(--bg));max-width:100%}
+.api-connect-wrap{overflow-wrap:anywhere;white-space:normal}
+@media(max-width:600px){.api-management-modal .api-upstream-row>div:first-child{width:100%;text-align:left}}
 .api-first-setup{padding:16px;border:1px solid var(--border);border-radius:12px;margin-bottom:16px}
 .api-first-setup>.btn{margin-top:10px}
 .api-management-modal .api-pool-options{padding:12px 0;border-bottom:1px solid var(--border)}

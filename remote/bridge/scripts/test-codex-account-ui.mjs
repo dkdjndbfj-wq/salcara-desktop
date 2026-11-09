@@ -743,9 +743,9 @@ test('closing API panel while client is created does not reopen it or expose key
     if (path === '/api/local/accounts') return { accounts: [{ id: 'fixture-account' }] };
     statusCalls++; throw new Error('closed panel should not request rendering');
   });
-  h.run("apiClientPanel={epoch:OFFICIAL_PANEL.epoch,element:$('#officialPanel'),mode:'service',firstClient:true,clients:[],accounts:[{id:'fixture-account'}]}");
-  h.node('#apiClientName').value = 'fixture'; h.node('#apiClientAccount').value = 'fixture-account';
-  const saving = h.context.ACTIONS.codexAPICreate({ dataset: {} });
+  h.run("apiClientPanel={epoch:OFFICIAL_PANEL.epoch,element:$('#officialPanel'),mode:'editor',clientId:'',clients:[],accounts:[{id:'fixture-account'}]}");
+  h.node('#apiClientName').value = 'fixture'; h.node('#apiClientAccount').value = 'fixture-account'; h.node('#apiClientConcurrency').value = '16';
+  const saving = h.context.ACTIONS.codexAPISave({ dataset: {} });
   for (let i=0;i<12;i++) await Promise.resolve();
   h.run('disposeOfficialPanel()');
   created.resolve({ id: 'fixture-client', key: 'synthetic-new-client-key' }); await saving;

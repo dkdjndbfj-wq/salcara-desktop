@@ -25,6 +25,7 @@
     if (!current(owner) || !$('#apiCardMembers')) return;
     const rows = owner.clients.map(client => {
       const primary = client.accountId === owner.id;
+      if (!membership(client, owner.id, 'text').member && !membership(client, owner.id, 'image').member) return `<div class="restore-row"><div class="li-main"><div class="li-title">${esc(client.name || client.id)}</div><div class="muted small">${client.disabled ? '此接入配置已停用' : '使用此接入配置的密钥和模型权限'}</div></div><button class="btn" data-act="apiCardJoin" data-id="${esc(client.id)}">加入此配置</button></div>`;
       const controls = primary ? `<button class="btn sm" data-act="apiCardMemberEdit" data-id="${esc(client.id)}">更换主账号</button>` : ['text', 'image'].map(mode => {
         const state = membership(client, owner.id, mode), label = mode === 'text' ? '文字' : '图片';
         return `<button class="btn sm${state.member && !state.editor ? ' ghost danger-text' : ''}" data-act="${state.editor ? 'apiCardMemberEdit' : 'apiCardMemberToggle'}" data-id="${esc(client.id)}" data-mode="${mode}" data-enabled="${!state.member}">${state.editor ? label + '设置' : (state.member ? '移出' : '加入') + label}</button>`;
@@ -32,7 +33,7 @@
       const note = primary ? '主账号 · 移出前需选择替代账号' : ['text', 'image'].filter(mode => membership(client, owner.id, mode).member).map(mode => mode === 'text' ? '文字' : '图片').join('、') || '尚未加入';
       return `<div class="restore-row"><div class="li-main"><div class="li-title">${esc(client.name || client.id)}${client.disabled ? ' <span class="chip">已停用</span>' : ''}</div><div class="muted small">${esc(note)}</div></div><div class="restore-actions">${controls}</div></div>`;
     }).join('');
-    $('#apiCardMembers').innerHTML = `<div class="li-title">${esc(owner.name)}</div>${rows || '<p class="muted small">尚未配置客户端。</p><button class="btn" data-act="apiCardMemberEdit" data-id="">配置客户端</button>'}<div class="muted small">文字和图片单独设置；更换主账号或最后一个成员请进入设置。</div>`;
+    $('#apiCardMembers').innerHTML = `<div class="li-title">${esc(owner.name)}</div>${rows || '<p class="muted small">将用此 API 创建本机服务，无需再次选择。</p><button class="btn" data-act="apiCardJoin" data-id="">加入服务</button>'}<div class="muted small">已加入的 API 才参与服务；独立密钥和模型规则可在高级设置中管理。</div>`;
   }
   async function read(owner) {
     const [status, local] = await Promise.all([api('/api/local/codex-api'), api('/api/local/accounts')]);
@@ -47,11 +48,14 @@
     const account = accountFrom(S.local || {}, button.dataset.id);
     if (!account || !source(account)) throw new Error('请刷新账号列表后重试');
     officialPanel('API 服务', '<div id="apiCardMembers" class="stack"><p class="muted small">正在读取…</p></div>');
-    const owner = panel = { id: account.id, source: source(account), name: account.name || '', epoch: OFFICIAL_PANEL.epoch, route: S.route, element: $('#officialPanel'), clients: [], loaded: false, pending: false, attempted: false };
+    const owner = panel = { id: account.id, source: source(account), name: account.name || '', joining: !(account.apiService?.clients?.length), epoch: OFFICIAL_PANEL.epoch, route: S.route, element: $('#officialPanel'), clients: [], loaded: false, pending: false, attempted: false };
     try {
       const result = await read(owner);
       if (!result) return;
-      owner.clients = result.clients; owner.loaded = true; render(owner);
+      owner.clients = result.clients; owner.loaded = true;
+      const joined = owner.clients.some(client => membership(client, owner.id, 'text').member || membership(client, owner.id, 'image').member);
+      if (owner.joining && !joined && owner.clients.length <= 1) { await join(owner, owner.clients[0]?.id || '', button); return; }
+      render(owner);
     } catch (error) { showError(owner, error.message || '成员读取失败，请重新打开'); }
   };
   ACTIONS.apiCardMemberEdit = async button => {
@@ -61,8 +65,29 @@
     owner.pending = true;
     // The existing editor preserves all model, pool and image settings and
     // requires an explicit save. Opening it never creates/enables a client.
-    await openCodexAPIClient(id);
+    await openCodexAPIClient(id, owner.id);
   };
+  async function join(owner, clientId, button) {
+    if (!current(owner) || !owner.loaded || owner.pending || owner.attempted) return;
+    const client = owner.clients.find(row => row.id === clientId);
+    if (clientId ? !client : owner.clients.length) return;
+    owner.pending = true;
+    const token = officialMutationToken();
+    try {
+      const fresh = await read(owner); if (!fresh) return;
+      if (client ? clientSignature(fresh.clients.find(row => row.id === clientId)) !== clientSignature(client) : fresh.clients.length) throw new Error('服务配置已变化，请重新打开');
+      owner.attempted = true;
+      const result = await busy(button, () => api('/api/local/codex-api/join', { accountId: owner.id, clientId, expectedSourceRevision: owner.source, ...(client ? { expectedClientRevision: client.revision } : {}) }));
+      if (!current(owner)) return;
+      if (result?.ok !== true || result.accountId !== owner.id || !result.clientId || clientId && result.clientId !== clientId) throw new Error('加入结果待确认，请重新打开查看');
+      await refreshOfficialCards(token);
+      if (!current(owner) || !officialMutationCurrent(token)) return;
+      await openCodexAPI('upstreams');
+      toast(client?.disabled ? '已加入，该接入配置仍处于停用状态' : client?.poolStrategy === 'single_account' ? '已加入，当前仍按固定成员策略调用' : '已加入 API 服务', 'ok');
+    } catch(error) { showError(owner, error.message || '加入失败，请重新打开查看'); }
+    finally { owner.pending = false; }
+  }
+  ACTIONS.apiCardJoin = button => join(panel, button.dataset.id || '', button);
   ACTIONS.apiCardMemberToggle = async button => {
     const owner = panel, client = owner?.clients.find(row => row.id === button.dataset.id), mode = button.dataset.mode;
     if (!current(owner) || !owner.loaded || owner.pending || owner.attempted || !client || button?.isConnected === false || !['text', 'image'].includes(mode)) return;

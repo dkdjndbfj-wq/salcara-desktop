@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import vm from 'node:vm';
 
-const sources = await Promise.all(['codex-accounts.js', 'codex-api-images.js', 'codex-api-network.js', 'codex-api-readiness.js', 'codex-api-observation.js'].map((name) => readFile(new URL('../internal/console/web/' + name, import.meta.url), 'utf8')));
+const sources = await Promise.all(['codex-accounts.js', 'codex-api-images.js', 'codex-api-network.js', 'codex-api-readiness.js', 'codex-api-observation.js', 'codex-api-connect.js'].map((name) => readFile(new URL('../internal/console/web/' + name, import.meta.url), 'utf8')));
 const shellSource = await readFile(new URL('../internal/console/web/shell.js', import.meta.url), 'utf8');
 function deferred() {
   let resolve, reject;
@@ -203,7 +203,7 @@ function installNavigation(h) {
   const rendered = [], closes = [];
   h.$('#modalRoot').insertAdjacentHTML('beforebegin', '<div id="view"></div><div id="headActions"></div><div id="pageIco"></div><div id="pageTitle"></div><div id="pageSub"></div>');
   Object.assign(h.context, {
-    route() {}, location: { hash: '#accounts', pathname: '/', search: '' },
+    route() {}, homeCancelLoad() {}, location: { hash: '#accounts', pathname: '/', search: '' },
     history: { replaceState(_state, _title, url) { h.context.location.hash = url.includes('#') ? '#' + url.split('#')[1] : ''; } },
     $$: () => [], ROUTE_ICON: {}, PAGES: { accounts: {}, settings: {}, usage: {} },
     RENDER: Object.fromEntries(['accounts', 'settings', 'usage'].map(name => [name, async () => rendered.push(name)])),
@@ -381,11 +381,11 @@ test('automatic observation preserves open client actions and focused controls w
   let reads = 0;
   const h = harness(fixture([client], path => path === '/api/local/codex-api' ? { enabled: true, running: true, clients: [client], statistics: [{ clientId: client.id, inflight: ++reads }] } : undefined));
   await open(h);
-  const button = h.$('[data-act="codexAPIRequests"]'), more = button.closest('details');
+  const button = h.$('#apiServiceClients').querySelector('[data-act="codexAPIRequests"]'), more = button.closest('details');
   more.setAttribute('open', ''); button.focus();
   const runtime = h.$('#apiServiceRuntime');
   await h.tick();
-  assert.ok(reads >= 2); assert.equal(h.$('[data-act="codexAPIRequests"]'), button);
+  assert.ok(reads >= 2); assert.equal(h.$('#apiServiceClients').querySelector('[data-act="codexAPIRequests"]'), button);
   assert.equal(button.isConnected, true); assert.equal(h.context.document.activeElement, button);
   assert.equal(more.hasAttribute('open'), true); assert.equal(h.$('#apiServiceRuntime'), runtime);
   assert.match(h.$('#apiServiceClients').textContent, /2 在途/);
@@ -475,26 +475,17 @@ test('opening and enabling never create a key; settings have a separate tab and 
   const h = harness(fixture()); await open(h);
   assert.equal(h.$('#apiClientName'), null);
   assert.equal(h.$('#apiClientModelPrefix'), null);
-  assert.equal(h.$('#apiClientAccount').value, '');
+  assert.equal(h.$('#apiClientAccount'), null);
   const advanced = h.$('#apiServiceAdvanced');
   assert.equal(advanced.closest('#apiService-settings').hidden, true);
   for (const selector of ['#apiNetworkSettings', '#apiImageSettings']) assert.ok(advanced.querySelector(selector), selector);
   assert.ok(h.$('[data-act="codexAPIReadiness"]'));
-  assert.equal(h.$('#apiClientAccount').children.length, 3, 'only callable accounts plus the placeholder');
+  assert.equal(h.$('#apiClientAccount'), null, 'joining is owned by the account card');
   await h.action('codexAPIEnabled'); await settle();
   assert.equal(clientWrites(h).length, 0);
   assert.equal(h.$('#apiServiceRuntime .account-state').textContent, '运行中');
 });
 
-test('first setup requires an explicit account and never exposes a manual key', async () => {
-  const h = harness(fixture()); await open(h);
-  await assert.rejects(h.action('codexAPICreate'), /请选择/); assert.equal(clientWrites(h).length, 0);
-  h.$('#apiClientAccount').value = 'api-two';
-  await h.action('codexAPICreate'); await settle();
-  assert.deepEqual(plain(clientWrites(h)[0].payload), { name: '本机客户端', accountId: 'api-two', onlyIfEmpty: true, suppressKey: true });
-  assert.equal(h.$('#apiCreatedKey'), null);
-  assert.doesNotMatch(h.$('#modalRoot').innerHTML, /synthetic-once-only-key/);
-});
 
 test('existing clients are shown once with their pools and direct management without exposing keys', async () => {
   const h = harness(fixture([client])); await open(h);
@@ -510,7 +501,7 @@ test('existing clients are shown once with their pools and direct management wit
   assert.match(h.$('#apiServiceContent').innerHTML, /图片池 · 1 个/);
   assert.equal(h.$('#apiCreatedKey'), null);
   assert.equal(clientWrites(h).length, 0);
-  await assert.rejects(h.context.ACTIONS.codexAPICreate({ dataset: {} }), /已有密钥/);
+  assert.equal(h.context.ACTIONS.codexAPICreate, undefined);
 });
 
 test('collapsed editor preserves every configured policy without opening advanced', async () => {
@@ -546,38 +537,17 @@ test('collapsed save preserves explicit pool order independently of vault orderi
   assert.equal(body.poolStrategy, 'custom');
 });
 
-test('empty account catalog disables creation and rejects fabricated selection', async () => {
-  const h = harness(fixture([], (path) => path === '/api/local/accounts' ? { accounts: [] } : undefined)); await open(h);
-  assert.equal(h.$('[data-act="codexAPICreate"]').disabled, true);
-  h.$('#apiClientAccount').value = 'not-real';
-  await assert.rejects(h.action('codexAPICreate'), /请选择/);
+test('empty service points to API cards without a second upstream selector', async () => {
+  const h = harness(fixture()); await open(h);
+  assert.equal(h.$('#apiClientAccount'), null);
+  assert.equal(h.$('[data-act="codexAPICreate"]'), null);
+  assert.equal(h.$('[data-act="codexAPINew"]').disabled, true);
+  assert.match(h.$('#apiServiceUpstreams').textContent, /还没有加入 API/);
+  assert.ok(h.$('[data-act="apiServiceChoose"]'));
   assert.equal(clientWrites(h).length, 0);
 });
 
-test('default creation rechecks deleted accounts and newly existing clients before POST', async () => {
-  for (const scenario of ['deleted', 'existing']) {
-    let accountsRead = 0, statusRead = 0;
-    const h = harness(fixture([], (path) => {
-      if (path === '/api/local/accounts' && ++accountsRead > 1 && scenario === 'deleted') return { accounts: [] };
-      if (path === '/api/local/codex-api' && ++statusRead > 1 && scenario === 'existing') return { clients: [client] };
-    }));
-    await open(h); h.$('#apiClientAccount').value = 'api-one';
-    await assert.rejects(h.action('codexAPICreate'), /不可用|已有密钥/);
-    assert.equal(clientWrites(h).length, 0);
-  }
-});
 
-test('duplicate creation and other writes share one gate while POST is pending', async () => {
-  const pending = deferred();
-  const h = harness(fixture([], (path, payload) => path.endsWith('/clients') && payload ? pending.promise : undefined));
-  await open(h); h.$('#apiClientAccount').value = 'api-one';
-  const creating = h.action('codexAPICreate'); await settle();
-  await h.action('codexAPICreate');
-  await h.context.ACTIONS.codexAPIRotate({ dataset: { id: 'client-one' } });
-  assert.equal(clientWrites(h).length, 1);
-  pending.resolve({ ok: true, id: 'synthetic-created' }); await creating;
-  assert.equal(h.$('#apiCreatedKey'), null);
-});
 
 test('atomic rotate posts only id and does not save an unexpanded or changed editor', async () => {
   const h = harness(fixture([client])); await edit(h);
@@ -594,10 +564,10 @@ test('declining rotation performs no request and leaves the panel editable', asy
   h.context.confirm = () => true; await h.action('codexAPIRotate'); assert.equal(clientWrites(h).length, 1);
 });
 
-test('unknown create or rotate result cannot be blindly repeated in the same panel', async () => {
-  for (const rotating of [false, true]) {
+test('unknown rotation result cannot be blindly repeated in the same panel', async () => {
+  for (const rotating of [true]) {
     const h = harness(fixture(rotating ? [client] : [], (path, payload) => path.startsWith('/api/local/codex-api/clients') && payload ? Promise.reject(new Error('response lost')) : undefined));
-    await open(h); if (!rotating) h.$('#apiClientAccount').value = 'api-one';
+    await open(h);
     const action = rotating ? 'codexAPIRotate' : 'codexAPICreate';
     await assert.rejects(h.action(action), /response lost/);
     await assert.rejects(h.action(action), /结果待确认/);
@@ -616,14 +586,6 @@ test('late rotate key after closure or modal replacement is never exposed or reo
   }
 });
 
-test('closing during default preflight prevents creation and late reads do not repaint replacement', async () => {
-  const wait = deferred(); let reads = 0;
-  const h = harness(fixture([], (path) => path === '/api/local/codex-api' && ++reads > 1 ? wait.promise : undefined));
-  await open(h); h.$('#apiClientAccount').value = 'api-one'; const creating = h.action('codexAPICreate'); await settle();
-  await h.close(); h.run("officialPanel('替换窗口', '<p>不改变</p>')");
-  wait.resolve({ clients: [] }); await creating; await settle();
-  assert.equal(clientWrites(h).length, 0); assert.equal(h.$('#apiCreatedKey'), null);
-});
 
 test('explicit advanced additional key creation preserves policies and omits first-only restriction', async () => {
   const h = harness(fixture([client])); await open(h);

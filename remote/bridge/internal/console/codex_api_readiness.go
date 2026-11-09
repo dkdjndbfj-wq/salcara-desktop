@@ -141,8 +141,9 @@ func readinessCredentialState(a codexaccounts.ExecutionAvailability) string {
 	return "ready"
 }
 func (s *Server) readAPIReadiness(c config.Config) apiReadiness {
-	out := apiReadiness{CheckedAt: time.Now().UnixMilli(), Configured: c.CodexAPI.Enabled, Serving: c.CodexAPIActive() && s.apiService != nil, RequiresStart: c.CodexAPI.Enabled && !c.CodexAPIActive(), HandlerAvailable: s.apiService != nil, ProviderEntitlement: "not_checked", Routes: []string{"GET /v1/models", "GET /backend-api/codex/models"}, Clients: []apiReadinessClient{}}
+	out := apiReadiness{CheckedAt: time.Now().UnixMilli(), Configured: c.CodexAPI.Enabled, Serving: c.CodexAPIActive() && s.apiService != nil, RequiresStart: c.CodexAPI.Enabled && !c.CodexAPIActive(), HandlerAvailable: s.apiService != nil, ProviderEntitlement: "not_checked", Routes: []string{"GET /v1/models", "GET /backend-api/codex/models", "GET /v1beta/models", "GET /api/tags"}, Clients: []apiReadinessClient{}}
 	if c.CodexAPI.ImagesMode != "images_only" {
+		out.Routes = append(out.Routes, "POST /v1/messages", "POST /v1/messages/count_tokens", "POST /v1beta/models/{model}:generateContent", "POST /v1beta/models/{model}:streamGenerateContent", "POST /api/chat", "POST /api/generate")
 		out.Routes = append(out.Routes, "POST /v1/responses", "GET /v1/responses (WebSocket compatibility)", "POST /v1/responses/compact", "POST /v1/chat/completions")
 		out.Routes = append(out.Routes, "POST /backend-api/codex/responses", "GET /backend-api/codex/responses (WebSocket compatibility)", "POST /backend-api/codex/responses/compact")
 	}

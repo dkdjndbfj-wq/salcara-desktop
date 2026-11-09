@@ -23,7 +23,7 @@ let apiClientWritePending = false;
 let apiClientPanel = null;
 let apiServiceLaunchPanel = null;
 const API_SERVICE_TOOLS = { 'codex-desktop': 'Codex', codex: 'Codex CLI' };
-const API_CLIENT_WRITE_ACTIONS = new Set(['codexAPICreate', 'codexAPISave', 'codexAPIRotate', 'codexAPIRevoke', 'codexAPIClientEnabled', 'codexAPIEdit', 'codexAPINew', 'codexAPIServiceOpen', 'codexAPIServiceLaunch']);
+const API_CLIENT_WRITE_ACTIONS = new Set(['codexAPISave', 'codexAPIRotate', 'codexAPIRevoke', 'codexAPIClientEnabled', 'codexAPIEdit', 'codexAPINew', 'codexAPIServiceOpen', 'codexAPIServiceLaunch']);
 const apiClientWriteControls = new WeakMap();
 function syncAPIClientWriteControls() {
   for (const button of $('#modalRoot')?.querySelectorAll?.('[data-act]') || []) {
@@ -81,8 +81,8 @@ function apiServiceClientRows(status, accounts = []) {
     const stats = (status.statistics || []).find(item => item.clientId === row.id);
     const observed = stats ? `${stats.inflight || 0} 在途 · ${stats.requests || 0} 次请求${stats.lastStatus ? ` · 最近 HTTP ${stats.lastStatus}` : ''}${Number.isFinite(stats.lastDurationMs) ? ` · ${stats.lastDurationMs} ms` : ''}` : '暂无本次进程请求';
     const action = (act, label, extra = '', danger = false) => `<button class="btn sm${danger ? ' danger-text' : ''}" data-act="${act}" data-id="${esc(row.id)}" ${extra}>${esc(label)}</button>`;
-    return `<article class="api-client-row" data-client-id="${esc(row.id)}" data-observation-key="${esc(row.id)}"><div class="api-client-info"><div class="api-client-title"><b>${esc(row.name)}</b><span class="account-state ${row.disabled ? 'muted' : 'ok'}">${row.disabled ? '已停用' : '已启用'}</span>${row.modelPrefix ? `<code>${esc(row.modelPrefix)}</code>` : ''}</div><div class="api-client-sources"><span>${esc(text)}</span><span>${esc(images)}</span></div><small>${esc(observed)}</small></div><div class="api-client-actions">${action('codexAPIEdit', '编辑配置')}${action('codexAPIClientEnabled', row.disabled ? '启用' : '停用', `data-enabled="${row.disabled === true}"`)}<details class="api-client-more"><summary>更多</summary><div>${action('codexAPIRequests', '最近请求')}${action('codexAPIRotate', '重置密钥')}${action('codexAPIRevoke', '撤销客户端', '', true)}</div></details></div></article>`;
-  }).join('') || '<p class="muted small">尚未配置客户端，请选择账号加入服务。</p>';
+    return `<article class="api-client-row" data-client-id="${esc(row.id)}" data-observation-key="${esc(row.id)}"><div class="api-client-info"><div class="api-client-title"><b>${esc(row.name)}</b><span class="account-state ${row.disabled ? 'muted' : 'ok'}">${row.disabled ? '已停用' : '已启用'}</span>${row.modelPrefix ? `<code>${esc(row.modelPrefix)}</code>` : ''}</div><div class="api-client-sources"><span>${esc(text)}</span><span>${esc(images)}</span></div><small>${esc(observed)}</small></div><div class="api-client-actions">${action('codexAPIEdit', '编辑配置')}${action('codexAPIClientEnabled', row.disabled ? '启用' : '停用', `data-enabled="${row.disabled === true}"`)}<details class="api-client-more"><summary>更多</summary><div>${action('codexAPIRequests', '此配置的请求')}${action('codexAPIRotate', '重置密钥')}${action('codexAPIRevoke', '撤销客户端', '', true)}</div></details></div></article>`;
+  }).join('') || '<p class="muted small">先在 API 卡片上点击「加入 API 服务」。</p>';
 }
 function apiServiceRuntimeHTML(status) {
   const state = codexAPIState(status);
@@ -254,9 +254,9 @@ function codexAPIOverviewHTML() {
   const clients = (status.clients || []).filter(row => !row.disabled).length;
   const summary = apiServiceSummary(status);
   const active = status.enabled === true && status.running === true && !CODEX_API_OVERVIEW.error && !CODEX_API_OVERVIEW.pending;
-  const next = CODEX_API_OVERVIEW.error ? '未能更新本机状态，请刷新后再操作。' : !clients ? '先配置客户端，选择它可以使用的上游。' : status.requiresStart ? '配置已保留，启动本次服务后即可接入。' : !status.running ? '配置已就绪，启动后供客户端调用。' : '服务已启动，可在管理中接入工具或复制地址。';
+  const next = CODEX_API_OVERVIEW.error ? '未能更新本机状态，请刷新后再操作。' : !clients ? '在需要使用的 API 卡片上点击「加入 API 服务」。' : status.requiresStart ? '配置已保留，启动本次服务后即可接入。' : !status.running ? '配置已就绪，启动后供客户端调用。' : '服务已启动，可在管理中接入工具或复制地址。';
   const upstream = summary ? `${summary.total} 个上游 · ${summary.ready} 个已验证${summary.unknown ? ` · ${summary.unknown} 个未检查` : ''}${summary.unavailable ? ` · ${summary.unavailable} 个暂不可用` : ''}` : '上游状态未检查';
-  return `<article class="wb-card account-card api-service-card${active ? ' account-is-active' : ''}" id="localAPIService">${title}<span class="account-state ${CODEX_API_OVERVIEW.error ? 'warn' : status.running ? 'ok' : 'muted'}">${CODEX_API_OVERVIEW.error ? '状态待刷新' : state.label}</span></div><p class="api-service-next">${next}</p><code class="api-service-address">${esc(status.baseUrl || '本机接口地址待检查')}</code><div class="api-service-usage"><span>${clients} 个启用客户端</span><span>${CODEX_API_OVERVIEW.error ? '请求状态待刷新' : `${stats.inflight} 个在途 · ${stats.requests} 次请求`}</span></div><p class="muted small api-service-note">${esc(upstream)}</p><div class="api-service-actions">${!clients && !status.running && !status.requiresStart ? '<button class="btn primary" data-act="codexAPI" data-view="clients">配置客户端</button>' : `<button class="btn primary" data-act="codexAPIOverviewToggle" data-enabled="${state.nextEnabled}" ${CODEX_API_OVERVIEW.pending || CODEX_API_OVERVIEW.error ? 'disabled' : ''}>${state.action}</button><button class="btn" data-act="codexAPI">管理服务</button>`}${CODEX_API_OVERVIEW.error ? '<button class="btn" data-act="codexAPIOverviewRefresh">重试</button>' : ''}</div></article>`;
+  return `<article class="wb-card account-card api-service-card${active ? ' account-is-active' : ''}" id="localAPIService">${title}<span class="account-state ${CODEX_API_OVERVIEW.error ? 'warn' : status.running ? 'ok' : 'muted'}">${CODEX_API_OVERVIEW.error ? '状态待刷新' : state.label}</span></div><p class="api-service-next">${next}</p><code class="api-service-address">${esc(status.baseUrl || '本机接口地址待检查')}</code><div class="api-service-usage"><span>${clients} 个启用客户端</span><span>${CODEX_API_OVERVIEW.error ? '请求状态待刷新' : `${stats.inflight} 个在途 · ${stats.requests} 次请求`}</span></div><p class="muted small api-service-note">${esc(upstream)}</p><div class="api-service-actions">${!clients && !status.running && !status.requiresStart ? '<button class="btn primary" data-act="codexAPI" data-view="upstreams">管理服务</button>' : `<button class="btn primary" data-act="codexAPIOverviewToggle" data-enabled="${state.nextEnabled}" ${CODEX_API_OVERVIEW.pending || CODEX_API_OVERVIEW.error ? 'disabled' : ''}>${state.action}</button><button class="btn" data-act="codexAPI">管理服务</button>`}${CODEX_API_OVERVIEW.error ? '<button class="btn" data-act="codexAPIOverviewRefresh">重试</button>' : ''}</div></article>`;
 }
 function renderCodexAPIOverview() {
   const card = $('#localAPIService');
@@ -1377,26 +1377,6 @@ Object.assign(ACTIONS, {
     if (!input?.value || $('#apiCreatedKeyBox')?.hidden) throw new Error('密钥仅在创建或重置后可复制');
     await copyText(input.value, '客户端密钥');
   },
-  codexAPICreate: (button) => withAPIClientWrite(async () => {
-    const owner = requireAPIClientPanel('service');
-    if (!owner.firstClient) throw new Error('已有密钥，请在高级设置中管理');
-    const accountId = readAPIClientAccount(owner);
-    const row = await busy(button, async () => {
-      const [status, local] = await Promise.all([api('/api/local/codex-api'), api('/api/local/accounts')]);
-      if (!currentAPIClientPanel(owner)) return null;
-      if (status.clients.length) { owner.firstClient = false; throw new Error('已有密钥，请重新打开后管理'); }
-      if (!apiClientAccounts(local).some((account) => account.id === accountId)) throw new Error('所选账号已不可用，请重新选择');
-      owner.writeAttempted = true;
-      return api('/api/local/codex-api/clients', { name: '本机客户端', accountId, onlyIfEmpty: true, suppressKey: true });
-    });
-    if (!currentAPIClientPanel(owner) || !row) return;
-    // First setup uses managed launch credentials. Manual one-time keys remain
-    // available only through the explicit advanced create/rotate actions.
-    if (row.ok === false || !row.id) throw new Error('加入结果待确认，请重新打开本地服务');
-    owner.writeAttempted = false;
-    await loadCodexAPIOverview();
-    if (currentAPIClientPanel(owner) && !CODEX_API_OVERVIEW.error) updateAPIServiceReadOnly(CODEX_API_OVERVIEW.status, owner);
-  }),
   codexAPIRevoke: (button) => withAPIClientWrite(async () => { const owner = requireAPIClientPanel('service', button.dataset.id); if (!await confirm('撤销此客户端？它的密钥将失效，上游 API 会保留。')) return; if (!currentAPIClientPanel(owner)) return; await busy(button, () => api('/api/local/codex-api/clients/revoke', { id: button.dataset.id })); await loadCodexAPIOverview(); if (currentAPIClientPanel(owner) && !CODEX_API_OVERVIEW.error) updateAPIServiceReadOnly(CODEX_API_OVERVIEW.status, owner); }),
   codexAPIEdit: (button) => apiManagementLeave(() => openCodexAPIClient(button.dataset.id)),
   codexAPINew: () => apiManagementLeave(() => openCodexAPIClient('')),
@@ -1545,14 +1525,15 @@ function selectAPIServiceView(view, focus = false) {
 }
 function apiServiceUpstreamsHTML(status, accounts) {
   const members = new Map((status.summary?.members || []).map(row => [row.id, row]));
-  return accounts.map(account => {
+  const joined = account => (status.clients || []).filter(row => ['accountIds','imageAccountIds'].some(field => (row[field]?.length ? row[field] : [row.accountId]).includes(account.id)));
+  return accounts.filter(account => joined(account).length).map(account => {
     const member = members.get(account.id);
     const known = member && !CODEX_API_OVERVIEW.error && member.availability === 'ready' && member.sourceType === 'official_account' && apiServiceUsageFresh(member.usage, Date.now());
     const unavailable = member?.availability === 'unavailable';
     const label = unavailable ? '暂不可用' : known ? '已验证' : '未检查';
-    const clients = (status.clients || []).filter(row => row.accountId === account.id || row.accountIds?.includes(account.id) || row.imageAccountIds?.includes(account.id));
-    return `<article class="api-upstream-row" data-observation-key="${esc(account.id)}"><div><div class="api-client-title"><b>${esc(account.name || '未命名上游')}</b><span class="account-state ${unavailable ? 'warn' : known ? 'ok' : 'muted'}">${label}</span></div><p class="muted small">${esc(account.officialAccount ? 'Codex 官方账号' : account.baseUrl || '上游地址未配置')}</p><small>${clients.length ? esc(clients.map(row => row.name + (row.disabled ? '（停用）' : '')).join('、')) : '尚未连接客户端'}</small></div><div class="api-upstream-actions">${account.officialAccount ? '' : `<button class="btn sm" data-act="apiUpstreamEdit" data-id="${esc(account.id)}">编辑</button>`}<button class="btn sm" data-act="apiUpstreamUse" data-id="${esc(account.id)}">用于新客户端</button></div></article>`;
-  }).join('') || '<div class="api-service-empty"><b>先添加一个上游</b><p>保存 API 地址和密钥，再创建客户端连接它。</p></div>';
+    const clients = joined(account);
+    return `<article class="api-upstream-row" data-observation-key="${esc(account.id)}"><div><div class="api-client-title"><b>${esc(account.name || '未命名 API')}</b><span class="account-state ${unavailable ? 'warn' : known ? 'ok' : 'muted'}">${label}</span></div><p class="muted small">${esc(account.officialAccount ? 'Codex 官方账号' : account.baseUrl || 'API 地址未配置')}</p><small>${esc(clients.map(row => row.name + (row.disabled ? '（停用）' : '')).join('、'))}</small></div><div class="api-upstream-actions">${account.officialAccount ? '' : `<button class="btn sm" data-act="apiUpstreamEdit" data-id="${esc(account.id)}">编辑 API</button>`}<button class="btn sm" data-act="apiCardMembership" data-id="${esc(account.id)}">管理加入范围</button></div></article>`;
+  }).join('') || '<div class="api-service-empty"><b>还没有加入 API</b><p>回到 API 卡片点击「加入 API 服务」，这里会自动显示已加入的成员。</p></div>';
 }
 async function openAPIUpstream(id = '') {
   return apiManagementLeave(async () => {
@@ -1563,6 +1544,7 @@ async function openAPIUpstream(id = '') {
   });
 }
 Object.assign(ACTIONS, {
+  apiServiceChoose: () => apiManagementLeave(() => { closeOfficialPanel(); if (S.route !== 'accounts') location.hash = '#accounts'; else $('#localAccountList')?.scrollIntoView?.({ block: 'start', behavior: 'smooth' }); }),
   apiServiceTab: button => selectAPIServiceView(button.dataset.view),
   apiUpstreamNew: () => openAPIUpstream(),
   apiUpstreamEdit: button => openAPIUpstream(button.dataset.id),
@@ -1627,13 +1609,11 @@ async function openCodexAPI(view = apiServiceView) {
   CODEX_API_OVERVIEW.status = status; CODEX_API_OVERVIEW.error = false;
   const accounts = apiClientAccounts(local), clients = status.clients || [];
   apiClientPanel = { epoch, element: $('#officialPanel'), mode: 'service', clients, accounts, firstClient: !clients.length, writeAttempted: false };
-  const accountOptions = accounts.map((row) => `<option value="${esc(row.id)}">${esc(row.name)}</option>`).join('');
-  const setup = clients.length ? '' : `<div class="field"><label for="apiClientAccount">API / 账号</label><select id="apiClientAccount" class="input"><option value="" selected disabled>${accounts.length ? '选择 API / 账号' : '请先添加 API 或关联账号'}</option>${accountOptions}</select></div><button class="btn primary" data-act="codexAPICreate" ${accounts.length ? '' : 'disabled'}>加入服务</button>`;
   $('#apiServiceContent').innerHTML = `<div class="api-management-summary"><div id="apiServiceRuntime">${apiServiceRuntimeHTML(status)}</div><div class="api-endpoint"><span class="muted small">本机接口</span><code>${esc(status.baseUrl)}</code><button class="btn sm" data-act="copyVal" data-v="${esc(status.baseUrl)}" data-w="接口地址">复制地址</button></div></div>
-    <div class="api-management-tabs" role="tablist" aria-label="本地 API 管理">${[['upstreams','上游 API'],['clients','客户端接入'],['settings','服务设置']].map(([id,label]) => `<button id="apiServiceTab-${id}" role="tab" aria-controls="apiService-${id}" data-act="apiServiceTab" data-view="${id}">${label}</button>`).join('')}</div>
-    <section id="apiService-upstreams" role="tabpanel" aria-labelledby="apiServiceTab-upstreams"><div class="api-section-heading"><div><h4>上游 API 与账号</h4><p class="muted small">选择客户端可以使用的上游。未检查不等于不可用。</p></div><button class="btn primary" data-act="apiUpstreamNew">添加上游 API</button></div><div id="apiServiceUpstreams">${apiServiceUpstreamsHTML(status, accounts)}</div><details class="api-pool-options"><summary>已接入上游的额度与状态</summary><div id="apiServiceSummary">${apiServicePlanGroupsHTML(apiServiceSummary(status))}</div></details></section>
-    <section id="apiService-clients" role="tabpanel" aria-labelledby="apiServiceTab-clients" hidden><div class="api-section-heading"><div><h4>客户端接入</h4><p class="muted small">每个客户端有独立的上游、模型权限与密钥。</p></div><button class="btn primary" data-act="codexAPINew" ${accounts.length ? '' : 'disabled'}>添加客户端</button></div><div id="apiServiceSetup" class="api-first-setup">${setup}</div><div id="apiServiceClients" class="api-service-clients">${apiServiceClientRows(status, accounts)}</div><section class="api-management-section"><h4>在本机工具中使用</h4><p class="muted small">选择客户端并确认后打开；手动接入可创建独立客户端密钥。</p><div id="apiServiceLaunchActions">${localAPIServiceLaunchHTML(status)}</div></section><div class="api-service-toolbar"><button class="btn sm" data-act="codexAPIProfile">Codex 配置</button><button class="btn sm" data-act="codexAPIReadiness">检查就绪</button><button class="btn sm" data-act="codexAPIRequests">最近请求</button></div></section>
-    <section id="apiService-settings" role="tabpanel" aria-labelledby="apiServiceTab-settings" hidden><div class="api-section-heading"><div><h4>服务设置</h4><p class="muted small">网络和图片配置分别保存，切换分区保留输入。</p></div></div><div id="apiServiceNetworkSummary" class="muted small" role="status"></div><div id="apiServiceAdvanced" class="stack"><p class="muted small">仅影响这台电脑提供的 API 服务。</p></div></section>`;
+    <div class="api-management-tabs" role="tablist" aria-label="本地 API 管理">${[['upstreams','已加入 API'],['clients','连接工具'],['settings','高级设置']].map(([id,label]) => `<button id="apiServiceTab-${id}" role="tab" aria-controls="apiService-${id}" data-act="apiServiceTab" data-view="${id}">${label}</button>`).join('')}</div>
+    <section id="apiService-upstreams" role="tabpanel" aria-labelledby="apiServiceTab-upstreams"><div class="api-section-heading"><div><h4>已加入的 API</h4><p class="muted small">加入时已完成选择，无需再选一次。未检查表示尚未验证可用性。</p></div><button class="btn" data-act="apiServiceChoose">返回 API 卡片</button></div><div id="apiServiceUpstreams">${apiServiceUpstreamsHTML(status, accounts)}</div><details class="api-pool-options"><summary>额度与状态</summary><div id="apiServiceSummary">${apiServicePlanGroupsHTML(apiServiceSummary(status))}</div></details></section>
+    <section id="apiService-clients" role="tabpanel" aria-labelledby="apiServiceTab-clients" hidden><section class="api-management-section"><h4>在本机工具中使用</h4><p class="muted small">使用已加入的 API，自动为工具配置连接。</p><div id="apiServiceLaunchActions">${localAPIServiceLaunchHTML(status)}</div></section><div id="apiServiceConnect">${typeof apiConnectionHTML === 'function' ? apiConnectionHTML(status) : ''}</div><div class="api-service-toolbar"><button class="btn sm" data-act="codexAPIReadiness">检查就绪</button><button class="btn sm" data-act="codexAPIRequests">全部请求记录</button></div></section>
+    <section id="apiService-settings" role="tabpanel" aria-labelledby="apiServiceTab-settings" hidden><details class="api-pool-options"><summary>独立密钥、权限与调度</summary><p class="muted small">本机工具使用默认服务即可；需要不同模型权限或独立密钥时再添加接入配置。</p><div id="apiServiceClients" class="api-service-clients">${apiServiceClientRows(status, accounts)}</div><button class="btn sm" data-act="codexAPINew" ${clients.length ? '' : 'disabled'}>添加独立接入配置</button></details><details class="api-pool-options"><summary>仅写入 Codex 配置，不打开工具</summary><button class="btn sm" data-act="codexAPIProfile">管理 Codex 配置文件</button></details><div class="api-section-heading"><div><h4>网络与图片</h4><p class="muted small">分别保存，切换分区保留输入。</p></div></div><div id="apiServiceNetworkSummary" class="muted small" role="status"></div><div id="apiServiceAdvanced" class="stack"><p class="muted small">仅影响这台电脑提供的 API 服务。</p></div></section>`;
   selectAPIServiceView(view);
   syncAPIClientWriteControls();
   if (typeof scheduleAPIServiceObservation === 'function') scheduleAPIServiceObservation();
@@ -1656,7 +1636,7 @@ async function openCodexAPIClient(id, accountId = '') {
   apiClientPanel = { epoch, element: $('#officialPanel'), mode: 'editor', clients: status.clients, clientId: id, accounts, writeAttempted: false };
   const prefixFields = `<div class="field"><label for="apiClientModelPrefix">模型命名空间（可选，例如 team/）</label><input id="apiClientModelPrefix" class="input" maxlength="64" value="${esc(row.modelPrefix || '')}" placeholder="team/"><div class="muted small">别名不含此前缀；权限始终按解析后的实际上游模型检查。</div></div><div class="field"><label>允许模型前缀（每行一个文字前缀，与允许模型列表合并；两者留空表示不限）</label><textarea id="apiClientAllowPrefixes" class="input">${esc((row.modelAllowPrefixes || []).join('\n'))}</textarea></div><div class="field"><label>拒绝模型前缀（按实际上游模型 ID 检查，优先于所有允许规则）</label><textarea id="apiClientDenyPrefixes" class="input">${esc((row.modelDenyPrefixes || []).join('\n'))}</textarea></div>`;
   $('#apiClientEditor').innerHTML = `<p class="muted small">为一个工具或使用场景建立独立接入配置。所有选择在保存后生效。</p><section class="api-management-section"><div class="form-grid"><div class="field"><label for="apiClientName">客户端名称</label><input id="apiClientName" class="input" maxlength="80" value="${esc(row.name)}" placeholder="例如：开发工具、图片工作台"></div><div class="field"><label for="apiClientDisabled">客户端状态</label><select id="apiClientDisabled" class="input"><option value="false" ${row.disabled ? '' : 'selected'}>启用</option><option value="true" ${row.disabled ? 'selected' : ''}>停用</option></select></div></div></section>
-    <section class="api-management-section"><h4>选择上游</h4><div class="field"><label for="apiClientAccount">默认上游 API / 账号</label><select id="apiClientAccount" class="input">${accountMissing ? `<option value="" selected disabled>${id ? '原账号已移除，请重新选择' : '选择 API / 账号'}</option>` : ''}${accounts.map(a => `<option value="${esc(a.id)}" ${a.id === row.accountId ? 'selected' : ''}>${esc(a.name)}</option>`).join('')}</select><p class="help">未配置账号池时，文字和图片都使用这个上游。</p></div><div id="apiClientPools"></div></section>
+    <section class="api-management-section"><h4>成员与调度</h4><div class="field"><label for="apiClientAccount">主账号（未配置账号池时使用）</label><select id="apiClientAccount" class="input">${accountMissing ? `<option value="" selected disabled>${id ? '原账号已移除，请重新选择' : '选择 API / 账号'}</option>` : ''}${accounts.map(a => `<option value="${esc(a.id)}" ${a.id === row.accountId ? 'selected' : ''}>${esc(a.name)}</option>`).join('')}</select><p class="help">未配置账号池时，文字和图片都使用这个上游。</p></div><div id="apiClientPools"></div></section>
     <details class="api-pool-options"><summary>模型权限与并发</summary><div class="stack"><div class="field"><label for="apiClientConcurrency">并发上限</label><input id="apiClientConcurrency" class="input" type="number" min="1" max="128" value="${row.maxConcurrency || 16}"></div><div class="field"><label for="apiClientAllowlist">允许模型（每行一个，留空不限）</label><textarea id="apiClientAllowlist" class="input" rows="3">${esc((row.modelAllowlist || []).join('\n'))}</textarea></div><div class="field"><label for="apiClientDenylist">拒绝模型（优先于允许规则）</label><textarea id="apiClientDenylist" class="input" rows="3">${esc((row.modelDenylist || []).join('\n'))}</textarea></div><div class="field"><label for="apiClientAliases">模型别名（每行：别名 = 模型 ID）</label><textarea id="apiClientAliases" class="input" rows="3">${esc(Object.entries(row.modelAliases || {}).map(([alias, model]) => `${alias} = ${model}`).join('\n'))}</textarea><p class="help">权限按解析后的实际上游模型检查。</p></div></div></details>`;
   $('#apiClientAliases').closest('.field').insertAdjacentHTML('beforebegin', prefixFields);
   if (id) $('#apiClientEditor').insertAdjacentHTML('afterbegin', `<div class="row"><span class="muted small">${esc(row.name)} · 客户端配置</span><span class="spacer"></span><button class="icon-btn" data-act="codexAPIRequests" data-id="${esc(id)}" title="查看最近请求（保留编辑内容）" aria-label="查看最近请求并保留编辑内容">${icon('list')}</button></div>`);

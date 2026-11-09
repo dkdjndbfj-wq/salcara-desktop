@@ -22,6 +22,7 @@ func (s *Server) codexAPIRoutes(m *http.ServeMux) {
 	m.HandleFunc("GET /api/local/codex-api", s.handleCodexAPIStatus)
 	m.HandleFunc("POST /api/local/codex-api/enabled", s.handleCodexAPIEnabled)
 	m.HandleFunc("POST /api/local/codex-api/clients", s.handleCodexAPIClient)
+	m.HandleFunc("POST /api/local/codex-api/join", s.handleCodexAPIJoin)
 	m.HandleFunc("POST /api/local/codex-api/clients/rotate", s.handleCodexAPIClientRotate)
 	m.HandleFunc("POST /api/local/codex-api/clients/enabled", s.handleCodexAPIClientEnabled)
 	m.HandleFunc("GET /api/local/codex-api/requests", s.handleCodexAPIRequests)
