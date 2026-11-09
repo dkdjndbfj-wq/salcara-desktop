@@ -26,7 +26,7 @@ const API_SERVICE_TOOLS = { 'codex-desktop': 'Codex', codex: 'Codex CLI' };
 const API_CLIENT_WRITE_ACTIONS = new Set(['codexAPICreate', 'codexAPISave', 'codexAPIRotate', 'codexAPIRevoke', 'codexAPIClientEnabled', 'codexAPIEdit', 'codexAPINew', 'codexAPIServiceOpen', 'codexAPIServiceLaunch']);
 const apiClientWriteControls = new WeakMap();
 function syncAPIClientWriteControls() {
-  for (const button of $('#officialPanel')?.querySelectorAll?.('[data-act]') || []) {
+  for (const button of $('#modalRoot')?.querySelectorAll?.('[data-act]') || []) {
     if (!API_CLIENT_WRITE_ACTIONS.has(button.dataset.act)) continue;
     if (apiClientWritePending) {
       if (!apiClientWriteControls.has(button)) apiClientWriteControls.set(button, button.disabled);
@@ -35,6 +35,7 @@ function syncAPIClientWriteControls() {
       button.disabled = apiClientWriteControls.get(button);
       apiClientWriteControls.delete(button);
     }
+    if (!apiClientWritePending && button.dataset.act === 'codexAPISave' && apiClientPanel?.writeAttempted) button.disabled = true;
   }
 }
 async function withAPIClientWrite(operation) {
@@ -79,23 +80,24 @@ function apiServiceClientRows(status, accounts = []) {
     const images = row.imageAccountIds?.length ? `图片池 · ${row.imageAccountIds.length} 个` : `图片 · ${name(row.accountId)}`;
     const stats = (status.statistics || []).find(item => item.clientId === row.id);
     const observed = stats ? `${stats.inflight || 0} 在途 · ${stats.requests || 0} 次请求${stats.lastStatus ? ` · 最近 HTTP ${stats.lastStatus}` : ''}${Number.isFinite(stats.lastDurationMs) ? ` · ${stats.lastDurationMs} ms` : ''}` : '暂无本次进程请求';
-    const action = (act, glyph, label, extra = '', danger = false) => `<button class="icon-btn${danger ? ' danger-text' : ''}" data-act="${act}" data-id="${esc(row.id)}" ${extra} title="${esc(label)}" aria-label="${esc(label)}">${icon(glyph)}</button>`;
-    return `<article class="api-client-row" data-client-id="${esc(row.id)}"><div class="api-client-info"><div class="api-client-title"><b>${esc(row.name)}</b><span class="account-state ${row.disabled ? 'muted' : 'ok'}">${row.disabled ? '已停用' : '已启用'}</span>${row.modelPrefix ? `<code>${esc(row.modelPrefix)}</code>` : ''}</div><div class="api-client-sources"><span title="${esc((row.accountIds?.length ? row.accountIds : [row.accountId]).map(name).join('、'))}">${esc(text)}</span><span title="${esc((row.imageAccountIds?.length ? row.imageAccountIds : [row.accountId]).map(name).join('、'))}">${esc(images)}</span></div><small>${esc(observed)}</small></div><div class="api-client-actions">${action('codexAPIRequests', 'list', `查看 ${row.name} 的最近请求`)}${action('codexAPIEdit', 'edit', `编辑 ${row.name}`)}${action('codexAPIClientEnabled', 'power', `${row.disabled ? '启用' : '停用'} ${row.name}`, `data-enabled="${row.disabled === true}"`)}${action('codexAPIRotate', 'refresh', `重置 ${row.name} 的密钥`)}${action('codexAPIRevoke', 'trash', `撤销 ${row.name}`, '', true)}</div></article>`;
+    const action = (act, label, extra = '', danger = false) => `<button class="btn sm${danger ? ' danger-text' : ''}" data-act="${act}" data-id="${esc(row.id)}" ${extra}>${esc(label)}</button>`;
+    return `<article class="api-client-row" data-client-id="${esc(row.id)}" data-observation-key="${esc(row.id)}"><div class="api-client-info"><div class="api-client-title"><b>${esc(row.name)}</b><span class="account-state ${row.disabled ? 'muted' : 'ok'}">${row.disabled ? '已停用' : '已启用'}</span>${row.modelPrefix ? `<code>${esc(row.modelPrefix)}</code>` : ''}</div><div class="api-client-sources"><span>${esc(text)}</span><span>${esc(images)}</span></div><small>${esc(observed)}</small></div><div class="api-client-actions">${action('codexAPIEdit', '编辑配置')}${action('codexAPIClientEnabled', row.disabled ? '启用' : '停用', `data-enabled="${row.disabled === true}"`)}<details class="api-client-more"><summary>更多</summary><div>${action('codexAPIRequests', '最近请求')}${action('codexAPIRotate', '重置密钥')}${action('codexAPIRevoke', '撤销客户端', '', true)}</div></details></div></article>`;
   }).join('') || '<p class="muted small">尚未配置客户端，请选择账号加入服务。</p>';
 }
 function apiServiceRuntimeHTML(status) {
   const state = codexAPIState(status);
-  return `<div class="row api-service-runtime"><span class="account-state ${status.running ? 'ok' : 'muted'}">${state.label}</span><button class="btn sm" data-act="codexAPIEnabled" data-enabled="${state.nextEnabled}" ${CODEX_API_OVERVIEW.pending ? 'disabled' : ''}>${state.action}</button><span class="spacer"></span><span class="muted small" id="apiServiceUpdated">${esc(apiServiceUpdatedLabel())}</span><button class="icon-btn" data-act="codexAPIServiceRefresh" title="刷新服务状态" aria-label="刷新服务状态">${icon('refresh')}</button></div>`;
+  return `<div class="row api-service-runtime"><span class="account-state ${CODEX_API_OVERVIEW.error ? 'warn' : status.running ? 'ok' : 'muted'}">${CODEX_API_OVERVIEW.error ? '状态待刷新' : state.label}</span><span class="spacer"></span><span class="muted small" id="apiServiceUpdated">${esc(apiServiceUpdatedLabel())}</span><button class="btn sm" data-act="codexAPIServiceRefresh">刷新状态</button><button class="btn sm ${status.running ? '' : 'primary'}" data-act="codexAPIEnabled" data-enabled="${state.nextEnabled}" ${CODEX_API_OVERVIEW.pending || CODEX_API_OVERVIEW.error ? 'disabled' : ''}>${state.action}</button></div>`;
 }
 function updateAPIServiceReadOnly(status, owner = apiClientPanel) {
   if (!currentAPIClientPanel(owner) || owner.mode !== 'service' || owner.writeAttempted) return;
   owner.clients = status.clients || [];
   if (owner.clients.length) owner.firstClient = false;
   const runtime = $('#apiServiceRuntime'), clients = $('#apiServiceClients'), summary = $('#apiServiceSummary'), launches = $('#apiServiceLaunchActions');
-  if (runtime) runtime.innerHTML = apiServiceRuntimeHTML(status);
-  if (clients) clients.innerHTML = apiServiceClientRows(status, owner.accounts);
+  if (runtime) patchOfficialObservationHTML(runtime, `<div id="apiServiceRuntime">${apiServiceRuntimeHTML(status)}</div>`);
+  if (clients) patchOfficialObservationHTML(clients, `<div id="apiServiceClients" class="api-service-clients">${apiServiceClientRows(status, owner.accounts)}</div>`);
   if (summary) patchOfficialObservationHTML(summary, `<div id="apiServiceSummary">${apiServicePlanGroupsHTML(apiServiceSummary(status))}</div>`);
-  if (launches) launches.innerHTML = localAPIServiceLaunchHTML(status);
+  if (launches) patchOfficialObservationHTML(launches, `<div id="apiServiceLaunchActions">${localAPIServiceLaunchHTML(status)}</div>`);
+  if ($('#apiServiceUpstreams')) patchOfficialObservationHTML($('#apiServiceUpstreams'), `<div id="apiServiceUpstreams">${apiServiceUpstreamsHTML(status, owner.accounts)}</div>`);
   if ($('#apiServiceSetup') && owner.clients.length) $('#apiServiceSetup').hidden = true;
   syncAPIClientWriteControls();
 }
@@ -167,7 +169,7 @@ function apiServicePlanGroupsHTML(summary) {
 }
 function localAPIServiceLaunchHTML(status) {
   const canLaunch = status?.running === true && !CODEX_API_OVERVIEW.error && (status.clients || []).some((row) => !row.disabled);
-  return `<div class="account-launch-buttons api-service-launch-buttons" aria-label="通过本地 API 服务打开工具">${Object.entries(API_SERVICE_TOOLS).map(([target, name]) => `<button class="btn sm account-open-button" data-act="codexAPIServiceOpen" data-target="${target}" ${canLaunch ? '' : 'disabled'} aria-label="${esc('使用本地 API 服务打开 ' + name)}" title="${canLaunch ? '使用本地 API 服务打开 ' + name : '请先加入账号并启动本地服务'}">${typeof accountLaunchToolIcon === 'function' ? accountLaunchToolIcon(target) : icon('external')}</button>`).join('')}</div>`;
+  return `<div class="api-service-launch-buttons" aria-label="通过本地 API 服务打开工具">${Object.entries(API_SERVICE_TOOLS).map(([target, name]) => `<button class="btn sm" data-act="codexAPIServiceOpen" data-target="${target}" ${canLaunch ? '' : 'disabled'} title="${canLaunch ? '选择客户端并检查配置后打开' : '请先配置客户端并启动本地服务'}">${icon('external')}打开 ${esc(name)}</button>`).join('')}</div>`;
 }
 function apiServiceLaunchCurrent(owner) {
   return owner && apiServiceLaunchPanel === owner && OFFICIAL_PANEL.epoch === owner.epoch && S.route === owner.route && $('#officialPanel') === owner.element;
@@ -247,14 +249,14 @@ async function confirmAPIServiceLaunch(button) {
 function codexAPIOverviewHTML() {
   const status = CODEX_API_OVERVIEW.status;
   const title = '<div class="official-card-top"><span class="official-card-name">本地 API 服务</span>';
-  if (!status) return `<article class="wb-card account-card api-service-card" id="localAPIService">${title}<span class="chip">${CODEX_API_OVERVIEW.error ? '暂不可用' : '本机'}</span></div><p class="muted small">将保存的账号提供给本机工具调用</p><div class="row"><button class="btn" data-act="codexAPI">配置服务</button>${CODEX_API_OVERVIEW.error ? '<button class="btn ghost" data-act="codexAPIOverviewRefresh">重试</button>' : ''}</div></article>`;
+  if (!status) return `<article class="wb-card account-card api-service-card" id="localAPIService">${title}<span class="account-state">${CODEX_API_OVERVIEW.error ? '暂不可用' : '未检查'}</span></div><p class="api-service-next">${CODEX_API_OVERVIEW.error ? '暂时无法读取本机服务，重试后继续配置。' : '把已保存的 API 或账号连接到本机工具。'}</p><div class="api-service-actions"><button class="btn primary" data-act="codexAPI">配置服务</button><button class="btn" data-act="codexAPIOverviewRefresh">${CODEX_API_OVERVIEW.error ? '重试' : '检查状态'}</button></div></article>`;
   const state = codexAPIState(status), stats = codexAPIHTTPStats(status);
   const clients = (status.clients || []).filter(row => !row.disabled).length;
   const summary = apiServiceSummary(status);
-  const verifiedCount = summary && !CODEX_API_OVERVIEW.error ? summary.ready : '—';
-  const launchButtons = typeof localAPIServiceLaunchHTML === 'function' ? localAPIServiceLaunchHTML(status) : '';
   const active = status.enabled === true && status.running === true && !CODEX_API_OVERVIEW.error && !CODEX_API_OVERVIEW.pending;
-  return `<article class="wb-card account-card api-service-card${active ? ' account-is-active' : ''}" id="localAPIService">${title}<span class="account-state ${CODEX_API_OVERVIEW.error ? 'warn' : status.running ? 'ok' : 'muted'}">${CODEX_API_OVERVIEW.error ? '状态待刷新' : state.label}</span></div><div class="api-service-metrics"><div title="当前凭据与最近官方额度检查可用；不代表每个模型请求均可成功"><b>${verifiedCount}</b><span>可用账号</span></div><div><b>${summary ? summary.total : '—'}</b><span>已加入账号</span></div><div><b>${CODEX_API_OVERVIEW.error ? '—' : stats.inflight}</b><span>在途请求</span></div></div>${apiServicePlanGroupsHTML(summary)}${launchButtons ? `<div id="localAPILaunchActions">${launchButtons}</div>` : ''}<div class="muted small api-service-note">${clients} 个启用客户端 · ${stats.requests} 次请求 · ${stats.httpErrors} 次错误<br>${esc(apiServiceUpdatedLabel())}</div><div class="api-service-actions"><button class="btn primary" data-act="codexAPIOverviewToggle" data-enabled="${state.nextEnabled}" ${CODEX_API_OVERVIEW.pending || CODEX_API_OVERVIEW.error ? 'disabled' : ''}>${state.action}</button><button class="btn" data-act="codexAPI">管理</button><button class="icon-btn" data-act="codexAPIRequests" title="最近请求" aria-label="查看本地 API 服务最近请求">${icon('list')}</button><button class="icon-btn" data-act="codexAPIOverviewRefresh" aria-label="刷新服务状态">${icon('refresh')}</button></div></article>`;
+  const next = CODEX_API_OVERVIEW.error ? '未能更新本机状态，请刷新后再操作。' : !clients ? '先配置客户端，选择它可以使用的上游。' : status.requiresStart ? '配置已保留，启动本次服务后即可接入。' : !status.running ? '配置已就绪，启动后供客户端调用。' : '服务已启动，可在管理中接入工具或复制地址。';
+  const upstream = summary ? `${summary.total} 个上游 · ${summary.ready} 个已验证${summary.unknown ? ` · ${summary.unknown} 个未检查` : ''}${summary.unavailable ? ` · ${summary.unavailable} 个暂不可用` : ''}` : '上游状态未检查';
+  return `<article class="wb-card account-card api-service-card${active ? ' account-is-active' : ''}" id="localAPIService">${title}<span class="account-state ${CODEX_API_OVERVIEW.error ? 'warn' : status.running ? 'ok' : 'muted'}">${CODEX_API_OVERVIEW.error ? '状态待刷新' : state.label}</span></div><p class="api-service-next">${next}</p><code class="api-service-address">${esc(status.baseUrl || '本机接口地址待检查')}</code><div class="api-service-usage"><span>${clients} 个启用客户端</span><span>${CODEX_API_OVERVIEW.error ? '请求状态待刷新' : `${stats.inflight} 个在途 · ${stats.requests} 次请求`}</span></div><p class="muted small api-service-note">${esc(upstream)}</p><div class="api-service-actions">${!clients && !status.running && !status.requiresStart ? '<button class="btn primary" data-act="codexAPI" data-view="clients">配置客户端</button>' : `<button class="btn primary" data-act="codexAPIOverviewToggle" data-enabled="${state.nextEnabled}" ${CODEX_API_OVERVIEW.pending || CODEX_API_OVERVIEW.error ? 'disabled' : ''}>${state.action}</button><button class="btn" data-act="codexAPI">管理服务</button>`}${CODEX_API_OVERVIEW.error ? '<button class="btn" data-act="codexAPIOverviewRefresh">重试</button>' : ''}</div></article>`;
 }
 function renderCodexAPIOverview() {
   const card = $('#localAPIService');
@@ -293,10 +295,10 @@ async function toggleCodexAPIService(button, overview = false) {
   renderCodexAPIOverview();
   try {
     await busy(button, () => api('/api/local/codex-api/enabled', { enabled: button.dataset.enabled === 'true' }));
-    if (!overview && epoch === OFFICIAL_PANEL.epoch) await openCodexAPI();
   } finally {
     CODEX_API_OVERVIEW.pending = false;
     await loadCodexAPIOverview();
+    if (!overview && epoch === OFFICIAL_PANEL.epoch && !CODEX_API_OVERVIEW.error) updateAPIServiceReadOnly(CODEX_API_OVERVIEW.status);
   }
 }
 function showCreatedAPIKey(key) {
@@ -312,6 +314,7 @@ function presentCreatedAPIKey(key) {
   // list refresh between that response and rendering it to the same owner.
   officialPanel('客户端密钥', '<p class="muted small">密钥只显示这一次，请复制保存。</p><div id="apiCreatedKeyBox" class="field"><label for="apiCreatedKey">客户端密钥</label><div class="api-key-controls"><input class="input" id="apiCreatedKey" type="password" autocomplete="off" spellcheck="false" readonly><button class="icon-btn" data-act="toggleVis" data-for="apiCreatedKey" aria-label="显示或隐藏客户端密钥">' + icon('eye') + '</button><button class="icon-btn" data-act="codexAPIKeyCopy" aria-label="复制客户端密钥">' + icon('copy') + '</button></div></div>');
   showCreatedAPIKey(key);
+  apiManagementShell('<button class="btn primary" data-act="codexAPI" data-view="clients">返回客户端</button>');
 }
 let officialLibraryRevision = 0;
 function officialLibraryAccounts(accounts) {
@@ -692,6 +695,8 @@ async function reconcileClosedOfficialLogin(id, attempt = 0) {
   }
 }
 function disposeOfficialPanel() {
+  if (apiManagementLeavePending) { apiManagementLeavePending.resolve(false); apiManagementLeavePending = null; }
+  apiSettingsDrafts.clear();
   if (typeof stopAPIServiceObservation === 'function') stopAPIServiceObservation();
   if (typeof closeAPIRequests === 'function') closeAPIRequests(false);
   if (typeof accountDailyCancelPanel === 'function') accountDailyCancelPanel();
@@ -1363,7 +1368,7 @@ Object.assign(ACTIONS, {
   },
   officialRetrySave: async (button) => { const token = officialMutationToken(); await busy(button, () => api('/api/local/codex/retry-save', { id: button.dataset.id })); await refreshOfficialCards(token); },
   officialDelete: async (button) => { if (!await confirm('移除这个 Codex 账号？不会删除原会话。')) return; const token = officialMutationToken(); await api('/api/local/codex/delete', { id: button.dataset.id }); await refreshOfficialCards(token); },
-  codexAPI: openCodexAPI,
+  codexAPI: button => openCodexAPI(button?.dataset?.view || apiServiceView),
   codexAPIEnabled: (button) => toggleCodexAPIService(button),
   codexAPIOverviewToggle: (button) => toggleCodexAPIService(button, true),
   codexAPIOverviewRefresh: (button) => busy(button, loadCodexAPIOverview),
@@ -1388,13 +1393,14 @@ Object.assign(ACTIONS, {
     // First setup uses managed launch credentials. Manual one-time keys remain
     // available only through the explicit advanced create/rotate actions.
     if (row.ok === false || !row.id) throw new Error('加入结果待确认，请重新打开本地服务');
-    await openCodexAPI();
-    void loadCodexAPIOverview();
+    owner.writeAttempted = false;
+    await loadCodexAPIOverview();
+    if (currentAPIClientPanel(owner) && !CODEX_API_OVERVIEW.error) updateAPIServiceReadOnly(CODEX_API_OVERVIEW.status, owner);
   }),
-  codexAPIRevoke: (button) => withAPIClientWrite(async () => { const owner = requireAPIClientPanel('service', button.dataset.id); owner.writeAttempted = true; await busy(button, () => api('/api/local/codex-api/clients/revoke', { id: button.dataset.id })); void loadCodexAPIOverview(); if (currentAPIClientPanel(owner)) await openCodexAPI(); }),
-  codexAPIEdit: async (button) => openCodexAPIClient(button.dataset.id),
-  codexAPINew: async () => openCodexAPIClient(''),
-  codexAPIServiceOpen: openAPIServiceLaunch,
+  codexAPIRevoke: (button) => withAPIClientWrite(async () => { const owner = requireAPIClientPanel('service', button.dataset.id); if (!await confirm('撤销此客户端？它的密钥将失效，上游 API 会保留。')) return; if (!currentAPIClientPanel(owner)) return; await busy(button, () => api('/api/local/codex-api/clients/revoke', { id: button.dataset.id })); await loadCodexAPIOverview(); if (currentAPIClientPanel(owner) && !CODEX_API_OVERVIEW.error) updateAPIServiceReadOnly(CODEX_API_OVERVIEW.status, owner); }),
+  codexAPIEdit: (button) => apiManagementLeave(() => openCodexAPIClient(button.dataset.id)),
+  codexAPINew: () => apiManagementLeave(() => openCodexAPIClient('')),
+  codexAPIServiceOpen: button => apiManagementLeave(() => openAPIServiceLaunch(button)),
   codexAPIServiceLaunch: confirmAPIServiceLaunch,
   codexAPISave: (button) => withAPIClientWrite(async () => {
     const owner = requireAPIClientPanel('editor', button.dataset.id || '');
@@ -1412,15 +1418,29 @@ Object.assign(ACTIONS, {
     readAPIClientAccount(owner);
     const readModels = (id) => [...new Set($(id).value.split('\n').map((value) => value.trim()).filter(Boolean))];
     owner.writeAttempted = true;
-    const row = await busy(button, () => api('/api/local/codex-api/clients', { id: button.dataset.id, name: $('#apiClientName').value,
+    const fields = Array.from(owner.element.querySelectorAll?.('input,select,textarea') || [], node => ({ node, disabled: node.disabled }));
+    for (const { node } of fields) node.disabled = true;
+    let row;
+    try { row = await busy(button, () => api('/api/local/codex-api/clients', { id: button.dataset.id, name: $('#apiClientName').value,
       ...binding, disabled: $('#apiClientDisabled').value === 'true',
       modelAllowlist: readModels('#apiClientAllowlist'), modelDenylist: readModels('#apiClientDenylist'),
       modelAllowPrefixes: readModels('#apiClientAllowPrefixes'), modelDenyPrefixes: readModels('#apiClientDenyPrefixes'),
-      modelAliases, maxConcurrency }));
+      modelAliases, maxConcurrency })); }
+    catch (error) {
+      if (currentAPIClientPanel(owner)) {
+        // Only a definite rejection is safe to resubmit. A lost create response
+        // may already have committed a one-time key; keep the draft for review.
+        if ([400,401,403,404,409,422].includes(error.status)) owner.writeAttempted = false;
+        if ($('#officialError')) $('#officialError').textContent = owner.writeAttempted ? `${error.message}。结果未确认，输入已保留；请返回客户端核对，避免重复创建。` : `${error.message}。输入已保留，可修正后保存。`;
+        syncAPIClientDraft();
+      }
+      return;
+    } finally { for (const { node, disabled } of fields) if (node.isConnected) node.disabled = disabled; }
     if (!currentAPIClientPanel(owner)) return;
+    if (!row?.id || row.ok === false) { $('#officialError').textContent = '保存结果未确认，输入已保留；请返回客户端核对。'; syncAPIClientDraft(); return; }
     if (row.key) presentCreatedAPIKey(row.key);
     else if (!owner.clientId) throw new Error('客户端已提交，但未收到密钥，请检查列表后重置密钥');
-    else await openCodexAPI();
+    else await openCodexAPI('clients');
     void loadCodexAPIOverview();
   }),
   codexAPIRotate: (button) => withAPIClientWrite(async () => {
@@ -1466,6 +1486,7 @@ function readAPIClientBinding() {
   // submit an invalid policy that the backend must reject.
   const poolStrategy = accountIds.length ? ($('#apiClientPoolStrategy')?.value || '') : '';
   const poolAccountId = accountIds.length ? ($('#apiClientPoolAccount')?.value || '') : '';
+  if (poolStrategy === 'single_account' && !accountIds.includes(poolAccountId)) throw new Error('请从已选文字池中选择固定成员');
   return { accountId, modelPrefix, imageAccountIds, accountIds, poolStrategy, poolAccountId };
 }
 function orderedAPIClientPoolAccounts(accounts, selected) {
@@ -1474,51 +1495,176 @@ function orderedAPIClientPoolAccounts(accounts, selected) {
   return [...selected.map((id) => accounts.find((row) => row.id === id) || { id, name: '已移除 · ' + id }),
     ...accounts.filter((row) => !selected.includes(row.id))];
 }
+let apiServiceView = 'upstreams';
+let apiManagementLeavePending = null;
+const apiSettingsDrafts = new Map();
+function apiManagementShell(footer = '') {
+  $('#officialPanel')?.closest?.('.modal')?.classList?.add?.('api-management-modal');
+  const node = $('#officialPanelFooter');
+  if (node) { node.innerHTML = footer; node.hidden = !footer; }
+}
+function apiClientDraftSnapshot() {
+  return JSON.stringify(['Name','Account','Disabled','Concurrency','Allowlist','Denylist','Aliases','ModelPrefix','AllowPrefixes','DenyPrefixes','PoolStrategy','PoolAccount'].map(key => $('#apiClient' + key)?.value || '').concat(['TextAccounts','ImageAccounts'].map(key => Array.from($('#apiClient' + key)?.selectedOptions || [], row => row.value))));
+}
+function rememberAPISettings(id, submitted) {
+  const section = $('#' + id);
+  if (!section) return;
+  for (const node of section.querySelectorAll?.('input,select') || []) apiSettingsDrafts.set(node, submitted?.[node.id] ?? node.value);
+}
+function apiManagementHasDraft() {
+  if (currentAPIClientPanel(apiClientPanel) && apiClientPanel.mode === 'editor') return apiClientPanel.initialDraft !== apiClientDraftSnapshot();
+  return Array.from(apiSettingsDrafts).some(([node, initial]) => node.isConnected && node.value !== initial);
+}
+function apiManagementActive() {
+  return currentAPIClientPanel(apiClientPanel) && ['service', 'editor'].includes(apiClientPanel.mode);
+}
+async function apiManagementLeave(next) {
+  if (!apiManagementActive()) { await next(); return true; }
+  if (apiClientWritePending || CODEX_API_OVERVIEW.pending || apiClientPanel.settingsWriting) { toast('正在保存，请稍候再离开'); return false; }
+  if (apiManagementLeavePending) return apiManagementLeavePending.promise;
+  if (apiManagementHasDraft()) {
+    let resolve;
+    const promise = new Promise(done => { resolve = done; });
+    apiManagementLeavePending = { promise, resolve, next };
+    $('#officialPanel').insertAdjacentHTML('afterbegin', '<div id="apiUnsaved" class="api-unsaved" role="alert"><b>有未保存的更改</b><p>继续编辑，或放弃本次更改后离开。</p><div class="row"><button class="btn primary" data-act="apiManagementStay">继续编辑</button><button class="btn" data-act="apiManagementDiscard">放弃更改</button></div></div>');
+    $('[data-act="apiManagementStay"]')?.focus?.();
+    return promise;
+  }
+  await next(); return true;
+}
+function closeAPIManagement() { return apiManagementLeave(() => closeOfficialPanel()); }
+function selectAPIServiceView(view, focus = false) {
+  if (!['upstreams', 'clients', 'settings'].includes(view)) view = 'upstreams';
+  apiServiceView = view;
+  for (const id of ['upstreams', 'clients', 'settings']) {
+    const pane = $('#apiService-' + id), button = $('#apiServiceTab-' + id);
+    if (pane) pane.hidden = id !== view;
+    if (button) { button.setAttribute('aria-selected', String(id === view)); button.tabIndex = id === view ? 0 : -1; }
+  }
+  if (focus) $('#apiServiceTab-' + view)?.focus?.();
+}
+function apiServiceUpstreamsHTML(status, accounts) {
+  const members = new Map((status.summary?.members || []).map(row => [row.id, row]));
+  return accounts.map(account => {
+    const member = members.get(account.id);
+    const known = member && !CODEX_API_OVERVIEW.error && member.availability === 'ready' && member.sourceType === 'official_account' && apiServiceUsageFresh(member.usage, Date.now());
+    const unavailable = member?.availability === 'unavailable';
+    const label = unavailable ? '暂不可用' : known ? '已验证' : '未检查';
+    const clients = (status.clients || []).filter(row => row.accountId === account.id || row.accountIds?.includes(account.id) || row.imageAccountIds?.includes(account.id));
+    return `<article class="api-upstream-row" data-observation-key="${esc(account.id)}"><div><div class="api-client-title"><b>${esc(account.name || '未命名上游')}</b><span class="account-state ${unavailable ? 'warn' : known ? 'ok' : 'muted'}">${label}</span></div><p class="muted small">${esc(account.officialAccount ? 'Codex 官方账号' : account.baseUrl || '上游地址未配置')}</p><small>${clients.length ? esc(clients.map(row => row.name + (row.disabled ? '（停用）' : '')).join('、')) : '尚未连接客户端'}</small></div><div class="api-upstream-actions">${account.officialAccount ? '' : `<button class="btn sm" data-act="apiUpstreamEdit" data-id="${esc(account.id)}">编辑</button>`}<button class="btn sm" data-act="apiUpstreamUse" data-id="${esc(account.id)}">用于新客户端</button></div></article>`;
+  }).join('') || '<div class="api-service-empty"><b>先添加一个上游</b><p>保存 API 地址和密钥，再创建客户端连接它。</p></div>';
+}
+async function openAPIUpstream(id = '') {
+  return apiManagementLeave(async () => {
+    const owner = apiClientPanel;
+    const row = id ? owner?.accounts.find(value => value.id === id) : null;
+    if (id && !row) throw new Error('上游已变更，请刷新后重试');
+    localEditor(row, undefined, { onReturn: () => openCodexAPI('upstreams'), service: true });
+  });
+}
+Object.assign(ACTIONS, {
+  apiServiceTab: button => selectAPIServiceView(button.dataset.view),
+  apiUpstreamNew: () => openAPIUpstream(),
+  apiUpstreamEdit: button => openAPIUpstream(button.dataset.id),
+  apiUpstreamUse: button => apiManagementLeave(() => openCodexAPIClient('', button.dataset.id)),
+  codexAPIEditorRetry: button => openCodexAPIClient(button.dataset.id, button.dataset.account),
+  apiManagementBack: () => apiManagementLeave(() => openCodexAPI('clients')),
+  apiManagementStay: () => { const pending = apiManagementLeavePending; apiManagementLeavePending = null; $('#apiUnsaved')?.remove(); pending?.resolve(false); },
+  apiManagementDiscard: async () => { const pending = apiManagementLeavePending; apiManagementLeavePending = null; $('#apiUnsaved')?.remove(); if (pending) { try { await pending.next(); pending.resolve(true); } catch (error) { pending.resolve(false); throw error; } } },
+});
+document.addEventListener('keydown', event => {
+  if (!event.target?.id?.startsWith('apiServiceTab-') || !['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+  event.preventDefault();
+  const tabs = ['upstreams', 'clients', 'settings'], index = tabs.indexOf(apiServiceView);
+  selectAPIServiceView(event.key === 'Home' ? tabs[0] : event.key === 'End' ? tabs[2] : tabs[(index + (event.key === 'ArrowRight' ? 1 : 2)) % 3], true);
+});
+function syncAPIClientDraft() {
+  if (!currentAPIClientPanel(apiClientPanel) || apiClientPanel.mode !== 'editor') return;
+  const dirty = apiManagementHasDraft();
+  if ($('#apiClientDraftNote')) $('#apiClientDraftNote').textContent = apiClientPanel.writeAttempted ? '结果待核对，输入已保留' : dirty ? '有未保存的更改' : '保存后生效';
+}
+document.addEventListener('input', syncAPIClientDraft);
+document.addEventListener('change', syncAPIClientDraft);
 function renderClientImageAccounts(accounts, selected = []) {
   accounts = orderedAPIClientPoolAccounts(accounts, selected);
-  const missing = selected.filter((id) => !accounts.some((row) => row.id === id));
-  $('#apiClientModelPrefix').closest('.field').insertAdjacentHTML('beforebegin', `<details class="api-pool-options"><summary>图片账号池 · ${selected.length ? `已选 ${selected.length} 个` : '可选'}</summary><div class="field"><label for="apiClientImageAccounts">图片账号池（可多选）</label><select id="apiClientImageAccounts" class="input" multiple size="4">${accounts.map((row) => `<option value="${esc(row.id)}" ${selected.includes(row.id) ? 'selected' : ''}>${esc(row.name)}</option>`).join('')}${missing.map((id) => `<option value="${esc(id)}" selected>已移除 · ${esc(id)}</option>`).join('')}</select><div class="muted small">留空使用主账号。选中后，图片生成、编辑和显式图片工具请求使用当前图片任务最少的成员；文字请求仍使用主账号。</div></div></details>`);
+  $('#apiClientPools').insertAdjacentHTML('beforeend', `<details class="api-pool-options"><summary>图片账号池 · ${selected.length ? `已选 ${selected.length} 个` : '可选'}</summary>${apiClientPoolChoicesHTML('apiClientImageAccounts', accounts, selected)}<p class="muted small">留空使用默认上游。选中后，图片请求使用当前图片任务最少的成员。</p></details>`);
 }
 function renderClientTextPool(accounts, selected = [], strategy = '', poolAccountId = '') {
   accounts = orderedAPIClientPoolAccounts(accounts, selected);
   if (poolAccountId && !accounts.some((row) => row.id === poolAccountId)) accounts = [...accounts, { id: poolAccountId, name: '已移除 · ' + poolAccountId }];
-  const missing = selected.filter((id) => !accounts.some((row) => row.id === id));
-  $('#apiClientModelPrefix').closest('.field').insertAdjacentHTML('beforebegin', `<details class="api-pool-options"><summary>文字账号池 · ${selected.length ? `已选 ${selected.length} 个` : '可选'}</summary><div class="field"><label for="apiClientTextAccounts">文字账号池（可多选）</label><select id="apiClientTextAccounts" class="input" multiple size="4">${accounts.map((row) => `<option value="${esc(row.id)}" ${selected.includes(row.id) ? 'selected' : ''}>${esc(row.name)}</option>`).join('')}${missing.map((id) => `<option value="${esc(id)}" selected>已移除 · ${esc(id)}</option>`).join('')}</select><div class="muted small">留空继续固定主账号。选中后只在这些明确成员中路由；主账号不会自动加入。</div></div><div class="form-grid"><div class="field"><label for="apiClientPoolStrategy">文字池策略</label><select id="apiClientPoolStrategy" class="input"><option value="" ${!strategy ? 'selected' : ''}>自动</option><option value="auto" ${strategy === 'auto' ? 'selected' : ''}>自动</option><option value="random" ${strategy === 'random' ? 'selected' : ''}>随机</option><option value="single_account" ${strategy === 'single_account' ? 'selected' : ''}>固定成员</option><option value="quota_high_first" ${strategy === 'quota_high_first' ? 'selected' : ''}>额度高优先</option><option value="quota_low_first" ${strategy === 'quota_low_first' ? 'selected' : ''}>额度低优先</option><option value="plan_high_first" ${strategy === 'plan_high_first' ? 'selected' : ''}>套餐高优先</option><option value="plan_low_first" ${strategy === 'plan_low_first' ? 'selected' : ''}>套餐低优先</option><option value="expiry_soon_first" ${strategy === 'expiry_soon_first' ? 'selected' : ''}>订阅早到期优先</option><option value="custom" ${strategy === 'custom' ? 'selected' : ''}>自定义优先级</option></select></div><div class="field"><label for="apiClientPoolAccount">固定成员（仅固定成员策略）</label><select id="apiClientPoolAccount" class="input"><option value="">请选择</option>${accounts.map((row) => `<option value="${esc(row.id)}" ${poolAccountId === row.id ? 'selected' : ''}>${esc(row.name)}</option>`).join('')}</select></div></div></details>`);
+  $('#apiClientPools').insertAdjacentHTML('afterbegin', `<details class="api-pool-options"><summary>文字账号池 · ${selected.length ? `已选 ${selected.length} 个` : '可选'}</summary>${apiClientPoolChoicesHTML('apiClientTextAccounts', accounts, selected)}<p class="muted small">留空使用默认上游；选中后只在这些成员中调度，默认上游不会自动加入。</p><div class="form-grid"><div class="field"><label for="apiClientPoolStrategy">文字池策略</label><select id="apiClientPoolStrategy" class="input">${[['','自动'],['random','随机'],['single_account','固定成员'],['quota_high_first','额度高优先'],['quota_low_first','额度低优先'],['plan_high_first','套餐高优先'],['plan_low_first','套餐低优先'],['expiry_soon_first','订阅早到期优先'],['custom','自定义优先级']].map(([key,name]) => `<option value="${key}" ${(strategy === key || key === '' && strategy === 'auto') ? 'selected' : ''}>${name}</option>`).join('')}</select></div><div class="field"><label for="apiClientPoolAccount">固定成员（仅固定成员策略）</label><select id="apiClientPoolAccount" class="input"><option value="">请选择</option>${accounts.map((row) => `<option value="${esc(row.id)}" ${poolAccountId === row.id ? 'selected' : ''}>${esc(row.name)}</option>`).join('')}</select></div></div></details>`);
 }
-async function openCodexAPI() {
-  officialPanel('本地 API 服务', '<div id="apiServiceContent" class="stack"></div>');
+function apiClientPoolChoicesHTML(id, accounts, selected) {
+  return `<select id="${id}" data-native multiple hidden aria-hidden="true">${accounts.map(row => `<option value="${esc(row.id)}" ${selected.includes(row.id) ? 'selected' : ''}>${esc(row.name)}</option>`).join('')}</select><div class="api-pool-choices" role="group" aria-label="${id.includes('Text') ? '文字' : '图片'}账号池">${accounts.map(row => `<label><input type="checkbox" data-api-pool="${id}" value="${esc(row.id)}" ${selected.includes(row.id) ? 'checked' : ''}><span>${esc(row.name)}</span></label>`).join('')}</div>`;
+}
+document.addEventListener('change', event => {
+  const id = event.target?.dataset?.apiPool;
+  if (!['apiClientTextAccounts','apiClientImageAccounts'].includes(id)) return;
+  const select = $('#' + id);
+  for (const option of select?.options || []) if (option.value === event.target.value) option.selected = event.target.checked;
+  const detail = select?.closest?.('details'), count = select?.selectedOptions?.length || 0;
+  if (detail?.querySelector('summary')) detail.querySelector('summary').textContent = `${id.includes('Text') ? '文字' : '图片'}账号池 · ${count ? `已选 ${count} 个` : '可选'}`;
+  syncAPIClientDraft();
+});
+async function openCodexAPI(view = apiServiceView) {
+  if (typeof view !== 'string') view = 'upstreams';
+  officialPanel('本地 API 服务', '<div id="apiServiceContent" class="stack"><p class="muted">正在读取本机配置…</p></div>');
+  apiManagementShell();
   const epoch = OFFICIAL_PANEL.epoch;
-  const [status, local] = await Promise.all([api('/api/local/codex-api'), api('/api/local/accounts')]);
+  CODEX_API_OVERVIEW.revision++;
+  let status, local;
+  try { [status, local] = await Promise.all([api('/api/local/codex-api'), api('/api/local/accounts')]); }
+  catch (error) {
+    if (epoch === OFFICIAL_PANEL.epoch && $('#apiServiceContent')) $('#apiServiceContent').innerHTML = `<div class="api-service-empty"><b>本机配置读取失败</b><p>${esc(error.message)}</p><button class="btn" data-act="codexAPI">重新读取</button></div>`;
+    return;
+  }
   if (epoch !== OFFICIAL_PANEL.epoch || !$('#apiServiceContent')) return;
   // Enabled is durable user intent; the runtime lease is deliberately not.
   // After a Bridge restart the service is therefore disabled until the user
   // explicitly arms this process again. Keep that recovery action visible
   // instead of offering a misleading "关闭" button that would clear intent.
   CODEX_API_OVERVIEW.updatedAt = Date.now();
+  CODEX_API_OVERVIEW.status = status; CODEX_API_OVERVIEW.error = false;
   const accounts = apiClientAccounts(local), clients = status.clients || [];
   apiClientPanel = { epoch, element: $('#officialPanel'), mode: 'service', clients, accounts, firstClient: !clients.length, writeAttempted: false };
   const accountOptions = accounts.map((row) => `<option value="${esc(row.id)}">${esc(row.name)}</option>`).join('');
   const setup = clients.length ? '' : `<div class="field"><label for="apiClientAccount">API / 账号</label><select id="apiClientAccount" class="input"><option value="" selected disabled>${accounts.length ? '选择 API / 账号' : '请先添加 API 或关联账号'}</option>${accountOptions}</select></div><button class="btn primary" data-act="codexAPICreate" ${accounts.length ? '' : 'disabled'}>加入服务</button>`;
-  $('#apiServiceContent').innerHTML = `<div id="apiServiceRuntime">${apiServiceRuntimeHTML(status)}</div><div class="api-endpoint"><span class="muted small">本机接口</span><code>${esc(status.baseUrl)}</code><button class="icon-btn" data-act="copyVal" data-v="${esc(status.baseUrl)}" data-w="接口地址" title="复制本机 API 地址" aria-label="复制本机 API 地址">${icon('copy')}</button></div><div id="apiServiceNetworkSummary" class="muted small" role="status"></div><div class="row api-service-toolbar"><button class="btn sm" data-act="codexAPIProfile">Codex 配置</button><button class="btn sm" data-act="codexAPIReadiness">${icon('check')}检查就绪</button><button class="btn sm" data-act="codexAPIRequests">${icon('list')}最近请求</button><span class="spacer"></span><button class="icon-btn" data-act="codexAPINew" ${accounts.length ? '' : 'disabled'} title="添加客户端密钥" aria-label="添加客户端密钥">${icon('plus')}</button></div><div id="apiServiceSetup">${setup}</div><div id="apiServiceClients" class="api-service-clients">${apiServiceClientRows(status, accounts)}</div><div id="apiServiceSummary">${apiServicePlanGroupsHTML(apiServiceSummary(status))}</div><div id="apiServiceLaunchActions">${localAPIServiceLaunchHTML(status)}</div><details class="api-pool-options"><summary>网络与图片设置</summary><div id="apiServiceAdvanced" class="stack"><p class="muted small">调整服务访问范围与图片能力；客户端模型和账号池在对应行编辑。</p></div></details>`;
+  $('#apiServiceContent').innerHTML = `<div class="api-management-summary"><div id="apiServiceRuntime">${apiServiceRuntimeHTML(status)}</div><div class="api-endpoint"><span class="muted small">本机接口</span><code>${esc(status.baseUrl)}</code><button class="btn sm" data-act="copyVal" data-v="${esc(status.baseUrl)}" data-w="接口地址">复制地址</button></div></div>
+    <div class="api-management-tabs" role="tablist" aria-label="本地 API 管理">${[['upstreams','上游 API'],['clients','客户端接入'],['settings','服务设置']].map(([id,label]) => `<button id="apiServiceTab-${id}" role="tab" aria-controls="apiService-${id}" data-act="apiServiceTab" data-view="${id}">${label}</button>`).join('')}</div>
+    <section id="apiService-upstreams" role="tabpanel" aria-labelledby="apiServiceTab-upstreams"><div class="api-section-heading"><div><h4>上游 API 与账号</h4><p class="muted small">选择客户端可以使用的上游。未检查不等于不可用。</p></div><button class="btn primary" data-act="apiUpstreamNew">添加上游 API</button></div><div id="apiServiceUpstreams">${apiServiceUpstreamsHTML(status, accounts)}</div><details class="api-pool-options"><summary>已接入上游的额度与状态</summary><div id="apiServiceSummary">${apiServicePlanGroupsHTML(apiServiceSummary(status))}</div></details></section>
+    <section id="apiService-clients" role="tabpanel" aria-labelledby="apiServiceTab-clients" hidden><div class="api-section-heading"><div><h4>客户端接入</h4><p class="muted small">每个客户端有独立的上游、模型权限与密钥。</p></div><button class="btn primary" data-act="codexAPINew" ${accounts.length ? '' : 'disabled'}>添加客户端</button></div><div id="apiServiceSetup" class="api-first-setup">${setup}</div><div id="apiServiceClients" class="api-service-clients">${apiServiceClientRows(status, accounts)}</div><section class="api-management-section"><h4>在本机工具中使用</h4><p class="muted small">选择客户端并确认后打开；手动接入可创建独立客户端密钥。</p><div id="apiServiceLaunchActions">${localAPIServiceLaunchHTML(status)}</div></section><div class="api-service-toolbar"><button class="btn sm" data-act="codexAPIProfile">Codex 配置</button><button class="btn sm" data-act="codexAPIReadiness">检查就绪</button><button class="btn sm" data-act="codexAPIRequests">最近请求</button></div></section>
+    <section id="apiService-settings" role="tabpanel" aria-labelledby="apiServiceTab-settings" hidden><div class="api-section-heading"><div><h4>服务设置</h4><p class="muted small">网络和图片配置分别保存，切换分区保留输入。</p></div></div><div id="apiServiceNetworkSummary" class="muted small" role="status"></div><div id="apiServiceAdvanced" class="stack"><p class="muted small">仅影响这台电脑提供的 API 服务。</p></div></section>`;
+  selectAPIServiceView(view);
   syncAPIClientWriteControls();
   if (typeof scheduleAPIServiceObservation === 'function') scheduleAPIServiceObservation();
 }
-async function openCodexAPIClient(id) {
-  officialPanel(id ? '编辑密钥' : '新增密钥', '<div id="apiClientEditor" class="stack"></div>');
+async function openCodexAPIClient(id, accountId = '') {
+  officialPanel(id ? '编辑客户端' : '添加客户端', '<div id="apiClientEditor" class="stack"><p class="muted">正在读取配置…</p></div>');
+  apiManagementShell('<button class="btn" data-act="apiManagementBack">返回客户端</button>');
   const epoch = OFFICIAL_PANEL.epoch;
-  const [status, local] = await Promise.all([api('/api/local/codex-api'), api('/api/local/accounts')]);
+  let status, local;
+  try { [status, local] = await Promise.all([api('/api/local/codex-api'), api('/api/local/accounts')]); }
+  catch (error) {
+    if (epoch === OFFICIAL_PANEL.epoch && $('#apiClientEditor')) $('#apiClientEditor').innerHTML = `<div class="api-service-empty"><b>客户端配置读取失败</b><p>${esc(error.message)}</p><button class="btn" data-act="codexAPIEditorRetry" data-id="${esc(id)}" data-account="${esc(accountId)}">重新读取</button></div>`;
+    return;
+  }
   if (epoch !== OFFICIAL_PANEL.epoch || !$('#apiClientEditor')) return;
-  const row = id ? status.clients.find((client) => client.id === id) : { id: '', name: '本机客户端' };
+  const row = id ? status.clients.find((client) => client.id === id) : { id: '', name: '本机客户端', accountId };
   if (!row) throw new Error('客户端已被移除');
   const accounts = apiClientAccounts(local);
   const accountMissing = !accounts.some((account) => account.id === row.accountId);
   apiClientPanel = { epoch, element: $('#officialPanel'), mode: 'editor', clients: status.clients, clientId: id, accounts, writeAttempted: false };
   const prefixFields = `<div class="field"><label for="apiClientModelPrefix">模型命名空间（可选，例如 team/）</label><input id="apiClientModelPrefix" class="input" maxlength="64" value="${esc(row.modelPrefix || '')}" placeholder="team/"><div class="muted small">别名不含此前缀；权限始终按解析后的实际上游模型检查。</div></div><div class="field"><label>允许模型前缀（每行一个文字前缀，与允许模型列表合并；两者留空表示不限）</label><textarea id="apiClientAllowPrefixes" class="input">${esc((row.modelAllowPrefixes || []).join('\n'))}</textarea></div><div class="field"><label>拒绝模型前缀（按实际上游模型 ID 检查，优先于所有允许规则）</label><textarea id="apiClientDenyPrefixes" class="input">${esc((row.modelDenyPrefixes || []).join('\n'))}</textarea></div>`;
-  $('#apiClientEditor').innerHTML = `<div class="field"><label for="apiClientName">名称</label><input id="apiClientName" class="input" maxlength="80" value="${esc(row.name)}"></div><div class="field"><label for="apiClientAccount">API / 账号</label><select id="apiClientAccount" class="input">${accountMissing ? `<option value="" selected disabled>${id ? '原账号已移除，请重新选择' : '选择 API / 账号'}</option>` : ''}${accounts.map((a) => `<option value="${esc(a.id)}" ${a.id === row.accountId ? 'selected' : ''}>${esc(a.name)}</option>`).join('')}</select></div><details class="api-pool-options"><summary>高级设置</summary><div class="stack"><div class="field"><label for="apiClientDisabled">密钥状态</label><select id="apiClientDisabled" class="input"><option value="false" ${row.disabled ? '' : 'selected'}>启用</option><option value="true" ${row.disabled ? 'selected' : ''}>停用</option></select></div><div class="field"><label for="apiClientConcurrency">并发上限</label><input id="apiClientConcurrency" class="input" type="number" min="1" max="128" value="${row.maxConcurrency || 16}"></div><div class="field"><label>允许模型（每行一个上游模型 ID，留空表示不限）</label><textarea id="apiClientAllowlist" class="input">${esc((row.modelAllowlist || []).join('\n'))}</textarea></div><div class="field"><label>拒绝模型（每行一个上游模型 ID，优先于允许列表）</label><textarea id="apiClientDenylist" class="input">${esc((row.modelDenylist || []).join('\n'))}</textarea></div><div class="field"><label>模型别名（每行：别名 = 模型 ID，权限按右侧模型检查）</label><textarea id="apiClientAliases" class="input">${esc(Object.entries(row.modelAliases || {}).map(([alias, model]) => `${alias} = ${model}`).join('\n'))}</textarea></div></div></details><div class="row"><button class="btn primary" data-act="codexAPISave" data-id="${esc(id)}" ${accounts.length ? '' : 'disabled'}>${id ? '保存' : '生成密钥'}</button>${id ? `<button class="btn" data-act="codexAPIRotate" data-id="${esc(id)}">重置密钥</button>` : ''}</div>`;
+  $('#apiClientEditor').innerHTML = `<p class="muted small">为一个工具或使用场景建立独立接入配置。所有选择在保存后生效。</p><section class="api-management-section"><div class="form-grid"><div class="field"><label for="apiClientName">客户端名称</label><input id="apiClientName" class="input" maxlength="80" value="${esc(row.name)}" placeholder="例如：开发工具、图片工作台"></div><div class="field"><label for="apiClientDisabled">客户端状态</label><select id="apiClientDisabled" class="input"><option value="false" ${row.disabled ? '' : 'selected'}>启用</option><option value="true" ${row.disabled ? 'selected' : ''}>停用</option></select></div></div></section>
+    <section class="api-management-section"><h4>选择上游</h4><div class="field"><label for="apiClientAccount">默认上游 API / 账号</label><select id="apiClientAccount" class="input">${accountMissing ? `<option value="" selected disabled>${id ? '原账号已移除，请重新选择' : '选择 API / 账号'}</option>` : ''}${accounts.map(a => `<option value="${esc(a.id)}" ${a.id === row.accountId ? 'selected' : ''}>${esc(a.name)}</option>`).join('')}</select><p class="help">未配置账号池时，文字和图片都使用这个上游。</p></div><div id="apiClientPools"></div></section>
+    <details class="api-pool-options"><summary>模型权限与并发</summary><div class="stack"><div class="field"><label for="apiClientConcurrency">并发上限</label><input id="apiClientConcurrency" class="input" type="number" min="1" max="128" value="${row.maxConcurrency || 16}"></div><div class="field"><label for="apiClientAllowlist">允许模型（每行一个，留空不限）</label><textarea id="apiClientAllowlist" class="input" rows="3">${esc((row.modelAllowlist || []).join('\n'))}</textarea></div><div class="field"><label for="apiClientDenylist">拒绝模型（优先于允许规则）</label><textarea id="apiClientDenylist" class="input" rows="3">${esc((row.modelDenylist || []).join('\n'))}</textarea></div><div class="field"><label for="apiClientAliases">模型别名（每行：别名 = 模型 ID）</label><textarea id="apiClientAliases" class="input" rows="3">${esc(Object.entries(row.modelAliases || {}).map(([alias, model]) => `${alias} = ${model}`).join('\n'))}</textarea><p class="help">权限按解析后的实际上游模型检查。</p></div></div></details>`;
   $('#apiClientAliases').closest('.field').insertAdjacentHTML('beforebegin', prefixFields);
   if (id) $('#apiClientEditor').insertAdjacentHTML('afterbegin', `<div class="row"><span class="muted small">${esc(row.name)} · 客户端配置</span><span class="spacer"></span><button class="icon-btn" data-act="codexAPIRequests" data-id="${esc(id)}" title="查看最近请求（保留编辑内容）" aria-label="查看最近请求并保留编辑内容">${icon('list')}</button></div>`);
   renderClientImageAccounts(accounts, row.imageAccountIds || []);
   renderClientTextPool(accounts, row.accountIds || [], row.poolStrategy || '', row.poolAccountId || '');
+  // Keep one footer and one scrolling body; actions no longer scroll away.
+  apiManagementShell(`<span id="apiClientDraftNote" class="muted small" role="status">保存后生效</span><span class="spacer"></span><button class="btn" data-act="apiManagementBack">取消</button><button class="btn primary" data-act="codexAPISave" data-id="${esc(id)}" ${accounts.length ? '' : 'disabled'}>${id ? '保存更改' : '创建客户端'}</button>`);
+  apiClientPanel.initialDraft = apiClientDraftSnapshot();
   syncAPIClientWriteControls();
 }
 document.addEventListener('change', async (event) => {

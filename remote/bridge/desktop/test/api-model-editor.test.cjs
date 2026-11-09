@@ -87,6 +87,21 @@ test('late model results and failures cannot populate a replacement editor, even
   }
 });
 
+test('upstream editor returns to service after save or cancel but never during route leave', async () => {
+  const f = setup(); let returns = 0;
+  const open = () => f.context.localEditor({ id: 'upstream', name: 'Synthetic', baseUrl: 'https://models.example.test/v1', models: [] }, 'api', { onReturn: async () => { returns++; } });
+  open(); await f.context.closeLocalEditor(); assert.equal(returns, 1);
+  open(); const save = f.handlers.localSave(f.button());
+  f.pending[0].resolve({ account: { id: 'upstream' } }); await save;
+  assert.equal(returns, 2); assert.equal(f.routes.length, 0);
+  open(); f.nodes.get('laName').value = 'unsaved';
+  const choice = deferred(); f.context.confirm = () => choice.promise;
+  const cancel = f.context.closeLocalEditor();
+  const leave = f.context.closeLocalEditor({ returnToService: false });
+  choice.resolve(true); await Promise.all([cancel, leave]);
+  assert.equal(returns, 2); assert.equal(f.nodes.get('laID'), undefined);
+});
+
 test('model reads preserve credentials, endpoint and model edits made during the request', async () => {
   for (const [field, value] of [
     ['laBase', 'https://changed.example.test/v1'], ['laKey', 'synthetic-changed-key'],

@@ -48,10 +48,11 @@ async function showAPIReadiness() {
   if (apiReadinessPanel && apiReadinessCurrent(apiReadinessPanel)) return loadAPIReadiness();
   officialPanel('本机就绪诊断', `<div id="apiReadinessContent"><div class="row"><span id="apiReadinessSummary" class="muted small" role="status">正在检查本机配置…</span><span class="spacer"></span><button id="apiReadinessRefresh" class="btn sm" data-act="codexAPIReadinessRefresh">重新检查</button></div><div id="apiReadinessRows" class="readiness-list"></div><details class="api-pool-options"><summary>检查客户端 Key 与模型规则</summary><div class="form-grid"><div class="field"><label for="apiReadinessKey">客户端 Key（仅本次）</label><input id="apiReadinessKey" class="input" type="password" autocomplete="off" spellcheck="false" maxlength="256"></div><div class="field"><label for="apiReadinessModel">模型 ID / 别名（可选）</label><input id="apiReadinessModel" class="input" maxlength="200" autocomplete="off"></div></div><button class="btn sm" data-act="codexAPIKeyCheck">校验本机规则</button><div id="apiKeyCheckResult" role="status"></div></details><p id="apiReadinessScope" class="muted small"></p></div>`);
   const owner = apiReadinessPanel = { epoch: OFFICIAL_PANEL.epoch, element: $('#apiReadinessContent'), sequence: 0, loading: false, repairPending: false, repairs: new Map(), clients: [] };
+  apiManagementShell('<button class="btn" data-act="codexAPI" data-view="clients">返回客户端</button>');
   await loadAPIReadiness(owner);
 }
 Object.assign(ACTIONS, {
-  codexAPIReadiness: showAPIReadiness,
+  codexAPIReadiness: () => apiManagementLeave(showAPIReadiness),
   codexAPIReadinessRefresh: () => loadAPIReadiness(),
   codexAPIReadinessEdit: button => {
     const owner = apiReadinessPanel;

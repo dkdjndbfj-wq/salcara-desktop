@@ -38,7 +38,8 @@ test('service summary never projects quota observations into dollar balances', (
   h.run('fixture.summary.costEstimate=cost');
   const html = h.run('codexAPIOverviewHTML()');
   assert.doesNotMatch(html, /\$|总量（估算）|已用（估算）|剩余（估算）/);
-  assert.match(html, /60%|80%/);
+  assert.doesNotMatch(html, /60%|80%|api-service-plan-list/);
+  assert.match(h.run('apiServicePlanGroupsHTML(apiServiceSummary(fixture))'), /60%|80%/);
   assert.equal(h.calls.length, 0);
 });
 
@@ -47,7 +48,7 @@ test('summary only uses backend routed members, deduplicates ids and never falls
   const summary = h.run('apiServiceSummary(fixture)');
   assert.equal(summary.total, 2); assert.equal(summary.ready, 2);
   assert.doesNotMatch(html, /NOT IN SERVICE/);
-  assert.match(html, /可用账号/); assert.match(html, /已加入账号/);
+  assert.match(html, /2 个上游/); assert.match(html, /2 个已验证/);
 });
 test('ordinary configured APIs and unverifiable official snapshots never become ready', () => {
   const h = harness(), stale = member('stale'), missing = member('missing'), imported = member('hint');
@@ -55,14 +56,15 @@ test('ordinary configured APIs and unverifiable official snapshots never become 
   h.render([member('key', { sourceType:'api_key' }), stale, missing, imported]);
   const s = h.run('apiServiceSummary(fixture)');
   assert.equal(s.ready, 0); assert.equal(s.unknown, 4);
-  assert.match(h.run('codexAPIOverviewHTML()'), /上游 API/);
+  assert.match(h.run('codexAPIOverviewHTML()'), /4 个未检查/);
 });
 test('quota ranges stay within the exact raw plan and matching window instead of summing percentages', () => {
   const h = harness(), a = member('a'), b = member('b'), c = member('c');
   a.usage.rateLimit.primary.remainingPercent = 20;
   b.usage.rateLimit.primary.remainingPercent = 70;
   c.usage.plan.raw = 'prolite'; c.usage.rateLimit.primary.remainingPercent = 99;
-  const html = h.render([a,b,c]);
+  h.render([a,b,c]);
+  const html = h.run('apiServicePlanGroupsHTML(apiServiceSummary(fixture))');
   assert.equal(h.run('apiServiceSummary(fixture).groups.length'), 2);
   assert.match(html, /20%–70%/); assert.match(html, /Pro · prolite/);
   assert.doesNotMatch(html, /90%|189%|\$\d/);
@@ -74,7 +76,7 @@ test('different durations and missing windows are not silently combined', () => 
   h.render([a,b]);
   const g = h.run('apiServiceSummary(fixture).groups[0]');
   assert.equal(g.windows.size, 3);
-  assert.match(h.run('codexAPIOverviewHTML()'), /1\/2 个账号有当前数据/);
+  assert.match(h.run('apiServicePlanGroupsHTML(apiServiceSummary(fixture))'), /1\/2 个账号有当前数据/);
 });
 test('null, strings, non-finite and out-of-range quota data stay unknown', () => {
   const h = harness();
@@ -86,7 +88,7 @@ test('null, strings, non-finite and out-of-range quota data stay unknown', () =>
 test('stale or failed status reads do not display cached green availability or live ranges', () => {
   const h = harness(); h.render([member('a')]); h.run('CODEX_API_OVERVIEW.error=true');
   const html = h.run('codexAPIOverviewHTML()');
-  assert.match(html, /状态待刷新/); assert.match(html, /<b>—<\/b><span>可用账号/);
+  assert.match(html, /状态待刷新/); assert.match(html, /1 个未检查/);
   assert.doesNotMatch(html, /60%|80%/);
   assert.equal(h.run('apiServiceSummary(fixture).unknown'), 1);
 });
@@ -94,7 +96,7 @@ test('expiry updates only local display and stops scheduling after cache expires
   const h = harness(); h.render([member('a')]); h.run('renderCodexAPIOverview()');
   assert.equal(h.timer.delay, 60001);
   const update = h.timer.fn; h.setTime(h.now + 60001); update();
-  assert.equal(h.timer, null); assert.match(h.card.outerHTML, /0<\/b><span>可用账号/);
+  assert.equal(h.timer, null); assert.match(h.card.outerHTML, /0 个已验证 · 1 个未检查/);
   assert.equal(h.calls.length, 0);
 });
 test('leaving accounts route prevents expiry timer from touching another page', () => {
@@ -106,16 +108,18 @@ test('leaving accounts route prevents expiry timer from touching another page', 
 test('malicious labels are escaped and raw tiers are not mapped to unproven prices', () => {
   const h = harness(), a = member('a', { name:'<img src=x onerror=alert(1)>' });
   a.usage.plan.raw = '<script>pro500</script>';
-  const html = h.render([a]);
+  h.render([a]);
+  const html = h.run('apiServicePlanGroupsHTML(apiServiceSummary(fixture))');
   assert.doesNotMatch(html, /<img|<script>|\$500/);
   assert.match(html, /&lt;img/); assert.match(html, /&lt;script&gt;/);
 });
-test('missing summary is visibly unknown and main card has no endpoint or manual-key action', () => {
+test('missing summary is visibly unknown and compact card has an endpoint but no manual-key action', () => {
   const h = harness();
   h.context.fixture = { running:true, baseUrl:'http://127.0.0.1:9999/codex-api/v1', clients:[{ id:'x', accountId:'a' }], statistics:[] };
   const html = h.run('CODEX_API_OVERVIEW.status=fixture;codexAPIOverviewHTML()');
-  assert.match(html, /账号状态待检查/); assert.match(html, /data-act="codexAPI"/);
-  assert.doesNotMatch(html, /127\.0\.0\.1|copyVal|codexAPIRotate|apiCreatedKey/);
+  assert.match(html, /上游状态未检查/); assert.match(html, /data-act="codexAPI"/);
+  assert.match(html, /127\.0\.0\.1/);
+  assert.doesNotMatch(html, /copyVal|codexAPIRotate|apiCreatedKey/);
   assert.equal(h.run('apiServiceSummary(fixture)'), null);
 });
 test('HTTP counts remain request statistics and unknown members stay visible separately', () => {
@@ -124,7 +128,7 @@ test('HTTP counts remain request statistics and unknown members stay visible sep
   const s = h.run('apiServiceSummary(fixture)');
   assert.deepEqual(plain({ ready:s.ready, unavailable:s.unavailable, unknown:s.unknown }), { ready:1, unavailable:1, unknown:1 });
   const html = h.run('codexAPIOverviewHTML()');
-  assert.match(html, /1 未验证/); assert.match(html, /1 暂不可用/);
+  assert.match(html, /1 个未检查/); assert.match(html, /1 个暂不可用/);
 });
 
 test('the local API aggregate card glows only for confirmed running service state', () => {

@@ -195,7 +195,7 @@ test('read-only web-session plan badge refreshes usage without redeeming or atta
 test('explicit advanced creation exposes its one-time key even if every subsequent GET fails', async () => {
   let created = false;
   const h=harness(async path => {
-    if(path.endsWith('/clients')) { created = true; return {key:'synthetic-created-key'}; }
+    if(path.endsWith('/clients')) { created = true; return {id:'synthetic-client',key:'synthetic-created-key'}; }
     if (!created && path === '/api/local/codex-api') return { clients: [] };
     if (!created && path === '/api/local/accounts') return { accounts: [{ id: 'account' }] };
     throw Error('list unavailable');
@@ -788,8 +788,8 @@ test('healthy account footer is minimal while actionable recovery remains visibl
     return h.run('officialAccountCard(compactAccount,[],()=>"")').match(/<div class="official-card-actions">(.*?)<\/div>/s)[1];
   };
   const ready = render('ready');
-  for(const action of ['officialRename','officialUsageRefresh','officialDelete']) assert.match(ready,new RegExp(`data-act="${action}"`));
-  assert.equal((ready.match(/<button/g)||[]).length,3);
+  for(const action of ['accountTest','officialRename','officialUsageRefresh','officialDelete']) assert.match(ready,new RegExp(`data-act="${action}"`));
+  assert.equal((ready.match(/<button/g)||[]).length,4);
   assert.doesNotMatch(ready,/officialRelogin|officialRefresh"|officialPool|officialUsageReset|officialReimport/);
   for(const status of ['needs_login','refresh_failed']) assert.match(render(status),/officialRelogin/);
   assert.match(render('expired'),/officialRefresh/);

@@ -7,11 +7,11 @@ const deferred=()=>{let resolve,reject;const promise=new Promise((yes,no)=>{reso
 async function settle(){for(let i=0;i<12;i++)await Promise.resolve()}
 function harness(handler){
  const nodes=new Map(),requests=[],listeners={};let observer;
- const context=vm.createContext({OFFICIAL_PANEL:{epoch:1},ACTIONS:{},api:async(path,body)=>{requests.push({path,body});return handler(body)},busy:async(_b,fn)=>fn(),esc:String,icon:()=>'',
+ const context=vm.createContext({OFFICIAL_PANEL:{epoch:1},CODEX_API_OVERVIEW:{error:false,pending:false},apiClientPanel:null,ACTIONS:{},api:async(path,body)=>{requests.push({path,body});return handler(body)},busy:async(_b,fn)=>fn(),esc:String,icon:()=>'',
   $:(id)=>nodes.get(id)||null,document:{body:{},addEventListener:(name,fn)=>{listeners[name]=fn}},MutationObserver:class{constructor(fn){observer=fn}observe(){}}});
  const createPanel=()=>{
   const parent={isConnected:true,childElementCount:1,querySelector:(id)=>nodes.get(id)||null,insertAdjacentHTML:(_p,html)=>{
-   const settings={isConnected:true,insertAdjacentHTML(){nodes.set('#apiNetworkEffective',{isConnected:true,textContent:''})},remove(){nodes.delete('#apiNetworkSettings')}};nodes.set('#apiNetworkSettings',settings);
+   const settings={isConnected:true,querySelectorAll(){return ['apiNetworkPorts','apiNetworkHost','apiNetworkScope'].map(id=>({id,value:nodes.get('#'+id).value}));},insertAdjacentHTML(){nodes.set('#apiNetworkEffective',{isConnected:true,textContent:''})},remove(){nodes.delete('#apiNetworkSettings')}};nodes.set('#apiNetworkSettings',settings);
    for(const id of ['apiNetworkPorts','apiNetworkHost','apiNetworkScope','apiNetworkStatus'])nodes.set('#'+id,{isConnected:true,value:html.match(new RegExp('id="'+id+'"[^>]*value="([^"]*)"'))?.[1]||'',textContent:''});
    if(html.includes('id="apiNetworkScope"'))nodes.get('#apiNetworkScope').value=html.includes('value="lan" selected')?'lan':'loopback';
    nodes.set('#apiNetworkSettings textarea',{value:''});

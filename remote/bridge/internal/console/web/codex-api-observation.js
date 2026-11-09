@@ -35,7 +35,7 @@ async function refreshAPIServiceObservation() {
   await loadCodexAPIOverview();
   if (revision !== CODEX_API_OVERVIEW.revision || !currentAPIClientPanel(owner) || owner.mode !== 'service') return;
   if (!CODEX_API_OVERVIEW.error) updateAPIServiceReadOnly(CODEX_API_OVERVIEW.status, owner);
-  else if ($('#apiServiceUpdated')) $('#apiServiceUpdated').textContent = `状态读取失败 · ${apiServiceUpdatedLabel()}`;
+  else if ($('#apiServiceRuntime')) $('#apiServiceRuntime').innerHTML = apiServiceRuntimeHTML(CODEX_API_OVERVIEW.status || {});
   await Promise.allSettled([
     typeof refreshAPINetworkObservation === 'function' ? refreshAPINetworkObservation() : Promise.resolve(),
     typeof refreshAPIImageObservation === 'function' ? refreshAPIImageObservation() : Promise.resolve(),
@@ -94,6 +94,9 @@ function closeAPIRequests(restoreFocus = true) {
   apiRequestsPanel = null;
   owner.sequence++;
   owner.element.remove();
+  if (owner.previousPane?.isConnected) owner.previousPane.hidden = false;
+  if (owner.footer?.isConnected) owner.footer.hidden = owner.footerHidden;
+  if (restoreFocus && owner.standalone) { closeOfficialPanel(); return; }
   if (restoreFocus && owner.previousFocus?.isConnected) owner.previousFocus.focus?.();
 }
 async function openAPIRequests(button) {
@@ -101,12 +104,17 @@ async function openAPIRequests(button) {
   const clientId = button?.dataset?.id || '';
   const previousFocus = document.activeElement;
   const name = (apiClientPanel?.clients || CODEX_API_OVERVIEW.status?.clients || []).find(row => row.id === clientId)?.name;
-  document.body.insertAdjacentHTML('beforeend', `<div id="apiRequestsOverlay" class="modal-back api-requests-overlay"><section class="modal api-requests-modal" role="dialog" aria-modal="true" aria-labelledby="apiRequestsTitle" data-stop><div class="modal-head"><h3 id="apiRequestsTitle">${esc(name ? name + ' · 最近请求' : '本地 API · 最近请求')}</h3><button class="icon-btn" data-act="codexAPIRequestsClose" title="关闭请求记录" aria-label="关闭请求记录">${icon('close')}</button></div><div class="modal-body"><div class="row"><span id="apiRequestsStatus" class="muted small" role="status"></span><span class="spacer"></span><button id="apiRequestsRefresh" class="icon-btn" data-act="codexAPIRequestsRefresh" title="刷新请求记录" aria-label="刷新请求记录">${icon('refresh')}</button></div><p class="muted small">显示本机已记录的实际账号与请求结果，不包含提示词、正文或密钥。</p><div id="apiRequestsList"></div></div></section></div>`);
-  const owner = apiRequestsPanel = { element: $('#apiRequestsOverlay'), clientId, previousFocus, sequence: 0, pending: false };
+  const standalone = !$('#officialPanel');
+  if (standalone) { officialPanel('本地 API · 最近请求', ''); apiManagementShell(); }
+  const previousPane = $('#apiServiceContent') || $('#apiClientEditor');
+  const footer = $('#officialPanelFooter'), footerHidden = footer?.hidden;
+  if (previousPane) previousPane.hidden = true;
+  if (footer) footer.hidden = true;
+  $('#officialPanel').insertAdjacentHTML('beforeend', `<section id="apiRequestsOverlay" class="api-requests-pane" aria-labelledby="apiRequestsTitle"><div class="api-requests-header"><button class="btn sm" data-act="codexAPIRequestsClose">${standalone ? '关闭记录' : '返回配置'}</button><h4 id="apiRequestsTitle">${esc(name ? name + ' · 最近请求' : '最近请求')}</h4><span class="spacer"></span><button id="apiRequestsRefresh" class="btn sm" data-act="codexAPIRequestsRefresh">刷新请求记录</button></div><p id="apiRequestsStatus" class="muted small" role="status"></p><p class="muted small">显示本机已记录的实际账号与请求结果，不包含提示词、正文或密钥。</p><div id="apiRequestsList"></div></section>`);
+  const owner = apiRequestsPanel = { element: $('#apiRequestsOverlay'), clientId, previousFocus, previousPane, footer, footerHidden, standalone, sequence: 0, pending: false };
   owner.element.querySelector?.('[data-act="codexAPIRequestsClose"]')?.focus?.();
   await loadAPIRequests(owner);
 }
-document.addEventListener('click', event => { if (apiRequestsCurrent(apiRequestsPanel) && event.target === apiRequestsPanel.element) closeAPIRequests(); });
 document.addEventListener('keydown', event => {
   if (!apiRequestsCurrent(apiRequestsPanel)) return;
   if (event.key === 'Escape') { event.preventDefault(); event.stopImmediatePropagation(); closeAPIRequests(); }

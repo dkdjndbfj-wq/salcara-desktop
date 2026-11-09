@@ -40,6 +40,7 @@ function harness(handler) {
       this.classList = { contains: (name) => (attrs.class || '').split(/\s+/).includes(name) };
     }
     get id() { return this.attrs.id || ''; }
+    get selectedOptions() { return this.children.filter(row => row.tagName === 'OPTION' && 'selected' in row.attrs); }
     get childElementCount() { return this.children.length; }
     get isConnected() { for (let node = this; node; node = node.parent) if (node === body) return true; return false; }
     get innerHTML() { return this._html; }
@@ -54,8 +55,14 @@ function harness(handler) {
       }
       return null;
     }
+    querySelectorAll(selector) {
+      const selectors = selector.split(',');
+      return this.children.flatMap(child => [...(selectors.some(part => matches(child, part)) ? [child] : []), ...child.querySelectorAll(selector)]);
+    }
     closest(selector) { for (let node = this; node; node = node.parent) if (matches(node, selector)) return node; return null; }
     getAttribute(name) { return this.attrs[name] ?? null; }
+    setAttribute(name, value) { this.attrs[name] = value; if (name === 'disabled') this.disabled = true; }
+    removeAttribute(name) { delete this.attrs[name]; if (name === 'disabled') this.disabled = false; }
     insertAdjacentHTML(position, html) {
       if (position === 'beforeend' || position === 'afterbegin') {
         const temporary = new Element('fragment'); parse(html, temporary);
@@ -254,6 +261,7 @@ test('invalid namespace is rejected before creating or saving a client', async (
     throw new Error('unexpected synthetic endpoint');
   });
   for (const id of ['', 'client-fixture']) {
+    await h.close();
     await h.context.ACTIONS.codexAPIEdit({ dataset: { id } }); await settle();
     if (!id) h.$('#apiClientAccount').value = 'account-fixture';
     h.$('#apiClientName').value = 'synthetic';

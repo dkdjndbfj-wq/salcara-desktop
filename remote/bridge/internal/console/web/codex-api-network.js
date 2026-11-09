@@ -4,6 +4,7 @@
   let writing = false, observationSequence = 0;
   const current = (epoch, parent) => epoch === OFFICIAL_PANEL.epoch && parent?.isConnected && $('#apiServiceAdvanced') === parent;
   function showRunning(state) {
+    if (CODEX_API_OVERVIEW.error || CODEX_API_OVERVIEW.pending) return;
     const badge = $('#apiServiceRuntime .account-state'), button = $('[data-act="codexAPIEnabled"]');
     if (typeof state.running !== 'boolean' || typeof state.enabled !== 'boolean') return;
     if (badge) { badge.textContent = state.running ? '运行中' : state.requiresStart ? '待启动' : '已关闭'; badge.className = 'account-state ' + (state.running ? 'ok' : 'muted'); }
@@ -41,6 +42,7 @@
       $('#apiNetworkSettings').insertAdjacentHTML('afterbegin', `<div class="row"><b>访问与端口</b><span class="spacer"></span><button class="icon-btn" data-act="codexAPINetworkRefresh" title="刷新监听状态" aria-label="刷新监听状态">${icon('refresh')}</button></div><div id="apiNetworkEffective" class="muted small" role="status"></div>`);
       $('#apiNetworkStatus').textContent = '';
       showNetwork(state);
+      if (typeof rememberAPISettings === 'function') rememberAPISettings('apiNetworkSettings');
     } catch (_) {
       if (current(epoch, parent)) parent.insertAdjacentHTML('beforeend', '<div id="apiNetworkSettings" class="field"><span class="muted small">网络设置读取失败</span><button class="btn" data-act="codexAPINetworkRetry">重试</button></div>');
     } finally { if (loadingParent === parent) loadingParent = null; }
@@ -59,11 +61,14 @@
     if (writing) return;
     const epoch = OFFICIAL_PANEL.epoch, parent = $('#apiServiceAdvanced'), status = $('#apiNetworkStatus');
     const body = readNetwork();
+    const submitted = Object.fromEntries(Array.from($('#apiNetworkSettings').querySelectorAll('input,select'), node => [node.id, node.value]));
     writing = true; observationSequence++;
+    const owner = apiClientPanel; if (owner) owner.settingsWriting = (owner.settingsWriting || 0) + 1;
     try {
       const saved = await busy(button, () => api('/api/local/codex-api/network', body));
       if (!current(epoch, parent) || $('#apiNetworkStatus') !== status) return;
       revision = saved.revision;
+      if (typeof rememberAPISettings === 'function') rememberAPISettings('apiNetworkSettings', submitted);
       showNetwork(saved);
       const draft = readNetwork();
       status.textContent = JSON.stringify({ ...draft, revision: '' }) === JSON.stringify({ ...body, revision: '' }) ? `已保存 · ${saved.listeningPorts} 个专用端口正在监听` : '设置已更改，尚未保存';
@@ -75,7 +80,7 @@
         const latest = await api('/api/local/codex-api/network');
         if (current(epoch, parent) && $('#apiNetworkStatus') === status) { revision = latest.revision; showNetwork(latest); }
       } catch (_) { if (current(epoch, parent) && $('#apiNetworkStatus') === status) status.textContent = error.message + '；请重新打开面板再试'; }
-    } finally { writing = false; }
+    } finally { writing = false; if (owner) owner.settingsWriting--; }
   };
   document.addEventListener('input', (event) => { if (['apiNetworkPorts', 'apiNetworkHost'].includes(event.target?.id) && $('#apiNetworkStatus')) $('#apiNetworkStatus').textContent = ''; });
   document.addEventListener('change', (event) => { if (event.target?.id === 'apiNetworkScope' && $('#apiNetworkStatus')) $('#apiNetworkStatus').textContent = ''; });

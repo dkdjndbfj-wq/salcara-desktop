@@ -32,6 +32,7 @@
       if (epoch !== OFFICIAL_PANEL.epoch || !parent.isConnected || $('#apiServiceAdvanced') !== parent || parent.querySelector('#apiImageSettings')) return;
       parent.insertAdjacentHTML('beforeend', `<section id="apiImageSettings" class="api-settings-section"><div class="row"><b>图片服务</b><span class="spacer"></span><button class="icon-btn" data-act="codexAPIImagesRefresh" title="核对图片生效状态" aria-label="核对图片生效状态">${icon('refresh')}</button></div><div id="apiImageEffective" class="api-effective-state" role="status"></div><div class="form-grid"><div class="field"><label for="apiImageMode">图片服务</label><select id="apiImageMode" class="input"><option value="disabled" ${state.mode === 'disabled' ? 'selected' : ''}>关闭</option><option value="enabled" ${state.mode === 'enabled' ? 'selected' : ''}>文字和图片</option><option value="images_only" ${state.mode === 'images_only' ? 'selected' : ''}>仅图片</option></select></div><div class="field"><label for="apiImageConcurrency">每个上游凭据的并发上限</label><input id="apiImageConcurrency" class="input" type="number" min="1" max="16" value="${Number.isInteger(state.maxConcurrentRequests) ? state.maxConcurrentRequests : 1}"></div></div><p class="muted small">生成和编辑使用独立队列；等待中的任务可取消。图片额度由上游决定。</p><button class="btn sm" data-act="codexAPIImagesSave">保存图片设置</button><div id="apiImageStatus" class="muted small" role="status"></div></section>`);
       showEffective(state);
+      if (typeof rememberAPISettings === 'function') rememberAPISettings('apiImageSettings');
     } catch (error) {
       if (epoch === OFFICIAL_PANEL.epoch && parent.isConnected && $('#apiServiceAdvanced') === parent && !parent.querySelector('#apiImageSettings')) parent.insertAdjacentHTML('beforeend', '<div id="apiImageSettings" class="field"><div class="muted small">图片设置读取失败。</div><button class="btn" data-act="codexAPIImagesRetry">重试</button></div>');
     } finally { if (loadingEpoch === epoch) loadingEpoch = -1; }
@@ -49,10 +50,12 @@
     if (status) status.textContent = '';
     const owns = () => current(epoch, parent) && status?.isConnected && $('#apiImageStatus') === status && $('#apiImageMode') === modeInput && $('#apiImageConcurrency') === concurrencyInput;
     writing = true; observationSequence++;
+    const owner = apiClientPanel; if (owner) owner.settingsWriting = (owner.settingsWriting || 0) + 1;
     try {
       const state = await busy(button, () => api('/api/local/codex-api/images', { mode, maxConcurrentRequests }));
       if (!owns()) return;
       showEffective(state);
+      if (typeof rememberAPISettings === 'function') rememberAPISettings('apiImageSettings', { apiImageMode: mode, apiImageConcurrency: String(maxConcurrentRequests) });
       status.textContent = modeInput.value === mode && Number(concurrencyInput.value) === maxConcurrentRequests ? '图片设置已保存' : '设置已更改，尚未保存';
     } catch (error) {
       if (!owns()) return;
@@ -65,7 +68,7 @@
       } catch (_) {
         if (owns()) status.textContent = `${error.message}；当前生效状态未能确认，请点刷新核对。表单内容已保留。`;
       }
-    } finally { writing = false; }
+    } finally { writing = false; if (owner) owner.settingsWriting--; }
   };
   function clearSavedImageStatus(event) {
     if (['apiImageMode', 'apiImageConcurrency'].includes(event.target?.id) && $('#apiImageStatus')) $('#apiImageStatus').textContent = '';

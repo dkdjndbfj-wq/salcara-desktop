@@ -4,6 +4,7 @@ import { readFile } from 'node:fs/promises';
 import vm from 'node:vm';
 
 const sources = await Promise.all(['codex-accounts.js', 'codex-api-images.js', 'codex-api-network.js', 'codex-api-readiness.js', 'codex-api-observation.js'].map((name) => readFile(new URL('../internal/console/web/' + name, import.meta.url), 'utf8')));
+const shellSource = await readFile(new URL('../internal/console/web/shell.js', import.meta.url), 'utf8');
 function deferred() {
   let resolve, reject;
   const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
@@ -30,20 +31,32 @@ function harness(handler) {
       queueMicrotask(() => { observer.queued = false; observer.callback(); });
     }
   };
+  class TextNode {
+    constructor(value) { this.nodeType = 3; this.nodeName = '#text'; this.nodeValue = value; this.parent = null; }
+    get textContent() { return this.nodeValue; }
+    remove() { const parent = this.parent; if (parent) { parent._nodes.splice(parent._nodes.indexOf(this), 1); this.parent = null; changed(parent); } }
+    replaceWith(node) { const parent = this.parent; if (parent) { parent.insertBefore(node, this); this.remove(); } }
+  }
   class Element {
     constructor(tag, attrs = {}) {
-      this.tagName = tag.toUpperCase(); this.attrs = attrs; this.parent = null; this.children = [];
-      this.value = attrs.value || ''; this.textContent = ''; this._html = ''; this.disabled = 'disabled' in attrs; this.hidden = 'hidden' in attrs;
+      this.tagName = tag.toUpperCase(); this.attrs = attrs; this.parent = null; this._nodes = [];
+      this.value = attrs.value || ''; this._html = ''; this.disabled = 'disabled' in attrs; this.hidden = 'hidden' in attrs;
       this.dataset = {};
       for (const [key, value] of Object.entries(attrs)) if (key.startsWith('data-')) this.dataset[key.slice(5).replace(/-([a-z])/g, (_, char) => char.toUpperCase())] = value;
       this.classList = { contains: (name) => (attrs.class || '').split(/\s+/).includes(name) };
     }
     get selectedOptions() { return this.children.filter((row) => row.tagName === 'OPTION' && 'selected' in row.attrs); }
+    get options() { return this.children.filter(row => row.tagName === 'OPTION'); }
+    get selected() { return 'selected' in this.attrs; }
+    set selected(value) { if (value) this.attrs.selected = ''; else delete this.attrs.selected; }
     get nodeType() { return 1; }
     get nodeName() { return this.tagName; }
-    get childNodes() { return this.children; }
+    get children() { return this._nodes.filter(node => node.nodeType === 1); }
+    get childNodes() { return this._nodes; }
+    get textContent() { return this._nodes.map(node => node.textContent).join(''); }
+    set textContent(value) { for (const node of this._nodes) node.parent = null; this._nodes = []; if (value) { const node = new TextNode(value); node.parent = this; this._nodes.push(node); } }
     get firstElementChild() { return this.children[0] || null; }
-    get lastChild() { return this.children.at(-1) || null; }
+    get lastChild() { return this._nodes.at(-1) || null; }
     get content() { return this; }
     get attributes() { return Object.entries(this.attrs).map(([name, value]) => ({ name, value })); }
     get id() { return this.attrs.id || ''; }
@@ -51,8 +64,8 @@ function harness(handler) {
     get isConnected() { for (let node = this; node; node = node.parent) if (node === body) return true; return false; }
     get innerHTML() { return this._html; }
     set innerHTML(html) {
-      for (const node of this.children) node.parent = null;
-      this.children = []; this._html = html; parse(html, this); changed(this);
+      for (const node of this._nodes) node.parent = null;
+      this._nodes = []; this._html = html; parse(html, this); changed(this);
     }
     querySelector(selector) {
       if (selector.includes(' ')) { const [head, ...tail] = selector.split(' '); return this.querySelector(head)?.querySelector(tail.join(' ')) || null; }
@@ -63,6 +76,7 @@ function harness(handler) {
       return null;
     }
     querySelectorAll(selector) {
+      if (selector.includes(',')) return [...new Set(selector.split(',').flatMap(part => this.querySelectorAll(part)))];
       const matchesAll = [];
       for (const child of this.children) { if (matches(child, selector)) matchesAll.push(child); matchesAll.push(...child.querySelectorAll(selector)); }
       return matchesAll;
@@ -70,30 +84,31 @@ function harness(handler) {
     closest(selector) { for (let node = this; node; node = node.parent) if (matches(node, selector)) return node; return null; }
     getAttribute(name) { return this.attrs[name] ?? null; }
     hasAttribute(name) { return name in this.attrs; }
-    setAttribute(name, value) { this.attrs[name] = value; }
-    removeAttribute(name) { delete this.attrs[name]; }
+    setAttribute(name, value) { this.attrs[name] = value; if (name.startsWith('data-')) this.dataset[name.slice(5).replace(/-([a-z])/g, (_, char) => char.toUpperCase())] = value; if (name === 'disabled') this.disabled = true; }
+    removeAttribute(name) { delete this.attrs[name]; if (name === 'disabled') this.disabled = false; }
     insertBefore(node, reference) {
       if (node === reference) return node;
       node.remove();
-      const index = reference ? this.children.indexOf(reference) : this.children.length;
-      this.children.splice(index, 0, node); node.parent = this; changed(this); return node;
+      const index = reference ? this._nodes.indexOf(reference) : this._nodes.length;
+      this._nodes.splice(index, 0, node); node.parent = this; changed(this); return node;
     }
     appendChild(node) { return this.insertBefore(node, null); }
     replaceWith(node) { const parent = this.parent; if (parent) { parent.insertBefore(node, this); this.remove(); } }
     insertAdjacentHTML(position, html) {
       if (position === 'beforeend' || position === 'afterbegin') {
         const temporary = new Element('fragment'); parse(html, temporary);
-        for (const node of temporary.children) node.parent = this;
-        this.children = position === 'beforeend' ? this.children.concat(temporary.children) : temporary.children.concat(this.children);
+        for (const node of temporary._nodes) node.parent = this;
+        this._nodes = position === 'beforeend' ? this._nodes.concat(temporary._nodes) : temporary._nodes.concat(this._nodes);
         this._html = position === 'beforeend' ? this._html + html : html + this._html;
         changed(this); return;
       }
       assert.equal(position, 'beforebegin');
       const temporary = new Element('fragment'); parse(html, temporary);
-      for (const node of temporary.children) node.parent = this.parent;
-      this.parent.children.splice(this.parent.children.indexOf(this), 0, ...temporary.children); changed(this.parent);
+      for (const node of temporary._nodes) node.parent = this.parent;
+      this.parent._nodes.splice(this.parent._nodes.indexOf(this), 0, ...temporary._nodes); changed(this.parent);
     }
-    remove() { const parent = this.parent; if (!parent) return; parent.children.splice(parent.children.indexOf(this), 1); this.parent = null; changed(parent); }
+    remove() { const parent = this.parent; if (!parent) return; parent._nodes.splice(parent._nodes.indexOf(this), 1); this.parent = null; changed(parent); }
+    cloneNode() { return new Element(this.tagName, { ...this.attrs }); }
     click() {}
     focus() { context.document.activeElement = this; }
     contains(target) { for (let node = target; node; node = node.parent) if (node === this) return true; return false; }
@@ -110,7 +125,7 @@ function harness(handler) {
     for (const token of tokens) {
       if (token.startsWith('</')) { stack.pop(); continue; }
       if (!token.startsWith('<')) {
-        const current = stack.at(-1); current.textContent += decode(token);
+        const current = stack.at(-1), node = new TextNode(decode(token)); node.parent = current; current._nodes.push(node);
         if (current.tagName === 'TEXTAREA') current.value += decode(token);
         continue;
       }
@@ -118,7 +133,7 @@ function harness(handler) {
       const attrs = {};
       const attributes = token.slice(tag.length + 1, -1);
       for (const match of attributes.matchAll(/([\w-]+)(?:="([^"]*)")?/g)) attrs[match[1]] = decode(match[2] ?? '');
-      const node = new Element(tag, attrs), owner = stack.at(-1); node.parent = owner; owner.children.push(node);
+      const node = new Element(tag, attrs), owner = stack.at(-1); node.parent = owner; owner._nodes.push(node);
       if (!['input', 'br', 'hr', 'img', 'meta', 'link'].includes(tag)) stack.push(node);
     }
     const finalize = (node) => {
@@ -128,7 +143,7 @@ function harness(handler) {
     finalize(parent);
   }
   body = new Element('body');
-  const modalRoot = new Element('div', { id: 'modalRoot' }); modalRoot.parent = body; body.children.push(modalRoot);
+  const modalRoot = new Element('div', { id: 'modalRoot' }); modalRoot.parent = body; body._nodes.push(modalRoot);
   const context = vm.createContext({
     api: async (path, payload) => {
       requests.push({ path, payload });
@@ -184,7 +199,125 @@ const clientWrites = (h) => h.requests.filter((row) => row.path.startsWith('/api
 async function open(h) { await h.context.ACTIONS.codexAPI(); await settle(); }
 async function edit(h, id = 'client-one') { await h.context.ACTIONS.codexAPIEdit({ dataset: { id } }); await settle(); }
 
-test('request overlay retains editor drafts, leaves summaries to native toggling, and closes independently', async () => {
+function installNavigation(h) {
+  const rendered = [], closes = [];
+  h.$('#modalRoot').insertAdjacentHTML('beforebegin', '<div id="view"></div><div id="headActions"></div><div id="pageIco"></div><div id="pageTitle"></div><div id="pageSub"></div>');
+  Object.assign(h.context, {
+    route() {}, location: { hash: '#accounts', pathname: '/', search: '' },
+    history: { replaceState(_state, _title, url) { h.context.location.hash = url.includes('#') ? '#' + url.split('#')[1] : ''; } },
+    $$: () => [], ROUTE_ICON: {}, PAGES: { accounts: {}, settings: {}, usage: {} },
+    RENDER: Object.fromEntries(['accounts', 'settings', 'usage'].map(name => [name, async () => rendered.push(name)])),
+    openPanel() {}, closePanel() {}, pageSkeleton: () => '',
+    closeLocalEditor: options => { closes.push(options); return h.context.closeAPIManagement(); },
+  });
+  h.context.S.route = 'accounts';
+  const start = shellSource.indexOf('route = async function () {');
+  const end = shellSource.indexOf('/* ---------- loading:', start);
+  h.run(shellSource.slice(start, end));
+  return { rendered, closes };
+}
+
+test('back navigation protects client and settings drafts, cancel restores the current URL', async () => {
+  for (const kind of ['client', 'settings']) {
+    const h = harness(fixture([client]));
+    if (kind === 'client') { await edit(h); h.$('#apiClientName').value = 'unsaved client'; }
+    else { await open(h); h.$('#apiNetworkHost').value = '192.0.2.40'; }
+    const nav = installNavigation(h), panel = h.$('#officialPanel');
+    h.context.location.hash = '#settings';
+    const navigation = h.context.route(); await settle();
+    assert.ok(h.$('#apiUnsaved')); assert.equal(h.$('#officialPanel'), panel);
+    await h.action('apiManagementStay'); await navigation;
+    assert.equal(h.context.location.hash, '#accounts'); assert.deepEqual(nav.rendered, []);
+    assert.equal(h.run('apiManagementHasDraft()'), true);
+    assert.equal(nav.closes[0].returnToService, false);
+  }
+});
+
+test('multiple navigation requests share one discard choice and only the latest destination renders', async () => {
+  const h = harness(fixture([client])); await edit(h); h.$('#apiClientName').value = 'unsaved';
+  const nav = installNavigation(h);
+  h.context.location.hash = '#settings'; const first = h.context.route(); await settle();
+  const notice = h.$('#apiUnsaved');
+  h.context.location.hash = '#usage'; const latest = h.context.route(); await settle();
+  assert.equal(h.$('#apiUnsaved'), notice);
+  await h.action('apiManagementDiscard'); await Promise.all([first, latest]);
+  assert.deepEqual(nav.rendered, ['usage']); assert.equal(h.context.S.route, 'usage');
+  assert.equal(h.context.location.hash, '#usage'); assert.equal(h.$('#officialPanel'), null);
+});
+
+test('service tabs retain settings drafts and closing offers inline stay or discard', async () => {
+  const h = harness(fixture([client])); await open(h);
+  h.run("selectAPIServiceView('settings')");
+  const field = h.$('#apiNetworkHost'); field.value = '192.0.2.22';
+  h.run("selectAPIServiceView('clients')");
+  assert.equal(h.$('#apiService-settings').hidden, true);
+  h.run("selectAPIServiceView('settings')");
+  assert.equal(h.$('#apiNetworkHost'), field);
+  assert.equal(field.value, '192.0.2.22');
+  const staying = h.run('closeAPIManagement()'); await settle();
+  assert.ok(h.$('#apiUnsaved')); assert.ok(h.$('#officialPanel'));
+  await h.action('apiManagementStay'); assert.equal(await staying, false);
+  assert.equal(h.run('apiManagementHasDraft()'), true);
+  const leaving = h.run('closeAPIManagement()'); await settle();
+  await h.action('apiManagementDiscard'); assert.equal(await leaving, true);
+  assert.equal(h.$('#officialPanel'), null);
+  assert.equal(clientWrites(h).length, 0);
+});
+
+test('rejected client saves keep the draft and allow a corrected retry without recreating a client', async () => {
+  let writes = 0;
+  const h = harness(fixture([client], (path, payload) => {
+    if (path === '/api/local/codex-api/clients' && payload) {
+      if (++writes === 1) throw Object.assign(new Error('invalid name'), { status:400 });
+      return { ok:true, id:client.id };
+    }
+  }));
+  await edit(h); const field = h.$('#apiClientName'); field.value = 'edited client';
+  await h.action('codexAPISave');
+  assert.equal(h.$('#apiClientName'), field); assert.equal(field.value, 'edited client');
+  assert.match(h.$('#officialError').textContent, /输入已保留/);
+  assert.equal(h.$('[data-act="codexAPISave"]').disabled, false);
+  await h.action('codexAPISave');
+  assert.equal(writes, 2);
+  for (const write of clientWrites(h)) assert.equal(write.payload.id, client.id);
+  assert.ok(h.$('#apiService-clients')); assert.equal(h.$('#apiService-clients').hidden, false);
+});
+
+test('lost client creation response preserves the draft but blocks blind resubmission', async () => {
+  const h = harness(fixture([], (path, payload) => path === '/api/local/codex-api/clients' && payload ? Promise.reject(new Error('response lost')) : undefined));
+  await h.context.ACTIONS.codexAPINew();
+  h.$('#apiClientAccount').value = 'api-one'; h.$('#apiClientName').value = 'new client';
+  await h.action('codexAPISave');
+  assert.equal(h.$('#apiClientName').value, 'new client');
+  assert.equal(h.$('[data-act="codexAPISave"]').disabled, true);
+  await assert.rejects(h.action('codexAPISave'), /待确认/);
+  assert.equal(clientWrites(h).length, 1);
+});
+
+test('pool checkboxes serialize explicit members in saved order and clear obsolete strategy', async () => {
+  const h = harness(fixture([client])); await edit(h);
+  const box = h.$('#apiClientPools').querySelector('input');
+  // Existing text pool is api-two; adding api-one appends in the visible order.
+  const choice = { dataset:{apiPool:'apiClientTextAccounts'}, value:'api-one', checked:true };
+  await h.emit('change', choice);
+  assert.deepEqual(plain(h.run('readAPIClientBinding().accountIds')), ['api-two','api-one']);
+  choice.checked=false; await h.emit('change', choice); choice.value='api-two'; await h.emit('change', choice);
+  const binding = plain(h.run('readAPIClientBinding()'));
+  assert.deepEqual(binding.accountIds, []); assert.equal(binding.poolStrategy, ''); assert.equal(binding.poolAccountId, '');
+  assert.ok(box);
+});
+
+test('a failed local state read cannot keep a green runtime or enabled start button', async () => {
+  let fail=false;
+  const h = harness(fixture([client], path => path === '/api/local/codex-api' && fail ? Promise.reject(new Error('local offline')) : undefined));
+  await open(h); fail=true;
+  await h.context.ACTIONS.codexAPIServiceRefresh({dataset:{}});
+  assert.equal(h.$('#apiServiceRuntime .account-state').textContent, '状态待刷新');
+  assert.equal(h.$('[data-act="codexAPIEnabled"]').disabled, true);
+  assert.ok(h.$('#apiService-clients'));
+});
+
+test('request subview retains editor drafts in a single dialog and closes independently', async () => {
   const records = { checkedAt: Date.now(), accountNames: { anon: '实际账号' }, clientNames: { named: '客户端' }, records: [{ id: 'one', accountId: 'anon', clientId: 'named', model: 'model-a', state: 'completed', routingReason: 'failover', firstByteMs: 0, attempts: [{ accountId: 'anon', state: 'failed', reason: 'rate_limited', httpStatus: 429 }] }] };
   const h = harness(fixture([client], path => path.startsWith('/api/local/codex-api/requests?') ? records : undefined));
   await edit(h);
@@ -194,7 +327,11 @@ test('request overlay retains editor drafts, leaves summaries to native toggling
   assert.equal(input.value, 'unsaved client name');
   const summary = h.$('#apiRequestsList').querySelector('summary');
   assert.ok(summary);
-  assert.equal(summary.closest('[data-act]'), null, 'global action delegation must not prevent native details toggling');
+  assert.equal(summary.closest('[data-act]').dataset.act, 'closeModal', 'only the normal modal backdrop is above the request details');
+  const app = await readFile(new URL('../internal/console/web/app.js', import.meta.url), 'utf8');
+  assert.match(app, /el\.dataset\.act === 'closeModal'.*e\.target !== el\) return/);
+  assert.equal(h.$('#apiClientEditor').hidden, true);
+  assert.equal(h.$('#apiRequestsOverlay').closest('[role="dialog"]'), h.$('#officialPanel').closest('[role="dialog"]'));
   assert.equal(h.$('#apiRequestsOverlay').getAttribute('data-act'), null);
   assert.match(h.$('#apiRequestsList').innerHTML, /实际账号|备用账号接替|上游限流|首个响应数据/);
   assert.doesNotMatch(h.$('#apiRequestsList').innerHTML, /failover|rate_limited/);
@@ -204,6 +341,7 @@ test('request overlay retains editor drafts, leaves summaries to native toggling
   assert.equal(h.$('#apiRequestsOverlay'), null);
   assert.equal(h.$('#officialPanel'), original);
   assert.equal(input.value, 'unsaved client name');
+  assert.equal(h.$('#apiClientEditor').hidden, false);
   assert.match(h.requests.find(row => row.path.includes('/requests?')).path, /clientId=client-one/);
 });
 
@@ -217,7 +355,7 @@ test('late request reads cannot replace a newer scope and unknown diagnostic fie
   assert.equal(h.$('#apiRequestsList').innerHTML, rendered);
   assert.match(rendered, /new-model|未记录/);
   assert.doesNotMatch(rendered, /untrusted_enum|another_enum|stale-model/);
-  await h.emit('click', h.$('#apiRequestsOverlay'));
+  await h.action('codexAPIRequestsClose');
   assert.equal(h.$('#apiRequestsOverlay'), null);
 });
 
@@ -237,6 +375,20 @@ test('visible observation updates only status mounts and stops after close or vi
   const before = reads; await h.tick(); assert.equal(reads, before);
   h.context.document.hidden = false; await h.emit('visibilitychange', {});
   h.context.closeOfficialPanel(); await h.tick(); assert.equal(reads, before);
+});
+
+test('automatic observation preserves open client actions and focused controls while publishing updated usage', async () => {
+  let reads = 0;
+  const h = harness(fixture([client], path => path === '/api/local/codex-api' ? { enabled: true, running: true, clients: [client], statistics: [{ clientId: client.id, inflight: ++reads }] } : undefined));
+  await open(h);
+  const button = h.$('[data-act="codexAPIRequests"]'), more = button.closest('details');
+  more.setAttribute('open', ''); button.focus();
+  const runtime = h.$('#apiServiceRuntime');
+  await h.tick();
+  assert.ok(reads >= 2); assert.equal(h.$('[data-act="codexAPIRequests"]'), button);
+  assert.equal(button.isConnected, true); assert.equal(h.context.document.activeElement, button);
+  assert.equal(more.hasAttribute('open'), true); assert.equal(h.$('#apiServiceRuntime'), runtime);
+  assert.match(h.$('#apiServiceClients').textContent, /2 在途/);
 });
 
 test('returning to a visible page while a status read is pending resumes observation', async () => {
@@ -265,7 +417,7 @@ test('client quick toggle posts only identity, intent and revision, preserving e
   assert.deepEqual(plain(h.run('apiClientPanel.clients[0].accountIds')), ['api-two']);
 });
 
-test('rebuilt client actions remain locked until network and image reconciliation finishes', async () => {
+test('client actions preserve their nodes and stay locked until network and image reconciliation finishes', async () => {
   const network = deferred(), images = deferred();
   let networkReads = 0, imageReads = 0, writes = 0, row = { ...client, disabled: false, revision: 'rev-0' };
   const h = harness(fixture([row], (path, payload) => {
@@ -283,7 +435,7 @@ test('rebuilt client actions remain locked until network and image reconciliatio
   const disabling = h.action('codexAPIClientEnabled'); await settle();
   assert.equal(h.run('apiClientPanel.clients[0].disabled'), true, 'new service state arrives before auxiliary reads finish');
   const rebuilt = h.$('[data-act="codexAPIClientEnabled"]');
-  assert.notEqual(rebuilt, oldButton);
+  assert.equal(rebuilt, oldButton);
   assert.equal(rebuilt.dataset.enabled, 'true');
   const modifying = ['codexAPIClientEnabled', 'codexAPIEdit', 'codexAPIRotate', 'codexAPIRevoke', 'codexAPINew'];
   for (const action of modifying) assert.equal(h.$(`[data-act="${action}"]`).disabled, true, `${action} must remain visibly locked`);
@@ -319,13 +471,13 @@ test('readiness renders every member and repairs the real credential without los
   assert.equal(h.$('[data-act="officialLogin"]').dataset.id, 'official-two');
 });
 
-test('opening and enabling never create a key; editors stay collapsed while diagnosis is directly accessible', async () => {
+test('opening and enabling never create a key; settings have a separate tab and diagnosis remains accessible', async () => {
   const h = harness(fixture()); await open(h);
   assert.equal(h.$('#apiClientName'), null);
   assert.equal(h.$('#apiClientModelPrefix'), null);
   assert.equal(h.$('#apiClientAccount').value, '');
-  const advanced = h.$('#apiServiceAdvanced'), details = advanced.closest('details');
-  assert.equal(details.getAttribute('open'), null);
+  const advanced = h.$('#apiServiceAdvanced');
+  assert.equal(advanced.closest('#apiService-settings').hidden, true);
   for (const selector of ['#apiNetworkSettings', '#apiImageSettings']) assert.ok(advanced.querySelector(selector), selector);
   assert.ok(h.$('[data-act="codexAPIReadiness"]'));
   assert.equal(h.$('#apiClientAccount').children.length, 3, 'only callable accounts plus the placeholder');
@@ -430,7 +582,7 @@ test('duplicate creation and other writes share one gate while POST is pending',
 test('atomic rotate posts only id and does not save an unexpanded or changed editor', async () => {
   const h = harness(fixture([client])); await edit(h);
   h.$('#apiClientName').value = 'unsaved'; h.$('#apiClientConcurrency').value = 'invalid';
-  await h.action('codexAPIRotate');
+  await h.context.ACTIONS.codexAPIRotate({ dataset: { id: client.id } });
   assert.equal(clientWrites(h)[0].path, '/api/local/codex-api/clients/rotate');
   assert.deepEqual(plain(clientWrites(h)[0].payload), { id: 'client-one' });
   assert.equal(h.$('#apiCreatedKey').value, 'synthetic-rotated-key');
@@ -491,7 +643,7 @@ test('network save refreshes the main service status while its form remains in a
   await h.action('codexAPINetworkSave');
   assert.equal(h.$('#apiServiceRuntime .account-state').textContent, '运行中');
   assert.equal(h.$('[data-act="codexAPIEnabled"]').dataset.enabled, 'false');
-  assert.equal(h.$('#apiNetworkSettings').closest('details').getAttribute('open'), null);
+  assert.equal(h.$('#apiNetworkSettings').closest('#apiService-settings').hidden, true);
 });
 
 const launchRevision = 'mla-v1-' + 'a'.repeat(64);

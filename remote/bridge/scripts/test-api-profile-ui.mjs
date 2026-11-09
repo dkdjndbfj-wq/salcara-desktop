@@ -16,6 +16,7 @@ function fixture() {
     $: selector => nodes.get(selector), icon: () => '', esc: value => String(value ?? '').replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('"', '&quot;'),
     officialPanel() { context.OFFICIAL_PANEL.epoch++; nodes.set('#apiProfileContent', { innerHTML: '' }); },
     loadCodexAPIOverview: async () => {},
+    apiManagementLeave: next => next(), apiManagementShell() {},
     api: async (url, body) => { calls.push({ url, body }); if (intercept) { const result = await intercept(url, body); if (result !== undefined) return result; }
       if (!body) return clone(data);
       if (url.endsWith('/apply')) Object.assign(data, { active: true, clientId: body.clientId, model: body.model, profile: { state: 'applied', revision: 'disk-b', generation: 'generation-b', hasBackup: true } });

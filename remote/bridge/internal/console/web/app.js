@@ -799,9 +799,13 @@ function localEditorDraftSync() {
   if (note) note.textContent = JSON.stringify(localForm()) === draft.initial ? '所有更改在保存后生效' : '有未保存的更改';
 }
 
-async function closeLocalEditor() {
+async function closeLocalEditor(options = {}) {
+  if (typeof apiManagementActive === 'function' && apiManagementActive()) return closeAPIManagement();
   const draft = S.localEditorDraft, input = $('#laID');
   if (!draft || draft.input !== input) { $('#modalRoot').innerHTML = ''; S.localEditorDraft = null; return true; }
+  // A route change may join an already pending discard confirmation. It must
+  // suppress the service return callback for that shared close operation too.
+  if (options.returnToService === false) draft.leavePage = true;
   if (draft.closePromise) return draft.closePromise;
   draft.closing = true;
   draft.closePromise = (async () => {
@@ -812,8 +816,9 @@ async function closeLocalEditor() {
       if (S.localEditorDraft !== draft || $('#laID') !== input) return false;
       $('#modalRoot').innerHTML = '';
       S.localEditorDraft = null;
+      if (draft.onReturn && !draft.leavePage) await draft.onReturn();
       return true;
-    } finally { draft.closing = false; draft.closePromise = null; }
+    } finally { draft.closing = false; draft.closePromise = null; draft.leavePage = false; }
   })();
   return draft.closePromise;
 }
@@ -834,7 +839,7 @@ function localValidateForm(body) {
   }
 }
 
-function localEditor(a, kind) {
+function localEditor(a, kind, options = {}) {
   if (typeof disposeOfficialPanel === 'function') disposeOfficialPanel();
   S.localDraftModels = [...(a?.models || [])];
   S.localDraftTransport = a ? { baseUrl: a.baseUrl, authMode: a.authMode, wire: a.wire } : null;
@@ -868,7 +873,7 @@ function localEditor(a, kind) {
   </section>`;
   $('#modalRoot').innerHTML = `<div class="modal-back" data-act="closeModal"><div class="modal account-modal key-editor account-add-modal" data-key-editor data-stop role="dialog" aria-modal="true" aria-labelledby="localEditorTitle">
     <div class="modal-head key-editor-head" data-face="${face}"><span class="key-glow" aria-hidden="true"></span><div><h3 id="localEditorTitle">${a ? '编辑 API Key' : '添加 API Key'}</h3><p>${a ? esc(a.name || '配置服务地址、接口与模型') : '连接服务商，配置可用模型'}</p></div><button class="icon-btn" data-act="closeModal" aria-label="关闭">${icon('close')}</button></div>
-    <div class="modal-body">${!a && typeof accountAddTabsHTML === 'function' ? accountAddTabsHTML('apikey') : ''}<input type="hidden" id="laID" value="${esc(a?.id || '')}"><input type="hidden" id="laModel" value="${esc(a?.model || '')}"><input type="hidden" id="laWorkspace" value="${esc(a?.workspace || '')}">
+    <div class="modal-body">${!a && !options.service && typeof accountAddTabsHTML === 'function' ? accountAddTabsHTML('apikey') : ''}<input type="hidden" id="laID" value="${esc(a?.id || '')}"><input type="hidden" id="laModel" value="${esc(a?.model || '')}"><input type="hidden" id="laWorkspace" value="${esc(a?.workspace || '')}">
     <section class="api-editor-section"><div class="api-editor-section-head"><strong>连接信息</strong><small>${a ? '留空 Key 可保留原密钥' : '密钥保存在本机'}</small></div><div class="form-grid key-editor-grid">
       <div class="field full"><label for="laName">名称 <span class="muted small">可选</span></label><input class="input" id="laName" maxlength="80" placeholder="留空使用站点名称" value="${esc(a?.name || '')}"></div>
       <div class="field full"><label for="laKey">API Key</label><div class="input-wrap"><input class="input key-input" id="laKey" type="password" autocomplete="off" spellcheck="false" placeholder="${esc(a ? '已保存 ' + (a.keyMasked || '') + '，留空则不更换' : '粘贴你的 API Key')}"><button class="icon-btn" data-act="toggleVis" data-for="laKey" aria-label="显示或隐藏 Key">${icon('eye')}</button></div></div>
@@ -905,7 +910,7 @@ function localEditor(a, kind) {
       </div>
     </details><div id="localSaveError" class="api-editor-error" role="alert" aria-live="polite"></div></div>
     <div class="modal-foot"><span class="api-editor-draft-note" id="laDraftNote">所有更改在保存后生效</span><span class="spacer"></span><button class="btn ghost" data-act="closeModal">取消</button><button class="btn primary" data-act="localSave">${a ? '保存更改' : '保存密钥'}</button></div></div></div>`;
-  S.localEditorDraft = { input: $('#laID'), initial: JSON.stringify(localForm()), saving: false, closing: false };
+  S.localEditorDraft = { input: $('#laID'), initial: JSON.stringify(localForm()), saving: false, closing: false, onReturn: options.onReturn };
   localEditorProtocolSync();
   (a ? $('#laName') : $('#laKey')).focus();
 }
@@ -1940,6 +1945,7 @@ const ACTIONS = {
         const continueInAgent = wbTarget && b.isConnected && S.route === 'overview';
         $('#modalRoot').innerHTML = '';
         if (S.localEditorDraft === draft) S.localEditorDraft = null;
+        if (draft?.onReturn) { toast('上游 API 已保存', 'ok'); await draft.onReturn(); return; }
         if (continueInAgent && typeof wbContinueWithSaved === 'function') {
           await wbContinueWithSaved(wbTarget, saved.account?.id);
           return;

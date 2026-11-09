@@ -117,8 +117,10 @@ function closePanel() {
 route = async function () {
   const navigation = S.localNavigationRevision = (S.localNavigationRevision || 0) + 1;
   const requestedHash = location.hash || '';
-  if (S.localEditorDraft && S.localEditorDraft.input === $('#laID') && typeof closeLocalEditor === 'function') {
-    const mayLeave = await closeLocalEditor();
+  const apiManagementOpen = typeof apiManagementActive === 'function' && apiManagementActive();
+  const localEditorOpen = S.localEditorDraft && S.localEditorDraft.input === $('#laID');
+  if ((apiManagementOpen || localEditorOpen) && typeof closeLocalEditor === 'function') {
+    const mayLeave = await closeLocalEditor({ returnToService: false });
     // Multiple back/forward or navigation events share the same discard choice;
     // only the latest destination may render after that choice settles.
     if (navigation !== S.localNavigationRevision) return;

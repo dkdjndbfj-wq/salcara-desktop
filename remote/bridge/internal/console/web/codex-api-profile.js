@@ -60,6 +60,7 @@ async function loadAPIProfile(owner) {
 
 async function openAPIProfile() {
   officialPanel('Codex 配置', '<div id="apiProfileContent" class="stack" aria-live="polite"></div>');
+  apiManagementShell('<button class="btn" data-act="codexAPI" data-view="clients">返回客户端</button>');
   $('#officialPanel')?.closest?.('.modal')?.classList.add('api-profile-modal');
   const owner = { epoch: OFFICIAL_PANEL.epoch, seq: 0, data: null, loading: false, pending: '', error: '', clientId: '', model: '' };
   apiProfilePanel = owner;
@@ -112,7 +113,7 @@ document.addEventListener('change', event => {
 });
 
 Object.assign(ACTIONS, {
-  codexAPIProfile: openAPIProfile,
+  codexAPIProfile: () => apiManagementLeave(openAPIProfile),
   codexAPIProfileRefresh: async () => {
     const owner = apiProfilePanel;
     if (!owner || !currentAPIProfile(owner) || owner.pending || apiProfileWritePending) return;
