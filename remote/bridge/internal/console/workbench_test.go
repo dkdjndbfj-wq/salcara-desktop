@@ -58,16 +58,20 @@ func TestWorkbenchDesktopLampStaysUnavailableWithStalePayloadAndDraft(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
+	workbenchSource, err := webFS.ReadFile("web/workbench.js")
+	if err != nil {
+		t.Fatal(err)
+	}
 	// Execute the actual rendering functions without booting a browser or touching
 	// any local credential, desktop process, or session. An old backend payload is
 	// intentionally marked connected to verify the desktop UI also fails closed.
 	script := `
 const fs = require('fs'), vm = require('vm'), assert = require('assert');
-const source = fs.readFileSync(0, 'utf8');
-function section(start, end) {
-  const a = source.indexOf(start), b = source.indexOf(end, a);
+const { app: source, workbench: workbenchSource } = JSON.parse(fs.readFileSync(0, 'utf8'));
+function section(start, end, input = source) {
+  const a = input.indexOf(start), b = input.indexOf(end, a);
   assert(a >= 0 && b > a, 'workbench function boundary missing');
-  return source.slice(a, b);
+  return input.slice(a, b);
 }
 const tools = ['codex-desktop', 'codex', 'claude-desktop', 'claude'].map(id => ({ id, kind: id.split('-')[0], name: id, available: true }));
 const remote = { state: 'connected', label: 'CLI connected', detail: 'CLI only', supported: true };
@@ -113,8 +117,22 @@ vm.runInContext('globalThis.testActions = ({' + section('  toolRestart: async (b
 (async () => {
   let requests = 0;
   context.api = async () => { requests++; throw new Error('must not send an automatic desktop request'); };
-  await assert.rejects(context.testRestart({ dataset: { target: 'claude-desktop' } }), /自动应用暂不可用/);
+  const unavailableState = JSON.stringify(context.S.local);
+  await assert.rejects(context.testRestart({ dataset: { target: 'claude-desktop' } }),
+    { message: '请刷新后从 Agent 卡片打开' });
+  assert(requests === 0, 'missing workbench helper sent a request');
+  // Legacy app.js delegates to the current workbench helper. Load the real
+  // helper and its pure account guards: without the dedicated Desktop adapter,
+  // this stale card must still fail before fetching, binding or opening.
+  context.WB = { launchPending: false };
+  vm.runInContext(section('function accountFor(', 'const TOOL_OPEN', workbenchSource)
+    + section('function wbAccountAllowed(', 'function wbAccountStamp(', workbenchSource)
+    + section('async function wbOpenAccount(', 'async function wbAccountStatus(', workbenchSource), context);
+  await assert.rejects(context.testRestart({ isConnected: true, dataset: { target: 'claude-desktop' } }),
+    { message: 'Claude Desktop 配置组件尚未就绪' });
   assert(requests === 0, 'blocked desktop handler sent a request');
+  assert(JSON.stringify(context.S.local) === unavailableState, 'blocked desktop handler changed the stale payload or draft');
+  assert(context.WB.accountOpen === undefined, 'blocked desktop handler staged an opening');
   context.busy = async (button, action) => action();
   context.toast = () => {};
   const modal = { innerHTML: '' }, restoreList = { innerHTML: '' };
@@ -133,7 +151,11 @@ vm.runInContext('globalThis.testActions = ({' + section('  toolRestart: async (b
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, node, "-e", script)
-	cmd.Stdin = strings.NewReader(string(source))
+	input, err := json.Marshal(map[string]string{"app": string(source), "workbench": string(workbenchSource)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd.Stdin = strings.NewReader(string(input))
 	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("workbench rendering assertions failed: %v\n%s", err, output)
 	}
