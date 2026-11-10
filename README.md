@@ -4,7 +4,19 @@
 
 本地使用不需要注册 Salcara 账号，也不需要部署服务器。API 可以自行命名，同一组 API 可以供多个 Agent 使用，不绑定某个品牌。
 
-[下载 Windows 安装包](https://github.com/dkdjndbfj-wq/salcara-desktop/releases/download/v1.6.4/Salcara-Desktop-1.6.4-win32-x64-setup.exe) · [全部版本](https://github.com/dkdjndbfj-wq/salcara-desktop/releases) · [使用教程](docs/USER-GUIDE.zh.md) · [反馈问题](https://github.com/dkdjndbfj-wq/salcara-desktop/issues)
+[下载 Windows 安装包](https://github.com/dkdjndbfj-wq/salcara-desktop/releases/download/v1.6.5/Salcara-Desktop-1.6.5-win32-x64-setup.exe) · [全部版本](https://github.com/dkdjndbfj-wq/salcara-desktop/releases) · [使用教程](docs/USER-GUIDE.zh.md) · [反馈问题](https://github.com/dkdjndbfj-wq/salcara-desktop/issues)
+
+## 界面预览
+
+Desktop 1.6.5 实际界面 · 演示数据。
+
+![Salcara Desktop 1.6.5 工作台首页，展示任务与工具入口](docs/images/desktop-home.webp)
+
+| Agent | API 管理 |
+| --- | --- |
+| ![Salcara Desktop 1.6.5 Agent 页面，按工具选择 API 并打开已安装的 Agent](docs/images/desktop-agents.webp) | ![Salcara Desktop 1.6.5 API 管理页面，集中管理命名服务商和本地 API 服务](docs/images/desktop-api.webp) |
+
+为不同工具选择 API，在同一个工作台管理服务商与会话。
 
 ## 可以做什么
 
@@ -13,7 +25,7 @@
 - **读取和恢复编程会话**：查看本机支持的会话记录，继续已有项目；不因换 API 新建一套 Codex 用户目录。
 - **跨协议模型接入**：本地网关转换受支持的 Responses、Chat Completions 和 Messages 请求。能否正常使用仍取决于服务商接口、模型工具调用能力和 Agent 版本。
 - **可选手机远程**：通过自行部署或可信站点提供的 Salcara Hub 扫码配对，查看支持的编程会话并发送任务。
-- **签名自动更新**：显示下载进度，验证签名和文件完整性，等已有任务结束后自动安装并重启；失败版本停止自动重试。
+- **签名自动更新**：显示下载进度，验证签名和文件完整性，任务结束后由用户确认安装并重启；失败版本停止自动重试。
 
 ## 下载与安装
 
@@ -21,9 +33,9 @@
 
 | 下载文件 | 用途 |
 | --- | --- |
-| `Salcara-Desktop-1.6.4-win32-x64-setup.exe` | 推荐。安装向导、开始菜单快捷方式、Windows 卸载入口 |
-| `Salcara-Bridge-1.6.4-win32-x64.zip` | 免安装便携版，解压完整文件夹后运行 |
-| `SHA256SUMS.txt` | 下载文件的 SHA-256 校验清单 |
+| [Salcara-Desktop-1.6.5-win32-x64-setup.exe](https://github.com/dkdjndbfj-wq/salcara-desktop/releases/download/v1.6.5/Salcara-Desktop-1.6.5-win32-x64-setup.exe) | 推荐。安装向导、开始菜单快捷方式、Windows 卸载入口 |
+| [Salcara-Bridge-1.6.5-win32-x64.zip](https://github.com/dkdjndbfj-wq/salcara-desktop/releases/download/v1.6.5/Salcara-Bridge-1.6.5-win32-x64.zip) | 免安装便携版，解压完整文件夹后运行 |
+| [SHA256SUMS.txt](https://github.com/dkdjndbfj-wq/salcara-desktop/releases/download/v1.6.5/SHA256SUMS.txt) | 下载文件的 SHA-256 校验清单 |
 
 双击安装包，按向导安装到当前用户目录，然后从开始菜单打开 **Salcara Desktop**。无需管理员权限。为了兼容已有配置，应用窗口和可执行文件仍使用 `Salcara Bridge` 名称。
 
@@ -55,7 +67,7 @@
 
 现有正式客户端使用同一更新通道和公钥。1.6.4 起每 2 小时检查，提示和下载不会停止任务或自行安装；任务结束后再主动确认重启安装。早期未配置更新通道的开发版需手动安装正式包。
 
-1.6.1 / 1.6.2 内置更新失败时，请退出 Salcara 后手动运行 1.6.4 setup 一次，无需先卸载或删除 AppData。新版安装器兼容旧卸载留下的更新缓存，保留配置和会话；不要继续反复尝试旧更新器。
+1.6.1 / 1.6.2 内置更新失败时，请退出 Salcara 后手动运行 1.6.5 setup 一次，无需先卸载或删除 AppData。新版安装器兼容旧卸载留下的更新缓存，保留配置和会话；不要继续反复尝试旧更新器。
 
 安装版可在 Windows **设置 → 应用 → 已安装的应用 → Salcara Desktop** 卸载。卸载保留 API 配置、配对数据及第三方 Agent 的项目和会话；重装可继续使用。请妥善保护本机配置，它包含敏感密钥，不是完整的系统钥匙串保险库。
 
