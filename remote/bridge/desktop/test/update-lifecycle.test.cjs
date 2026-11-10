@@ -7,7 +7,8 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const zlib = require('node:zlib');
 const { EventEmitter } = require('node:events');
-const { execFileSync, spawn } = require('node:child_process');
+const { execFile, execFileSync, spawn } = require('node:child_process');
+const execFileAsync = require('node:util').promisify(execFile);
 const { createUpdater } = require('../updater.cjs');
 
 function tarEntry(name, data) {
@@ -206,7 +207,18 @@ test('helper cleanup removes only marked stopped helpers and preserves live or u
   });
 });
 
-async function fullWindowsUpdate(acknowledge) {
+async function waitWindowsFixtureHelper(record, executable, { signal, stop = false } = {}) {
+  assert.ok(Number.isInteger(record.pid) && record.pid > 0, 'helper has a real process identity');
+  const expected = `'${executable.replace(/'/g, "''")}'`;
+  // Capture a process handle, not a fixed observation window or a reused PID.
+  // The executable lives in this fixture's unique token directory. Never stop
+  // an unrelated process if the original helper has already exited.
+  const command = `$ErrorActionPreference='Stop'; $p=Get-Process -Id ${record.pid} -ErrorAction SilentlyContinue; if($p){try{if($p.Path -ne ${expected}){exit 0}; $null=$p.Handle; ${stop ? '$p.Kill();' : ''}$p.WaitForExit()}catch{if(-not $p.HasExited){throw}}}`;
+  await execFileAsync(path.join(process.env.SystemRoot, 'System32/WindowsPowerShell/v1.0/powershell.exe'),
+    ['-NoProfile', '-NonInteractive', '-Command', command], { windowsHide: true, signal, ...(stop ? { timeout: 10000 } : {}) });
+}
+
+async function fullWindowsUpdate(t, acknowledge, holdDirectoryMs = 0) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'salcara-full-win-update-'));
   const appDir = path.join(root, 'app'), build = path.join(root, 'build'), userData = path.join(root, 'userdata');
   fs.mkdirSync(appDir); fs.mkdirSync(build); fs.mkdirSync(userData);
@@ -233,30 +245,66 @@ async function fullWindowsUpdate(acknowledge) {
     const u=require(${JSON.stringify(updaterPath)}).createUpdater({app:{getVersion:()=> '1.6.1',quit:()=>process.exit(0)},shell:{},platform:process.platform,arch:process.arch,execPath:${JSON.stringify(path.join(appDir,'fixture.exe'))},isPackaged:true,repo:'o/r',publicKey:publicKey.export({format:'der',type:'spki'}).subarray(-32).toString('base64'),userData:${JSON.stringify(userData)},onChange(){},beforeInstall:async()=>{},commitInstall:async()=>{}});
     (async()=>{await u.check(true);await u.download();const result=await u.install();throw new Error(JSON.stringify({phase:result.phase,error:result.error,log:fs.readFileSync(path.join(${JSON.stringify(userData)},'update.log'),'utf8')}));})().catch(error=>{console.error(error.message);process.exit(1);});
   `);
-  let hostChild;
+  let hostChild, helperRecord, helperExecutable, helperFinished = false;
+  let holder, holderExit, releaseHolder, heldObservation;
   try {
-    hostChild = spawn(process.execPath, [host], { cwd:appDir, windowsHide:true, env:{...process.env, NODE_OPTIONS:`--require "${boot.replace(/\\/g,'/')}"`}, stdio:['ignore','pipe','pipe'] });
+    if (holdDirectoryMs) {
+      holder = spawn(process.execPath, ['-e', "process.stdout.write('ready');setInterval(()=>{},1000)"], { cwd: appDir, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+      holderExit = new Promise(resolve => holder.once('exit', resolve));
+      await new Promise((resolve, reject) => { holder.once('error', reject); holder.stdout.once('data', resolve); });
+    }
+    hostChild = spawn(process.execPath, [host], { cwd:appDir, windowsHide:true, signal:t.signal, env:{...process.env, NODE_OPTIONS:`--require "${boot.replace(/\\/g,'/')}"`}, stdio:['ignore','pipe','pipe'] });
     let errors = ''; hostChild.stdout.resume(); hostChild.stderr.on('data', chunk => { errors += chunk; });
     const code = await new Promise((resolve,reject) => {hostChild.once('error',reject);hostChild.once('exit',resolve);});
     assert.equal(code, 0, errors);
-    const deadline = Date.now() + 20000;
-    while (Date.now() < deadline) {
-      // A health acknowledgement is written before the exact old backup is
-      // removed. Wait for the supervisor to finish as well, otherwise a fast
-      // assertion races the still-running PowerShell cleanup on Windows.
-      const saved = JSON.parse(fs.readFileSync(path.join(userData,'update.json')));
-      const active = (saved.helpers || []).some(record => {
-        if (!Number.isInteger(record.pid) || record.pid <= 0) return false;
-        try { process.kill(record.pid, 0); return true; } catch (error) { return error.code !== 'ESRCH'; }
-      });
-      if (!active && fs.existsSync(path.join(userData,'update.log')) && /updated and healthy|rolled back/.test(fs.readFileSync(path.join(userData,'update.log'),'utf8'))) break;
-      await new Promise(resolve => setTimeout(resolve,100));
+    if (holder) {
+      releaseHolder = setTimeout(() => {
+        try {
+          heldObservation = {
+            version: fs.readFileSync(path.join(appDir, 'VERSION'), 'utf8'),
+            completed: /updated and healthy|rolled back/.test(fs.readFileSync(path.join(userData, 'update.log'), 'utf8')),
+          };
+        } catch (error) { heldObservation = { error: error.message }; }
+        finally { holder.kill(); }
+      }, holdDirectoryMs);
+    }
+    const saved = JSON.parse(fs.readFileSync(path.join(userData, 'update.json')));
+    assert.equal(saved.helpers.length, 1);
+    helperRecord = saved.helpers[0];
+    assert.match(helperRecord.token, /^[0-9a-f]{64}$/);
+    helperExecutable = path.join(userData, 'updater-helpers', helperRecord.token, 'runtime.exe');
+    // The helper legitimately retries an occupied install directory for up
+    // to 60 seconds. The test's existing 90-second timeout still bounds the
+    // entire transaction; assertions run only after the supervisor exits.
+    await waitWindowsFixtureHelper(helperRecord, helperExecutable, { signal: t.signal });
+    helperFinished = true;
+    if (holder) {
+      assert.deepEqual(heldObservation, { version: '1.6.1', completed: false });
+      await holderExit;
     }
     assert.equal(fs.readFileSync(path.join(appDir,'VERSION'),'utf8'), acknowledge?'1.6.2':'1.6.1', fs.readFileSync(path.join(userData,'update.log'),'utf8'));
     assert.match(fs.readFileSync(path.join(userData,'update.log'),'utf8'), acknowledge?/helper acknowledged readiness[\s\S]*updated and healthy/:/helper acknowledged readiness[\s\S]*rolled back/);
     assert.equal(fs.readdirSync(root).some(name => name.startsWith('app.old-')), false);
   } finally {
+    clearTimeout(releaseHolder);
+    if (holder && holder.exitCode === null) holder.kill();
+    if (holderExit) await holderExit;
     if (hostChild && hostChild.exitCode === null) hostChild.kill();
+    if (!helperRecord) {
+      try {
+        const saved = JSON.parse(fs.readFileSync(path.join(userData, 'update.json')));
+        const record = saved.helpers?.[0];
+        if (/^[0-9a-f]{64}$/.test(record?.token || '') && Number.isInteger(record.pid) && record.pid > 0) {
+          helperRecord = record;
+          helperExecutable = path.join(userData, 'updater-helpers', record.token, 'runtime.exe');
+        }
+      } catch { /* failed before a helper was published */ }
+    }
+    if (!helperFinished && helperRecord && helperExecutable) {
+      // A timed-out test must not delete staging underneath a live updater.
+      // Terminate only the supervisor from this exact fixture before cleanup.
+      await waitWindowsFixtureHelper(helperRecord, helperExecutable, { stop: true });
+    }
     // Only synthetic processes/files in this mkdtemp fixture are cleaned up.
     await fs.promises.rm(root,{recursive:true,force:true,maxRetries:30,retryDelay:100});
   }
@@ -315,5 +363,6 @@ test('a withdrawn staged release cannot start a helper even via explicit retry',
   });
 });
 
-test('Windows full updater survives an app-directory cwd, verifies the archive and relaunches', { skip:process.platform !== 'win32', timeout:90000 }, () => fullWindowsUpdate(true));
-test('Windows full updater restores the old payload when the new version fails startup', { skip:process.platform !== 'win32', timeout:90000 }, () => fullWindowsUpdate(false));
+test('Windows full updater survives an app-directory cwd, verifies the archive and relaunches', { skip:process.platform !== 'win32', timeout:90000 }, t => fullWindowsUpdate(t, true));
+test('Windows full updater restores the old payload when the new version fails startup', { skip:process.platform !== 'win32', timeout:90000 }, t => fullWindowsUpdate(t, false));
+test('Windows full updater waits for directory contention before verifying rollback', { skip:process.platform !== 'win32', timeout:90000 }, t => fullWindowsUpdate(t, false, 22000));
