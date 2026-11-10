@@ -75,6 +75,11 @@ jobs:
       - name: Install pinned packaging dependencies
         working-directory: remote/bridge/desktop
         run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Verify actual ASAR reader and payload evidence tests
+        working-directory: remote/bridge/desktop
+        env:
+          SALCARA_REQUIRE_ASAR_TEST: '1'
+        run: node --test test/release-payload.test.cjs
       - name: Build complete desktop directory
         working-directory: remote/bridge/desktop
         run: npm run package
@@ -156,7 +161,13 @@ jobs:
           [IO.File]::WriteAllLines((Join-Path $release 'SHA256SUMS.txt'), $lines)
       - name: Verify exact installer, portable package and signed update inventory
         working-directory: remote/bridge/desktop
-        run: node scripts/verify-release-artifact.cjs out/release out
+        shell: pwsh
+        run: |
+          $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          if (Test-Path -LiteralPath out/verified-portable) { throw 'Portable verification directory must be new' }
+          Expand-Archive -LiteralPath "out/release/Salcara-Bridge-$version-win32-x64.zip" -DestinationPath out/verified-portable
+          node scripts/verify-release-artifact.cjs out/release out/verified-portable
+          if ($LASTEXITCODE -ne 0) { throw 'Artifact and embedded version verification failed' }
       - uses: actions/upload-artifact@v4
         with:
           name: salcara-desktop-windows-signed
