@@ -67,12 +67,39 @@ func (s *Service) Tools(ctx context.Context, paths map[string]string) []Tool {
 	} else {
 		tools = Discover(ctx, paths)
 	}
+	var deepSeekBefore Tool
+	for _, tool := range tools {
+		if tool.ID == "deepseek-harness" {
+			deepSeekBefore = tool
+			break
+		}
+	}
 	tools = s.applyLocations(tools, paths)
+	for i := range tools {
+		tool := &tools[i]
+		if tool.ID != "deepseek-harness" || !tool.Available || deepSeekBefore.Available {
+			continue
+		}
+		// A remembered file location is not proof that its runtime still works.
+		// Reuse a failed check for the same path instead of probing it twice.
+		tool.runtimeError = deepSeekBefore.runtimeError
+		if tool.Path != deepSeekBefore.Path || tool.runtimeError == nil {
+			tool.runtimeError = agents.CheckDeepSeekRuntime(ctx, tool.Path)
+		}
+		tool.Available = tool.runtimeError == nil
+	}
 	s.rememberLocations(tools)
 	return tools
 }
 
 func (s *Service) Prepare(a config.LocalAccount, t Tool, workspace string) (p Plan, err error) {
+	return s.prepare(context.Background(), a, t, workspace)
+}
+
+func (s *Service) prepare(ctx context.Context, a config.LocalAccount, t Tool, workspace string) (p Plan, err error) {
+	if err := ctx.Err(); err != nil {
+		return Plan{}, err
+	}
 	if t.ID == "claude-desktop" {
 		return Plan{}, toolcfg.ErrClaudeDesktopAutomaticAPIUnavailable
 	}
@@ -83,6 +110,9 @@ func (s *Service) Prepare(a config.LocalAccount, t Tool, workspace string) (p Pl
 		return Plan{}, errors.New("这个账号不能启动所选工具")
 	}
 	if !t.Available || !fileExists(t.Path) {
+		if t.runtimeError != nil {
+			return Plan{}, t.runtimeError
+		}
 		return Plan{}, fmt.Errorf("没有找到 %s，请先安装或设置程序路径", toolNames[t.ID])
 	}
 	if a.Model == "" {
@@ -166,7 +196,7 @@ func (s *Service) Prepare(a config.LocalAccount, t Tool, workspace string) (p Pl
 	if err := os.MkdirAll(p.AppData, 0o700); err != nil {
 		return Plan{}, err
 	}
-	if err := normalizeCLI(&p); err != nil {
+	if err := normalizeCLIContext(ctx, &p); err != nil {
 		return Plan{}, err
 	}
 	p.Environment = agents.LocalEnvironment(p.Tool.Path, env, drop)
@@ -190,7 +220,22 @@ func isolatedProfileFiles(dir, kind string) []string {
 }
 
 func normalizeCLI(p *Plan) error {
+	return normalizeCLIContext(context.Background(), p)
+}
+
+func normalizeCLIContext(ctx context.Context, p *Plan) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if isDesktop(p.Tool.ID) {
+		return nil
+	}
+	if p.Tool.Kind == "deepseek-harness" {
+		cmd, err := agents.DeepSeekCommand(ctx, p.Tool.Path, p.Args...)
+		if err != nil {
+			return err
+		}
+		p.Tool.Path, p.Args = cmd.Path, append([]string(nil), cmd.Args[1:]...)
 		return nil
 	}
 	ext := strings.ToLower(filepath.Ext(p.Tool.Path))
@@ -208,8 +253,6 @@ func normalizeCLI(p *Plan) error {
 	pkg := "@anthropic-ai/claude-code/cli.js"
 	if p.Tool.Kind == "codex" {
 		pkg = "@openai/codex/bin/codex.js"
-	} else if p.Tool.Kind == "deepseek-harness" {
-		pkg = "@deepseek-ai/dsh/lib/bin.js"
 	} else if p.Tool.Kind == "hermes" {
 		return errors.New("请设置 Hermes 原生可执行文件路径（venv/Scripts/hermes.exe），不支持 CMD/BAT 包装脚本")
 	}
@@ -275,7 +318,7 @@ func (s *Service) LaunchAuthorized(ctx context.Context, a config.LocalAccount, t
 		return Result{}, err
 	}
 	LaunchPhase(ctx, "profile", "写入 API 与模型配置")
-	p, err := s.Prepare(a, t, workspace)
+	p, err := s.prepare(ctx, a, t, workspace)
 	if err != nil {
 		return Result{}, err
 	}

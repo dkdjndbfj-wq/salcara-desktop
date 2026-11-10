@@ -14,14 +14,15 @@ import (
 )
 
 type Tool struct {
-	ID        string `json:"id"`
-	Name      string `json:"name"`
-	Kind      string `json:"kind"`
-	Available bool   `json:"available"`
-	Path      string `json:"path,omitempty"`
-	Custom    bool   `json:"custom"`
-	Family    string `json:"-"`
-	AppID     string `json:"-"`
+	ID           string `json:"id"`
+	Name         string `json:"name"`
+	Kind         string `json:"kind"`
+	Available    bool   `json:"available"`
+	Path         string `json:"path,omitempty"`
+	Custom       bool   `json:"custom"`
+	Family       string `json:"-"`
+	AppID        string `json:"-"`
+	runtimeError error  // local diagnostic only; never serialized with inventory
 }
 
 var toolNames = map[string]string{
@@ -47,6 +48,10 @@ func Discover(ctx context.Context, paths map[string]string) []Tool {
 				command = "dsh"
 			}
 			t.Path, t.Available = agents.LocalExecutable(command, paths[id])
+			if id == "deepseek-harness" && t.Available {
+				t.runtimeError = agents.CheckDeepSeekRuntime(ctx, t.Path)
+				t.Available = t.runtimeError == nil
+			}
 			if id == "hermes" && !t.Available && !t.Custom {
 				for _, candidate := range hermesCandidates() {
 					if fileExists(candidate) {

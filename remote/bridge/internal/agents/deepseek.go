@@ -5,7 +5,6 @@ package agents
 // so stopping that runtime must never stop another session's work.
 
 import (
-	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -126,7 +125,7 @@ func (a *deepSeekAgent) Detect(ctx context.Context) protocol.Tool {
 	p, ok := findExecutable("dsh", a.settings().DeepSeekPath)
 	t := protocol.Tool{ID: a.ID(), Name: a.Name(), Available: ok}
 	if ok {
-		t.Version, _ = deepSeekVersion(ctx, p)
+		t.Version, t.Available = deepSeekVersion(ctx, p)
 	}
 	return t
 }
@@ -453,7 +452,7 @@ func (a *deepSeekAgent) runtime(ctx context.Context, id string, s *deepSeekSessi
 	if err := os.WriteFile(patchPath, patch, 0o600); err != nil {
 		return nil, err
 	}
-	cmd, err := deepSeekCommand(exe, "--profile", "sdk", "--patch", patchPath)
+	cmd, err := DeepSeekCommand(ctx, exe, "--profile", "sdk", "--patch", patchPath)
 	if err != nil {
 		return nil, err
 	}
@@ -527,72 +526,6 @@ func (a *deepSeekAgent) runtime(ctx context.Context, id string, s *deepSeekSessi
 		}
 	}()
 	return conn, nil
-}
-
-// Invoke npm's JavaScript entry directly on Windows, avoiding cmd.exe's
-// second parsing of project paths. Native dsh executables need no wrapper.
-func deepSeekCommand(exe string, args ...string) (*exec.Cmd, error) {
-	ext := strings.ToLower(filepath.Ext(exe))
-	if ext == ".cmd" || ext == ".bat" || ext == ".js" || ext == ".mjs" {
-		entry := exe
-		if ext == ".cmd" || ext == ".bat" {
-			entry = ""
-			for _, candidate := range []string{
-				filepath.Join(filepath.Dir(exe), "node_modules", "@deepseek-ai", "dsh", "lib", "bin.js"),
-				filepath.Join(filepath.Dir(exe), "..", "@deepseek-ai", "dsh", "lib", "bin.js"),
-			} {
-				if st, err := os.Stat(candidate); err == nil && !st.IsDir() {
-					entry = filepath.Clean(candidate)
-					break
-				}
-			}
-		}
-		if entry == "" {
-			return nil, errors.New("无法解析 dsh npm 入口，请选择原生可执行文件或重新安装")
-		}
-		node, ok := findExecutable("node", "")
-		if !ok {
-			return nil, errors.New("运行 dsh npm 安装需要 Node.js")
-		}
-		return exec.Command(node, append([]string{entry}, args...)...), nil
-	}
-	return exec.Command(exe, args...), nil
-}
-
-func deepSeekVersion(ctx context.Context, exe string) (string, bool) {
-	ext := strings.ToLower(filepath.Ext(exe))
-	if ext != ".cmd" && ext != ".bat" && ext != ".js" && ext != ".mjs" {
-		return toolVersion(ctx, exe)
-	}
-	st, err := os.Stat(exe)
-	if err != nil {
-		return "", false
-	}
-	versionMu.Lock()
-	cached, hit := versionCache[exe]
-	versionMu.Unlock()
-	if hit && cached.mod.Equal(st.ModTime()) {
-		return cached.version, cached.ok
-	}
-	cmd, err := deepSeekCommand(exe, "--version")
-	if err != nil {
-		return "", false
-	}
-	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
-	defer cancel()
-	probe := exec.CommandContext(ctx, cmd.Path, cmd.Args[1:]...)
-	prepareCmd(probe)
-	probe.Env = childEnv(cmd.Path, nil, nil)
-	var output bytes.Buffer
-	probe.Stdout, probe.Stderr = &output, &output
-	err = probe.Run()
-	v := versionRe.FindString(output.String())
-	if ctx.Err() == nil {
-		versionMu.Lock()
-		versionCache[exe] = versionCacheEntry{mod: st.ModTime(), version: v, ok: err == nil}
-		versionMu.Unlock()
-	}
-	return v, err == nil
 }
 
 func (a *deepSeekAgent) safeError(err error, key string) string {

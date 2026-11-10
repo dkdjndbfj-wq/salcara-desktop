@@ -36,6 +36,13 @@ func (s *Service) InventorySnapshot(paths map[string]string) ([]Tool, bool) {
 			out = append(out, t)
 		}
 		out = s.applyLocations(out, paths)
+		for i := range out {
+			if out[i].ID == "deepseek-harness" {
+				// File presence alone cannot establish Node/DSH readiness. Keep
+				// this fast snapshot non-blocking until the background check ends.
+				out[i].Available = false
+			}
+		}
 	}
 	s.startInventoryLocked(key, paths)
 	return out, true

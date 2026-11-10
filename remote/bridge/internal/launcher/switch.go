@@ -27,6 +27,9 @@ type SwitchInfo struct {
 // PrepareSwitch validates only. No new profile is allocated, and no original
 // settings or data are written until the user confirms the switch.
 func (s *Service) PrepareSwitch(ctx context.Context, a config.LocalAccount, target, workspace string, paths map[string]string) (Plan, error) {
+	if err := ctx.Err(); err != nil {
+		return Plan{}, err
+	}
 	if target == "claude-desktop" {
 		return Plan{}, toolcfg.ErrClaudeDesktopAutomaticAPIUnavailable
 	}
@@ -40,10 +43,16 @@ func (s *Service) PrepareSwitch(ctx context.Context, a config.LocalAccount, targ
 			break
 		}
 	}
+	if err := ctx.Err(); err != nil {
+		return Plan{}, err
+	}
 	if !ValidTarget(t.ID) || t.Kind != a.Kind {
 		return Plan{}, errors.New("账号与所选工具协议不匹配")
 	}
 	if !t.Available || !fileExists(t.Path) {
+		if t.runtimeError != nil {
+			return Plan{}, t.runtimeError
+		}
 		return Plan{}, errors.New("没有找到所选工具，请先安装或设置程序路径")
 	}
 	if workspace == "" {
@@ -98,7 +107,7 @@ func (s *Service) PrepareSwitch(ctx context.Context, a config.LocalAccount, targ
 			}
 		}
 	}
-	if err := normalizeCLI(&p); err != nil {
+	if err := normalizeCLIContext(ctx, &p); err != nil {
 		return Plan{}, err
 	}
 	p.Environment = agents.LocalEnvironment(p.Tool.Path, env, drop)
