@@ -345,6 +345,11 @@ func (a *deepSeekAgent) send(ctx context.Context, id, text string, opts TurnOpti
 			MessageID string `json:"messageId"`
 		}
 		err = conn.callGuarded(ctx, "session/prompt", map[string]any{"sessionId": id, "contentBlocks": []any{map[string]string{"type": "text", "text": text}}}, &receipt, opts.ValidatePermission)
+		if err == nil && receipt.MessageID == "" {
+			// A successful RPC without its required receipt is not proof that
+			// the prompt was unsent. Preserve this identity just like a lost reply.
+			err = &rpcDeliveryUncertainError{message: "DeepSeek Harness 未返回消息接收凭据，操作可能已执行；请核对原会话，不会自动重发"}
+		}
 		var uncertain *rpcDeliveryUncertainError
 		if err != nil && errors.As(err, &uncertain) {
 			// Do not create a replacement identity after a possibly delivered
@@ -352,9 +357,6 @@ func (a *deepSeekAgent) send(ctx context.Context, id, text string, opts TurnOpti
 			a.mu.Lock()
 			s.Started = true
 			a.mu.Unlock()
-		}
-		if err == nil && receipt.MessageID == "" {
-			err = errors.New("DeepSeek Harness 未返回消息接收凭据；请检查会话后再继续")
 		}
 	}
 	if err != nil {

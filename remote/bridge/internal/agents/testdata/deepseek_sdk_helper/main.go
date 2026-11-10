@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 )
 
 func main() {
@@ -71,6 +72,14 @@ func main() {
 		}
 		switch frame.Method {
 		case "initialize":
+			if delay := os.Getenv("SALCARA_DSH_FIXTURE_INITIALIZE_DELAY"); delay != "" {
+				duration, err := time.ParseDuration(delay)
+				if err != nil {
+					os.Exit(25)
+				}
+				_ = os.WriteFile(filepath.Join(os.Getenv("DSH_HOME"), "initialize.started"), []byte("waiting"), 0600)
+				time.Sleep(duration)
+			}
 			var p struct {
 				Provider string `json:"provider"`
 				Approval bool   `json:"approvalRequests"`
@@ -88,6 +97,7 @@ func main() {
 			if _, err := os.Stat(filepath.Join(os.Getenv("DSH_HOME"), p.SessionID)); err != nil {
 				os.Exit(23)
 			}
+			_ = os.WriteFile(filepath.Join(os.Getenv("DSH_HOME"), "resume.called"), []byte(p.SessionID), 0600)
 			reply(frame.ID, map[string]any{})
 		case "session/prompt":
 			var p struct {
@@ -101,7 +111,22 @@ func main() {
 			prompt = p.Content[0].Text
 			finished = false
 			_ = os.WriteFile(filepath.Join(os.Getenv("DSH_HOME"), session), []byte("native-session-fixture"), 0600)
-			reply(frame.ID, map[string]string{"messageId": "fixture-input"})
+			if path := os.Getenv("SALCARA_DSH_FIXTURE_PROMPT_LOG"); path != "" {
+				f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
+				if err != nil {
+					os.Exit(26)
+				}
+				_, err = fmt.Fprintln(f, string(frame.Params))
+				_ = f.Close()
+				if err != nil {
+					os.Exit(27)
+				}
+			}
+			if os.Getenv("SALCARA_DSH_FIXTURE_EMPTY_RECEIPT") == "1" {
+				reply(frame.ID, map[string]any{})
+			} else {
+				reply(frame.ID, map[string]string{"messageId": "fixture-input"})
+			}
 			write(map[string]any{"method": "session.event", "params": map[string]any{"sessionId": "foreign-session", "event": map[string]any{"type": "assistant/message", "data": map[string]any{"message": map[string]any{"id": "foreign", "role": "assistant", "content": []any{map[string]string{"type": "text", "text": "MUST NOT LEAK"}}}}}}})
 			write(map[string]any{"method": "session.status", "params": map[string]string{"sessionId": session, "status": "running"}})
 			event("turn/start", map[string]int{"turn": 1})
