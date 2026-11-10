@@ -26,7 +26,7 @@ let tray;
 let bridge;
 let quitting = false;
 let startHidden = false; // launched at login: stay in the background with the tray and ball
-let coreRestarts = [];   // timestamps of automatic core restarts, to stop a crash loop
+let coreLifecycle = null;
 let attached = false;    // using a core that was already running (not our child)
 let updater = null;      // desktop/updater.cjs, created on first use
 let updateWin = null;    // the update window
@@ -269,8 +269,13 @@ function fromConsole(event) {
 
 // The local start-up page (file://…/loading.html) in the main window.
 function fromSplash(event) {
-  const url = event.senderFrame && event.senderFrame.url;
-  return typeof url === 'string' && url.startsWith('file:') && url.includes('loading.html') && Boolean(window) && !window.isDestroyed() && event.sender === window.webContents;
+  if (!window || window.isDestroyed() || !event || event.sender !== window.webContents
+    || event.senderFrame !== window.webContents.mainFrame) return false;
+  try {
+    const url = new URL(event.senderFrame.url);
+    url.search = ''; url.hash = '';
+    return url.href === require('node:url').pathToFileURL(path.join(__dirname, 'loading.html')).href;
+  } catch { return false; }
 }
 
 /* ---------- appearance (follow system / light / dark) ---------- */
@@ -325,12 +330,8 @@ function registerIpc() {
   ipcMain.on('update:open', (event) => { if (fromConsole(event)) openUpdateWindow(false); });
   // The local error page (file://loading.html) may ask for one more start attempt.
   ipcMain.on('core:retry', async (event) => {
-    const url = event.senderFrame && event.senderFrame.url;
-    if (typeof url !== 'string' || !url.startsWith('file:') || !url.includes('loading.html') || quitting) return;
-    coreRestarts = [];
-    if (!(await healthy())) { try { spawnCore(); } catch (error) { console.error(error); return; } }
-    if (await waitForBridge()) await window.loadURL(consoleURL).catch(() => {});
-    else await window.loadFile(path.join(__dirname, 'loading.html'), { query: { error: `核心仍然无法启动。请检查本机 ${consolePort} 端口是否被其他程序占用。`, retry: '1' } }).catch(() => {});
+    if (!fromSplash(event) || quitting) return;
+    await getCoreLifecycle().start({ manual: true });
   });
 }
 
@@ -419,9 +420,9 @@ function updateTrayMenu() {
   ]));
 }
 
-async function healthy() {
+async function healthy(timeout = 1500) {
   try {
-    const response = await fetch(consoleURL + 'healthz', { signal: AbortSignal.timeout(1500) });
+    const response = await fetch(consoleURL + 'healthz', { signal: AbortSignal.timeout(timeout), redirect: 'error' });
     const body = await response.json();
     return response.ok && body.service === 'salcara-bridge';
   } catch {
@@ -429,18 +430,10 @@ async function healthy() {
   }
 }
 
-async function waitForBridge() {
-  for (let attempt = 0; attempt < 80; attempt++) {
-    if (await healthy()) return true;
-    await new Promise((resolve) => setTimeout(resolve, 250));
-  }
-  return false;
-}
-
 /* ---------- the Bridge core: start, attach to a running one, restart after a crash ---------- */
 function spawnCore() {
   const executable = bridgeExecutable();
-  if (!fs.existsSync(executable)) throw new Error('桌面程序缺少 Bridge 核心，请重新打包。');
+  if (!fs.existsSync(executable)) throw Object.assign(new Error('Bundled core is missing'), { code: 'ENOENT' });
   const child = spawn(executable, ['--background'], {
     env: {
       ...process.env,
@@ -457,59 +450,57 @@ function spawnCore() {
     windowsHide: true,
     stdio: 'ignore',
   });
-  bridge = child;
-  attached = false;
-  child.on('error', (error) => console.error('Bridge process error:', error));
-  child.on('exit', () => { if (bridge === child) bridge = null; if (!quitting) void coreExited(); });
+  return child;
 }
 
-async function coreExited() {
-  // Another core already owns the port (for example one started at login by an
-  // older version): use it instead of quitting the whole app.
-  if (await healthy()) { attachToRunningCore(); return; }
-  const now = Date.now();
-  coreRestarts = coreRestarts.filter((t) => now - t < 120000);
-  if (coreRestarts.length >= 4) {
-    if (window && !window.isDestroyed()) {
-      await window.loadFile(path.join(__dirname, 'loading.html'), { query: { error: '核心连续意外退出，已停止自动重启。请查看设置里的运行日志，或重新打开 Salcara Bridge。', retry: '1' } }).catch(() => {});
-      if (!window.isVisible()) showWindow();
-    }
-    return;
-  }
-  coreRestarts.push(now);
-  await new Promise((resolve) => setTimeout(resolve, 800 * coreRestarts.length));
-  if (quitting) return;
-  try {
-    spawnCore();
-  } catch (error) {
-    console.error(error);
-    return;
-  }
-  if (await waitForBridge()) {
-    notify('Salcara Bridge 已自动恢复', '核心程序意外退出，已经重新启动。手机连接会自动恢复。');
-    if (window && !window.isDestroyed() && window.webContents.getURL().startsWith(consoleURL)) window.webContents.reload();
-    else if (window && !window.isDestroyed()) await window.loadURL(consoleURL).catch(() => {});
-    reloadBall();
-  }
+function coreFailureMessage(error) {
+  if (error?.code === 'ENOENT') return '软件内置的核心文件缺失或已被移走。请从 GitHub 下载完整安装包并重新安装，已有配置会保留。';
+  if (error?.code === 'EACCES' || error?.code === 'EPERM') return '系统阻止了内置核心启动。请检查文件访问权限或安全软件的拦截记录，然后重试。';
+  if (error?.code === 'CORE_CRASH_LOOP') return '内置核心连续意外退出，已暂停自动重启。请重新尝试，或重新安装完整软件。';
+  if (error?.code === 'CORE_TIMEOUT') return `内置核心暂未就绪。请稍后重试；若持续失败，请检查本机 ${consolePort} 端口是否被其他程序占用。`;
+  return '内置核心无法启动。请重试；若持续失败，请从 GitHub 下载完整安装包并重新安装。';
 }
 
-// Watch a core we did not start; if it goes away, start our own.
-let attachTimer;
-function attachToRunningCore() {
-  attached = true;
-  clearInterval(attachTimer);
-  attachTimer = setInterval(async () => {
-    if (quitting || !attached) { clearInterval(attachTimer); return; }
-    if (!(await healthy())) {
-      clearInterval(attachTimer);
-      attached = false;
-      try { spawnCore(); } catch (error) { console.error(error); return; }
-      if (await waitForBridge()) {
-        if (window && !window.isDestroyed()) await window.loadURL(consoleURL).catch(() => {});
-        reloadBall();
-      }
-    }
-  }, 5000);
+function getCoreLifecycle() {
+  if (!coreLifecycle) coreLifecycle = require('./core-lifecycle.cjs').createCoreLifecycle({
+    launch: spawnCore, healthy, isStopping: () => quitting,
+    onOwner(child, external) { bridge = child; attached = external; },
+    onReady: showReadyCore,
+    async onFailure(error) {
+      console.error('Bridge startup/recovery failed:', error);
+      if (quitting || !window || window.isDestroyed()) return;
+      // Reload the failure page on every failed retry so its button is usable
+      // again, including synchronous missing-file and asynchronous spawn errors.
+      await window.loadFile(path.join(__dirname, 'loading.html'), { query: { error: coreFailureMessage(error), retry: '1' } });
+      if (!quitting && !window.isDestroyed() && !window.isVisible()) showWindow();
+    },
+  });
+  return coreLifecycle;
+}
+
+async function showReadyCore({ initial, recovered, current }) {
+  if (!current() || !window || window.isDestroyed()) return;
+  void pluginCoreLink?.start();
+  // The initial animated hand-over is retained. Recovery reuses the same
+  // completion path, including verified update policy and update receipts.
+  if (initial && !startHidden && !closedDuringStart) {
+    await Promise.race([
+      window.webContents.executeJavaScript('window.__bootReady ? window.__bootReady.then(() => window.__settle && window.__settle()) : 0', true).catch(() => {}),
+      new Promise(resolve => setTimeout(resolve, 4000)),
+    ]);
+  }
+  if (!current() || !window || window.isDestroyed()) return;
+  const boot = initial && !startHidden && !closedDuringStart && window.isVisible();
+  await window.loadURL(consoleURL + (boot ? '?boot=1' : ''));
+  if (!current()) return;
+  if (!initial) reloadBall();
+  if (startHidden || closedDuringStart || !window.isVisible()) showBall();
+  await syncUpdatePolicy(true);
+  if (!current()) return;
+  getUpdater().cleanup();
+  reportUpdateResult();
+  setTimeout(() => getUpdater().cleanup(), 5000);
+  if (recovered) notify('Salcara Bridge 已自动恢复', '内置核心已重新启动，手机连接正在恢复。');
 }
 
 function reloadBall() {
@@ -655,11 +646,11 @@ async function commitForUpdate() {
   const child = updateOwner && updateOwner.child;
   if (!child || child !== bridge) throw new Error('核心身份已改变，未安装更新');
   quitting = true;
+  coreLifecycle?.pause();
   try {
     await updateRequest('commit');
     for (let i = 0; i < 75 && child.exitCode === null; i++) await new Promise((r) => setTimeout(r, 200));
     if (child.exitCode === null) throw new Error('核心仍未安全退出，未安装更新');
-    clearInterval(attachTimer);
   } catch (error) {
     quitting = false;
     throw error;
@@ -671,7 +662,7 @@ async function abortForUpdate() {
   if (owner && owner.child.exitCode === null) await updateRequest('cancel').catch(() => {});
   updateOwner = null;
   quitting = false;
-  if ((!bridge || bridge.exitCode !== null) && !(await healthy())) spawnCore();
+  if (!bridge || bridge.exitCode !== null) await getCoreLifecycle().start({ manual: true });
 }
 function reportUpdateResult() {
   const done = getUpdater().afterRestart();
@@ -695,35 +686,11 @@ async function start() {
   setInterval(() => { if (policyError || getUpdater().state().required) void syncUpdatePolicy(true); }, 10000);
   try { await startPluginSystem(); }
   catch (error) { console.error('[plugins] init failed:', error); }
-  if (await healthy()) attachToRunningCore();
-  else spawnCore();
-  if (!(await waitForBridge())) {
-    await window.loadFile(path.join(__dirname, 'loading.html'), { query: { error: `核心启动失败。请检查本机 ${consolePort} 端口是否被占用。`, retry: '1' } });
-    if (startHidden) showWindow();
-    return;
-  }
-  void pluginCoreLink?.start();
-  // Let the start-up animation finish, then hand over to the console, which
-  // carries the orb and the name to their places (?boot=1). Skipped when
-  // starting hidden: nobody is watching.
-  if (startHidden || closedDuringStart) await window.loadURL(consoleURL);
-  else {
-    await Promise.race([
-      window.webContents.executeJavaScript('window.__bootReady ? window.__bootReady.then(() => window.__settle && window.__settle()) : 0', true).catch(() => {}),
-      new Promise((resolve) => setTimeout(resolve, 4000)),
-    ]);
-    // Closed while the animation was finishing: no hand-over, just the ball.
-    if (closedDuringStart || !window.isVisible()) await window.loadURL(consoleURL);
-    else await window.loadURL(consoleURL + '?boot=1');
-  }
-  if (startHidden || closedDuringStart || !window.isVisible()) showBall();
-  await syncUpdatePolicy(true);
-  getUpdater().cleanup();
-  reportUpdateResult();
-  setTimeout(() => getUpdater().cleanup(), 5000);
+  await getCoreLifecycle().start({ initial: true });
 }
 
 app.on('before-quit', event => {
+  coreLifecycle?.pause();
   if (!pluginQuitDone && pluginSystem) {
     event.preventDefault();
     if (pluginQuitStarted) return;
@@ -737,6 +704,5 @@ app.on('before-quit', event => {
   }
   quitting = true;
   cancelBallRecovery();
-  clearInterval(attachTimer);
   if (bridge && bridge.exitCode === null) bridge.kill();
 });

@@ -26,7 +26,6 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"runtime"
@@ -188,15 +187,8 @@ func run(background bool) error {
 		_ = store.Update(func(c *config.Config) error { c.RelayRoot = r; return nil })
 		logger.Printf("relay address pre-filled: %s", r)
 	}
-	exe := autostart.Executable()
-	// Inside the desktop app, start at login means starting the app itself (it
-	// runs in the background with its tray and floating ball and owns this core),
-	// not this headless core alone.
-	if desktop := os.Getenv("SALCARA_DESKTOP_EXE"); os.Getenv("SALCARA_EMBEDDED_WINDOW") == "1" && filepath.IsAbs(desktop) {
-		if st, err := os.Stat(desktop); err == nil && !st.IsDir() {
-			exe = desktop
-		}
-	}
+	runtimePaths := resolveRuntimePaths(autostart.Executable(), os.Getenv("SALCARA_DESKTOP_EXE"),
+		os.Getenv("SALCARA_DESKTOP_COMPANION_DIR"), os.Getenv("SALCARA_EMBEDDED_WINDOW") == "1")
 	localToken := config.RandomToken(24)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -208,21 +200,10 @@ func run(background bool) error {
 		cancel()
 	}()
 
-	bundleDir := filepath.Join(filepath.Dir(exe), "desktop-companion")
-	if configured := os.Getenv("SALCARA_DESKTOP_COMPANION_DIR"); configured != "" {
-		bundleDir = configured
-	}
-	nodePath := filepath.Join(filepath.Dir(exe), "SalcaraProbeNode")
-	if runtime.GOOS == "windows" {
-		nodePath += ".exe"
-	}
-	if _, err := os.Stat(nodePath); err != nil {
-		nodePath, _ = exec.LookPath("node")
-	}
 	companion := desktopcompanion.New(desktopcompanion.Options{
-		BundleDir: bundleDir,
+		BundleDir: runtimePaths.companionDir,
 		DataDir:   dir,
-		NodePath:  nodePath,
+		NodePath:  runtimePaths.nodeExe,
 		// Native Codex Desktop control is admitted only while Salcara has an
 		// explicit Codex source selected.  The identity is opaque and contains
 		// no API key; the fingerprint lets the companion reject a lease bound
@@ -309,7 +290,7 @@ func run(background bool) error {
 		Version:         version,
 		Port:            LocalPort,
 		LogPath:         logPathOf(lf),
-		Exe:             exe,
+		Exe:             runtimePaths.startupExe,
 		Dir:             dir,
 		Logger:          logger,
 		Quit:            cancel,
@@ -338,7 +319,7 @@ func run(background bool) error {
 			}
 		}
 		s := agents.LocalSettingsWithGateway(c, LocalPort)
-		s.BridgeExe, s.LocalPort, s.LocalToken = exe, LocalPort, localToken
+		s.BridgeExe, s.LocalPort, s.LocalToken = runtimePaths.coreExe, LocalPort, localToken
 		return s
 	}
 	sink := func(ev protocol.Event) {
@@ -385,9 +366,9 @@ func run(background bool) error {
 	go mgr.Watch(ctx)
 	go hub.Run(ctx)
 
-	// Keep the autostart entry pointing at this exe (the user may have moved it).
-	if c := store.Get(); c.Autostart && exe != "" {
-		if err := autostart.Enable(exe); err != nil {
+	// Keep the autostart entry pointing at the app (the user may have moved it).
+	if c := store.Get(); c.Autostart && runtimePaths.startupExe != "" {
+		if err := autostart.Enable(runtimePaths.startupExe); err != nil {
 			logger.Printf("autostart refresh: %v", err)
 		}
 	}
