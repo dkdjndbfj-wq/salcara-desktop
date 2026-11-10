@@ -4,6 +4,9 @@ package agents
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
+	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
@@ -53,5 +56,34 @@ func protectClaudeRuntimeDir(path string) error {
 	if owner == nil || !owner.Equals(user.User.Sid) {
 		return errors.New("Claude runtime directory owner changed")
 	}
-	return nil
+	// A child receives the creating token's default owner, not its directory's
+	// owner. Elevated Windows tokens may default to Administrators. Create the
+	// empty file with the exact user owner before the caller writes credentials.
+	fileSD, err := windows.SecurityDescriptorFromString("O:" + user.User.Sid.String() + "D:P(A;;FA;;;" + user.User.Sid.String() + ")(A;;FA;;;SY)")
+	if err != nil {
+		return err
+	}
+	file := filepath.Join(path, "settings.json")
+	name, err := windows.UTF16PtrFromString(file)
+	if err != nil {
+		return err
+	}
+	security := windows.SecurityAttributes{SecurityDescriptor: fileSD}
+	security.Length = uint32(unsafe.Sizeof(security))
+	handle, err := windows.CreateFile(name, windows.GENERIC_WRITE|windows.READ_CONTROL, 0, &security, windows.CREATE_NEW, windows.FILE_ATTRIBUTE_NORMAL, 0)
+	if err != nil {
+		return err
+	}
+	current, inspectErr := windows.GetSecurityInfo(handle, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION)
+	if inspectErr == nil {
+		owner, _, inspectErr = current.Owner()
+		if inspectErr == nil && (owner == nil || !owner.Equals(user.User.Sid)) {
+			inspectErr = errors.New("Claude runtime file owner changed")
+		}
+	}
+	err = errors.Join(inspectErr, windows.CloseHandle(handle))
+	if err != nil {
+		_ = os.Remove(file) // exact empty file; no credential contents were written
+	}
+	return err
 }
