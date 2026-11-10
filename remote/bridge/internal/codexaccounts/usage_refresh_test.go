@@ -5,6 +5,7 @@ import (
 	"errors"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -354,6 +355,64 @@ func TestUsageMaintenanceConcurrencyIncludesCancelledUnwindingWork(t *testing.T)
 	})
 	if peak.Load() > usageRefreshConcurrency {
 		t.Fatalf("background provider concurrency escaped bound: %d", peak.Load())
+	}
+}
+
+func TestUsageMaintenanceReenabledTargetWaitsForRetiredFlight(t *testing.T) {
+	clock := newUsageRefreshClock()
+	calls := make(chan string, 8)
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	s := usageRefreshTestService(t, clock, UsageFetchFunc(func(_ context.Context, a *coreauth.Auth) (UsageFetchResult, error) {
+		calls <- a.ID
+		<-release // Keep the retired transport alive after its waiter is cancelled.
+		return freshUsageFixture(), nil
+	}), nil)
+	t.Cleanup(func() { releaseOnce.Do(func() { close(release) }) })
+	var targets []UsageRefreshTarget
+	for _, suffix := range []string{"retired", "sentinel"} {
+		raw := strings.ReplaceAll(strings.ReplaceAll(fixture, "fixture", "fixture-"+suffix), "synthetic", "synthetic-"+suffix)
+		prepared, err := ParseImport([]byte(raw))
+		if err != nil {
+			t.Fatal(err)
+		}
+		rows, err := s.Import(context.Background(), prepared, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		targets = append(targets, activeUsageTarget(rows[0]))
+	}
+	if targets[0].ID > targets[1].ID {
+		targets[0], targets[1] = targets[1], targets[0]
+	}
+	retired, sentinel := targets[0], targets[1]
+	s.SetUsageRefreshTargets([]UsageRefreshTarget{retired})
+	if got := waitUsageCall(t, calls); got != retired.ID {
+		t.Fatalf("wrong initial target: %q", got)
+	}
+	s.SetUsageRefreshTargets(nil)
+	s.SetUsageRefreshTargets(targets)
+	// The sentinel starts after the scheduler visits the lexically earlier
+	// retired target. It is an execution barrier, not a timing-only check.
+	if got := waitUsageCall(t, calls); got != sentinel.ID {
+		t.Fatalf("re-enabled target overlapped its cancelled transport: %q", got)
+	}
+	s.mu.Lock()
+	state := s.usageRefresh.targets[retired.ID]
+	blockedWithoutBackoff := state != nil && state.job == nil && state.failures == 0 && state.next.IsZero()
+	s.mu.Unlock()
+	if !blockedWithoutBackoff {
+		t.Fatal("retiring flight turned a newly enabled target into a failed retry")
+	}
+	releaseOnce.Do(func() { close(release) })
+	if got := waitUsageCall(t, calls); got != retired.ID {
+		t.Fatalf("retired target did not restart after its transport exited: %q", got)
+	}
+	waitUsageIdle(t, s)
+	for _, target := range targets {
+		if !s.PoolQuota(target.ID, target.IdentityEpoch, "").Fresh {
+			t.Fatal("re-enabled target requires a fake-clock advance to recover")
+		}
 	}
 }
 

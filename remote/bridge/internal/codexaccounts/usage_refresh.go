@@ -183,6 +183,20 @@ func (s *Service) runUsageScheduler(r *usageRefreshScheduler) {
 				next = state.next
 				break
 			}
+			// Removing and re-enabling a target replaces its state while the
+			// cancelled provider flight can still be unwinding. Do not start
+			// its successor against that cancelled flight: the conflict would
+			// incorrectly put the newly enabled target into failure backoff.
+			retiring := false
+			for prior := range r.jobs {
+				if prior.target.ID == state.target.ID {
+					retiring = true
+					break
+				}
+			}
+			if retiring {
+				continue // The retired job's completion wakes the scheduler.
+			}
 			// The underlying credential and usage flights each retain their own
 			// shorter timeout. This bounds the full recovery chain as well.
 			ctx, cancel := context.WithTimeout(r.ctx, s.timeout+2*s.usageTimeout)
