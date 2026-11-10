@@ -3,6 +3,7 @@
 package desktopcompanion
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"path/filepath"
@@ -12,6 +13,157 @@ import (
 
 	"golang.org/x/sys/windows"
 )
+
+// Create real Windows objects with the exact user owner, independently of the
+// token's default owner. The fixtures remain confined to t.TempDir and contain
+// no user configuration or credentials.
+func createRestrictedPrivateFixture(t *testing.T, path string, directory, denyDACL bool) {
+	t.Helper()
+	user, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil {
+		t.Fatal(err)
+	}
+	flags, deniedSID, deniedRights := "", user.User.Sid.String(), "WO"
+	deniedMask := windows.ACCESS_MASK(windows.WRITE_OWNER)
+	if directory {
+		flags = "OICI"
+	}
+	if denyDACL {
+		// OWNER RIGHTS also suppresses the owner's implicit WRITE_DAC grant.
+		deniedSID, deniedRights = "OW", "WDWO"
+		deniedMask |= windows.WRITE_DAC
+	}
+	sd, err := windows.SecurityDescriptorFromString("O:" + user.User.Sid.String() +
+		"D:P(D;" + flags + ";" + deniedRights + ";;;" + deniedSID + ")" +
+		"(A;" + flags + ";0x1301bf;;;" + user.User.Sid.String() + ")(A;" + flags + ";FA;;;SY)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	name, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	security := windows.SecurityAttributes{SecurityDescriptor: sd}
+	security.Length = uint32(unsafe.Sizeof(security))
+	if directory {
+		if err := windows.CreateDirectory(name, &security); err != nil {
+			t.Fatal(err)
+		}
+	} else {
+		handle, err := windows.CreateFile(name, windows.GENERIC_WRITE|windows.READ_CONTROL, 0, &security, windows.CREATE_NEW, windows.FILE_ATTRIBUTE_NORMAL, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := windows.CloseHandle(handle); err != nil {
+			t.Fatal(err)
+		}
+	}
+	actual, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner, _, err := actual.Owner()
+	if err != nil || owner == nil || !owner.Equals(user.User.Sid) {
+		t.Fatal("restricted fixture is not owned by the exact user", err)
+	}
+	dacl, _, err := actual.DACL()
+	if err != nil || dacl == nil || dacl.AceCount != 3 {
+		t.Fatal("restricted fixture did not retain its three ACEs", err)
+	}
+	var denied *windows.ACCESS_ALLOWED_ACE
+	if windows.GetAce(dacl, 0, &denied) != nil || denied == nil || denied.Header.AceType != windows.ACCESS_DENIED_ACE_TYPE || denied.Mask != deniedMask {
+		t.Fatal("restricted fixture did not explicitly deny the requested owner rights")
+	}
+}
+
+func TestWindowsPrivatePermissionsOwnedModifyOnlyTargets(t *testing.T) {
+	for _, directory := range []bool{false, true} {
+		name := "file"
+		if directory {
+			name = "directory"
+		}
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), name)
+			createRestrictedPrivateFixture(t, path, directory, false)
+			if err := checkPrivatePermissions(path); err == nil {
+				t.Fatal("Modify-only fixture was already accepted as private")
+			}
+			if err := setPrivatePermissions(path, directory); err != nil {
+				t.Fatalf("protect exact-user-owned Modify-only %s without WRITE_OWNER: %v", name, err)
+			}
+			if err := checkPrivatePermissions(path); err != nil {
+				t.Fatal("protected fixture is not strictly private", err)
+			}
+			sd, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+			if err != nil {
+				t.Fatal(err)
+			}
+			dacl, _, err := sd.DACL()
+			if err != nil || dacl == nil || dacl.AceCount != 2 {
+				t.Fatal("protection did not install exactly user and SYSTEM", err)
+			}
+			for index := uint32(0); index < uint32(dacl.AceCount); index++ {
+				var ace *windows.ACCESS_ALLOWED_ACE
+				if windows.GetAce(dacl, index, &ace) != nil || ace == nil || ace.Mask != 0x1f01ff {
+					t.Fatal("protection did not give the two private principals full access")
+				}
+			}
+		})
+	}
+}
+
+func TestWindowsPrivateProtectionFailureNeverWritesContents(t *testing.T) {
+	const secret = "synthetic-only-companion-protection-fixture"
+	for _, atomic := range []bool{false, true} {
+		name := "exclusive"
+		if atomic {
+			name = "atomic"
+		}
+		t.Run(name, func(t *testing.T) {
+			root := filepath.Join(t.TempDir(), "restricted")
+			createRestrictedPrivateFixture(t, root, true, true)
+			path := filepath.Join(root, "fixture.json")
+			original := []byte("original fixture remains unchanged")
+			if atomic {
+				if err := os.WriteFile(path, original, 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			before, err := windows.GetNamedSecurityInfo(root, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
+			if err != nil {
+				t.Fatal(err)
+			}
+			write := writeExclusive
+			if atomic {
+				write = atomicWrite
+			}
+			if err := write(path, []byte(secret)); err == nil {
+				t.Fatal("writer accepted a target whose private protection is denied")
+			}
+			contents, err := os.ReadFile(path)
+			if atomic {
+				if err != nil || !bytes.Equal(contents, original) {
+					t.Fatal("failed private protection replaced existing contents", err)
+				}
+			} else if !os.IsNotExist(err) && (err != nil || len(contents) != 0) {
+				t.Fatal("failed private protection wrote contents", err)
+			}
+			entries, err := os.ReadDir(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, entry := range entries {
+				if entry.Name() != "fixture.json" {
+					t.Fatal("failed atomic protection retained an unexpected temporary file")
+				}
+			}
+			after, err := windows.GetNamedSecurityInfo(root, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
+			if err != nil || before.String() != after.String() {
+				t.Fatal("writer bypassed denied protection by changing the parent permissions", err)
+			}
+		})
+	}
+}
 
 func TestWindowsBackupsHaveProtectedOwnerAndSystemDACL(t *testing.T) {
 	s, o := fixture(t, "model = \"fixture-private\"\n")

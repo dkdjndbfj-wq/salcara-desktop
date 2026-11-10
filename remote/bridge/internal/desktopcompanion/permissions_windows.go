@@ -91,8 +91,29 @@ func setPrivatePermissions(path string, directory bool) error {
 	if err != nil {
 		return err
 	}
-	// An elevated token may default new-object ownership to Administrators.
-	// Set the actual installing user explicitly; the read path must not repair
-	// or accept a foreign owner just because its DACL looks private.
-	return windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, user.User.Sid, nil, dacl, nil)
+	current, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION)
+	if err != nil {
+		return err
+	}
+	owner, _, err := current.Owner()
+	if err != nil {
+		return err
+	}
+	information := windows.SECURITY_INFORMATION(windows.DACL_SECURITY_INFORMATION | windows.PROTECTED_DACL_SECURITY_INFORMATION)
+	var newOwner *windows.SID
+	// A user-owned Modify-only location can allow protecting its DACL without
+	// WRITE_OWNER. Do not request an unnecessary ownership change. A different
+	// owner (including an elevated token's default Administrators owner) still
+	// requires the original ownership-change permission and must not be accepted
+	// merely because its DACL looks private.
+	if owner == nil || !owner.Equals(user.User.Sid) {
+		information |= windows.OWNER_SECURITY_INFORMATION
+		newOwner = user.User.Sid
+	}
+	if err := windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, information, newOwner, nil, dacl, nil); err != nil {
+		return err
+	}
+	// Writers may proceed only after the existing read-only verifier confirms
+	// the exact current owner and protected user/SYSTEM-only permissions.
+	return checkPrivatePermissions(path)
 }
