@@ -30,6 +30,18 @@ func (e *RemoteHTTPError) Error() string {
 		return "本站正在验证 API 来源，请稍后重试；无需重新登记电脑或手机"
 	}
 	switch e.Code {
+	case "api_enrollment_unsupported":
+		return "本站暂不支持通过 API 自动登记，请使用管理员提供的电脑登记授权"
+	case "api_credentials_invalid":
+		return "所选 API 已失效或过期，请检查 API 配置"
+	case "api_enrollment_denied", "enrollment_issuer_untrusted":
+		return "本站未授权此 API 登记电脑，请联系站点管理员"
+	case "enrollment_grant_invalid", "enrollment_challenge_expired", "enrollment_request_conflict":
+		return "电脑登记授权已变化或过期，请重新检查连接"
+	case "api_verifier_unavailable":
+		return "本站暂时无法验证 API，请稍后重试"
+	case "enrollment_result_unknown":
+		return "电脑登记结果尚未确认，请再次检查；不会重复创建电脑"
 	case "device_credentials_invalid", "device_authorization_expired":
 		return "这台电脑的设备登记已失效，请重新登记并绑定手机；本机 API、项目与对话保留"
 	case "device_enrollment_required":
@@ -76,7 +88,7 @@ func knownRemoteErrorCode(code string) bool {
 		return true
 	}
 	switch code {
-	case "device_credentials_invalid", "device_authorization_expired", "device_credentials_required", "device_enrollment_required", "enrollment_claim_invalid", "pair_credentials_invalid", "user_disabled", "ambiguous_credentials", "invalid_request", "source_not_authorized", "source_policy_changed", "remote_unavailable":
+	case "device_credentials_invalid", "device_authorization_expired", "device_credentials_required", "device_enrollment_required", "enrollment_claim_invalid", "pair_credentials_invalid", "user_disabled", "ambiguous_credentials", "invalid_request", "source_not_authorized", "source_policy_changed", "remote_unavailable", "api_credentials_invalid", "api_enrollment_denied", "enrollment_issuer_untrusted", "enrollment_grant_invalid", "enrollment_challenge_expired", "enrollment_request_conflict", "api_verifier_unavailable", "api_enrollment_unsupported", "enrollment_result_unknown":
 		return true
 	}
 	return false

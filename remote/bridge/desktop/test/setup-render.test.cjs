@@ -48,3 +48,19 @@ test('unchanged setup status does not recreate fixed page content or action cont
   assert.equal(f.view.writes, viewWrites + 1, 'a real tool state change still refreshes visible content');
 });
 
+test('optional missing Agents never block pairing or falsely claim a ready remote connection', () => {
+  for (const installed of [false, true]) {
+    const f = fixture(), state = snapshot();
+    state.discoveryPending = false;
+    state.items[0].required = false;
+    state.items[0].installed = installed;
+    state.items.push({ id: 'claude', name: 'Claude Code', required: false, installed: false, installable: true });
+    f.context.renderSetup(f.view, state, null);
+    assert.equal(f.elements.get('setupDot').hidden, true);
+    assert.match(f.view.innerHTML, /远程连接已内置/);
+    assert.match(f.view.innerHTML, /使用哪个 Agent 就准备哪个/);
+    assert.doesNotMatch(f.view.innerHTML, /装好后手机才能|环境已就绪，手机可以/);
+    assert.match(f.view.innerHTML, /data-tool="claude"/);
+  }
+});
+

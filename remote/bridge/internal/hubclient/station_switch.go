@@ -170,7 +170,7 @@ func (c *Client) verifyStationSwitch(ctx context.Context, target config.RemoteCo
 	}
 	probeCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
 	defer cancel()
-	discovery, err := DiscoverForConnection(probeCtx, c.o.Store.Get(), target)
+	discovery, err := c.DiscoverForConnection(probeCtx, c.o.Store.Get(), target)
 	if err != nil {
 		return config.Config{}, fmt.Errorf("目标中转站不可用：%w", err)
 	}

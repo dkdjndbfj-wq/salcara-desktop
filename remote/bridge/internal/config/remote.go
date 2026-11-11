@@ -169,7 +169,7 @@ func (c *Config) connectRemote(root, hubURL, enrollmentClaim, botGroupID string)
 	stationKey := NormalizeHubURL(hubURL)
 	savedIndex := -1
 	for i := range c.RemoteConnections {
-		if NormalizeHubURL(c.RemoteConnections[i].HubURL) == stationKey && (c.RemoteConnections[i].BotGroupID != "") == (botGroupID != "") {
+		if NormalizeHubURL(c.RemoteConnections[i].HubURL) == stationKey && c.RemoteConnections[i].BotGroupID == botGroupID {
 			savedIndex = i
 			break
 		}

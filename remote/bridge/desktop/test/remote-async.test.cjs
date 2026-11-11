@@ -9,12 +9,13 @@ const path = require('node:path');
 const vm = require('node:vm');
 
 const source = fs.readFileSync(path.resolve(__dirname, '../../internal/console/web/remote.js'), 'utf8');
+const connectionSource = fs.readFileSync(path.resolve(__dirname, '../../internal/console/web/remote-connect.js'), 'utf8');
 
 function deferred() { let resolve, reject; const promise = new Promise((done, fail) => { resolve = done; reject = fail; }); return { promise, resolve, reject }; }
 function fixture() {
   const calls = [], pending = [], notices = [], routed = [], listeners = new Map();
   const nodes = new Map();
-  const node = id => { if (!nodes.has(id)) nodes.set(id, { id, innerHTML: '', textContent: '', isConnected: true, classList: { toggle() {}, remove() {} } }); return nodes.get(id); };
+  const node = id => { if (!nodes.has(id)) nodes.set(id, { id, innerHTML: '', textContent: '', isConnected: true, classList: { toggle() {}, remove() {}, contains() { return false; } } }); return nodes.get(id); };
   const context = vm.createContext({
     AbortController,
     PAGES: { login: {}, sessions: {}, projects: {} },
@@ -30,6 +31,7 @@ function fixture() {
     toast(message, kind) { notices.push({ message, kind }); }, confirm: async () => true, busy: async (_button, fn) => fn(), copyText() {}, OSX: () => 'win', relTime: () => 'now', location: { hash: '' },
     renderText: value => String(value ?? ''), renderDiff: () => '', tlApply() {}, KIND_ICON: {}, canOpenNativeSession: () => false,
   });
+  vm.runInContext(connectionSource, context, { filename: 'remote-connect.js' });
   vm.runInContext(source, context, { filename: 'remote.js' });
   return { context, calls, pending, node, notices, routed, emit(type, target) { for (const fn of listeners.get(type) || []) fn({ target }); } };
 }
@@ -46,7 +48,242 @@ function connectionFixture(mode = 'station') {
   return f;
 }
 
-test('saved API selection supplies only its full address and clears another station claim', () => {
+function apiConnectionFixture() {
+  const f = connectionFixture();
+  const account = { id: 'api-a', name: 'A', sourceRevision: 'src-v1-' + 'a'.repeat(64), baseUrl: 'https://api-a.test/tenant/v1', sourceType: 'api_key', key: 'synthetic-key-never-forward' };
+  f.context.S.local = { accounts: [account] };
+  f.node('rmSourceAPI').value = account.id;
+  f.emit('change', f.node('rmSourceAPI'));
+  f.node('rmEnrollmentFallback').hidden = true;
+  return { ...f, account };
+}
+
+test('API enrollment freezes local identity and revision through probe and registration without exposing key', async () => {
+  const f = apiConnectionFixture();
+  const connecting = f.context.ACTIONS.rmConnect({});
+  assert.deepEqual(JSON.parse(JSON.stringify(f.calls[0].body)), { url: f.account.baseUrl, hubUrl: '', accountId: f.account.id, expectedSourceRevision: f.account.sourceRevision });
+  f.pending[0].resolve({ ok: true, stage: 'discovered', registered: false, eligibility: { supported: true, method: 'api' } });
+  await new Promise(setImmediate);
+  assert.deepEqual(JSON.parse(JSON.stringify(f.calls[1].body)), { connect: true, ...JSON.parse(JSON.stringify(f.calls[0].body)) });
+  assert.equal(JSON.stringify(f.calls).includes(f.account.key), false);
+  assert.equal(f.calls[1].body.enrollmentClaim, undefined);
+  f.pending[1].resolve({ ok: true, registered: true, stage: 'waiting_online' });
+  await connecting;
+  assert.match(f.notices.at(-1).message, /登记已确认.*等待连接上线/);
+  assert.equal(f.calls.some(call => /session|history/.test(call.path)), false);
+});
+
+test('an advertised API capability never marks actual enrollment eligibility confirmed', async () => {
+  for (const oldOnline of [false, true]) {
+    const f = apiConnectionFixture();
+    if (oldOnline) { f.context.S.state.config.effectiveRemoteMode = 'hub'; f.context.S.state.config.loggedIn = true; f.context.S.state.hub.state = 'connected'; }
+    const connecting = f.context.ACTIONS.rmConnect({});
+    f.pending[0].resolve({ ok: true, stage: 'discovered', registered: false, eligibility: { supported: true, method: 'api' } });
+    await new Promise(setImmediate);
+    assert.match(f.node('rmConnectionSteps').innerHTML, /远程服务已发现/);
+    assert.doesNotMatch(f.node('rmConnectionSteps').innerHTML, /服务器已确认授权|服务器已确认电脑登记/, String(oldOnline));
+    f.pending[1].reject(Object.assign(new Error('invalid key'), { status: 401, code: 'api_credentials_invalid' }));
+    await connecting;
+    assert.equal(f.notices.length, 0);
+    assert.match(f.node('rmConnectError').innerHTML, /API 凭据无效或已过期/);
+  }
+});
+
+test('changing a selected API revision or its URL during discovery prevents registration', async () => {
+  for (const change of ['revision', 'base', 'selection']) {
+    const f = apiConnectionFixture();
+    const connecting = f.context.ACTIONS.rmConnect({});
+    if (change === 'revision') f.account.sourceRevision = 'src-v1-' + 'b'.repeat(64);
+    if (change === 'base') f.account.baseUrl = 'https://other.test/v1';
+    if (change === 'selection') f.node('rmSourceAPI').value = 'other-api';
+    f.pending[0].resolve({ ok: true, stage: 'discovered', eligibility: { supported: true, method: 'api' } });
+    await connecting;
+    assert.equal(f.calls.length, 1, change);
+    assert.equal(f.notices.length, 0, change);
+  }
+});
+
+test('a delayed page account read cannot restore an older API source revision', async () => {
+  const f = connectionFixture();
+  f.context.loadState = async () => f.context.S.state;
+  f.context.S.localAccountsRevision = 1;
+  f.context.RENDER_login(f.node('view'));
+  const read = pendingFor(f, '/api/local/accounts');
+  const current = { accounts: [{ id: 'a', sourceType: 'api_key', sourceRevision: 'new', baseUrl: 'https://new.test/v1' }] };
+  f.context.S.localAccountsRevision++;
+  f.context.S.local = current;
+  read.resolve({ accounts: [{ id: 'a', sourceType: 'api_key', sourceRevision: 'old', baseUrl: 'https://old.test/v1' }] });
+  await new Promise(setImmediate);
+  assert.equal(f.context.S.local, current);
+});
+
+test('editing address B detaches selected API A and never submits its identity to B', async () => {
+  const f = apiConnectionFixture();
+  f.node('rmStation').value = 'https://api-b.test/v1';
+  f.node('rmEnrollmentClaim').value = 'b'.repeat(64);
+  f.emit('input', f.node('rmStation'));
+  assert.equal(f.node('rmSourceAPI').value, '');
+  assert.equal(f.node('rmEnrollmentClaim').value, '');
+  assert.equal(f.node('rmEnrollmentFallback').hidden, true);
+  const connecting = f.context.ACTIONS.rmConnect({});
+  assert.deepEqual(JSON.parse(JSON.stringify(f.calls[0].body)), { url: 'https://api-b.test/v1', hubUrl: '' });
+  f.pending[0].reject(Object.assign(new Error('standalone device enrollment required'), { status: 403, code: 'device_enrollment_required' }));
+  await connecting;
+  assert.equal(f.node('rmEnrollmentFallback').hidden, false);
+  assert.equal(f.calls.length, 1);
+});
+
+test('a mismatched source or missing revision fails before any network request', async () => {
+  for (const change of ['url', 'revision']) {
+    const f = apiConnectionFixture();
+    if (change === 'url') f.node('rmStation').value = 'https://other.test/v1';
+    else delete f.account.sourceRevision;
+    await f.context.ACTIONS.rmConnect({});
+    assert.equal(f.calls.length, 0);
+    assert.match(f.node('rmConnectError').innerHTML, /API 已变化/);
+  }
+});
+
+test('an unsupported API shows administrator recovery without exposing a registration code', async () => {
+  const f = apiConnectionFixture();
+  const connecting = f.context.ACTIONS.rmConnect({});
+  f.pending[0].reject(Object.assign(new Error('capability missing'), { status: 409, code: 'api_enrollment_unsupported' }));
+  await connecting;
+  assert.equal(f.node('rmEnrollmentFallback').hidden, true);
+  assert.match(f.node('rmConnectError').innerHTML, /暂不支持 API 自动登记.*站点管理员/);
+  assert.equal(f.notices.length, 0);
+});
+
+test('saving a connection without a registration acknowledgement never becomes success or retries', async () => {
+  const f = apiConnectionFixture();
+  const connecting = f.context.ACTIONS.rmConnect({});
+  f.pending[0].resolve({ ok: true, stage: 'discovered', eligibility: { supported: true, method: 'api' } });
+  await new Promise(setImmediate);
+  f.pending[1].resolve({ ok: true, connected: true, registered: false, stage: 'waiting_online' });
+  await connecting;
+  assert.equal(f.calls.length, 2);
+  assert.equal(f.notices.length, 0);
+  assert.match(f.node('rmConnectError').innerHTML, /暂未确认.*尚未确认电脑登记/);
+});
+
+test('an unknown registration offers explicit checks and only the retry button sets retryEnrollment', async () => {
+  const f = apiConnectionFixture();
+  const first = f.context.ACTIONS.rmConnect({});
+  f.pending[0].resolve({ ok: true, stage: 'discovered', eligibility: { supported: true, method: 'api' } });
+  await new Promise(setImmediate);
+  f.pending[1].reject(Object.assign(new Error('电脑登记结果未知'), { status: 409, code: 'enrollment_result_unknown' }));
+  await first;
+  assert.equal(f.calls.length, 2);
+  assert.match(f.node('rmConnectError').innerHTML, /暂未确认/);
+  assert.match(f.node('rmConnectError').innerHTML, /检查登记结果/);
+  assert.match(f.node('rmConnectError').innerHTML, /data-act="rmRetryEnrollment"/);
+  assert.equal(f.calls.some(call => call.body?.retryEnrollment), false);
+  const retry = f.context.ACTIONS.rmRetryEnrollment({});
+  assert.equal(f.calls[2].body.retryEnrollment, undefined, 'the retry preflight remains read-only');
+  f.pending[2].resolve({ ok: true, stage: 'discovered', eligibility: { supported: true, method: 'api' } });
+  await new Promise(setImmediate);
+  assert.equal(f.calls[3].body.retryEnrollment, true);
+  assert.equal(f.calls[3].body.accountId, f.account.id);
+  assert.equal(f.calls[3].body.expectedSourceRevision, f.account.sourceRevision);
+  f.pending[3].resolve({ ok: true, registered: true, stage: 'waiting_online' });
+  await retry;
+  assert.equal(f.calls.length, 4);
+  assert.equal(vm.runInContext('RM.pendingEnrollment', f.context), null);
+});
+
+test('registration retry cannot cross an API edit or run without a prior unknown result', async () => {
+  const f = apiConnectionFixture();
+  await f.context.ACTIONS.rmRetryEnrollment({});
+  assert.equal(f.calls.length, 0);
+  vm.runInContext(`RM.pendingEnrollment = { key: rmCurrentEnrollmentTargetKey() }`, f.context);
+  f.account.sourceRevision = 'src-v1-' + 'b'.repeat(64);
+  await f.context.ACTIONS.rmRetryEnrollment({});
+  assert.equal(f.calls.length, 0);
+  f.emit('input', f.node('rmStation'));
+  assert.equal(vm.runInContext('RM.pendingEnrollment', f.context), null);
+});
+
+test('same-Hub Bot groups remain separate and activation sends the selected group', async () => {
+  const f = connectionFixture('bot');
+  const cfg = f.context.S.state.config;
+  Object.assign(cfg, { effectiveRemoteMode: 'bot', loggedIn: true, remoteModes: { bot: { groupId: 'group-a' } }, remoteConnections: [
+    { mode: 'bot', groupId: 'group-a', hubUrl: cfg.effectiveHubUrl, name: 'same name' },
+    { mode: 'bot', groupId: 'group-b', hubUrl: cfg.effectiveHubUrl, name: 'same name' },
+  ] });
+  f.context.S.state.hub.state = 'connected';
+  const markup = f.context.renderRemoteBotPanel(cfg);
+  assert.equal(f.context.rmSavedConnections(cfg, 'bot').length, 2);
+  assert.equal((markup.match(/>已连接<\/span>/g) || []).length, 1);
+  assert.doesNotMatch(markup, /data-group="group-a"/);
+  assert.match(markup, /data-group="group-b" >启用 Bot/);
+  const action = f.context.ACTIONS.rmActivateMode({ dataset: { mode: 'bot', hub: cfg.effectiveHubUrl, group: 'group-b' } });
+  assert.equal(f.calls[0].body.groupId, 'group-b');
+  f.pending[0].resolve({ ok: true, activeMode: 'bot' });
+  await action;
+});
+
+function botIngressFixture() {
+  const f = connectionFixture('bot'), hubUrl = 'https://old-bot.test/salcara-hub';
+  f.context.S.state.config.remoteConnections = [{ mode: 'bot', groupId: 'group-a', hubUrl }, { mode: 'bot', groupId: 'group-b', hubUrl }];
+  f.node('rmBotIngress-1').value = 'https://new-bot.test/salcara-hub';
+  const button = { dataset: { field: 'rmBotIngress-1', hub: hubUrl, group: 'group-b' }, isConnected: true };
+  return { ...f, hubUrl, button };
+}
+
+test('Bot address recovery targets the saved group without first binding or activating it', async () => {
+  const f = botIngressFixture();
+  const changing = f.context.ACTIONS.rmBotIngress(f.button);
+  assert.deepEqual(JSON.parse(JSON.stringify(f.calls[0])), { path: '/api/remote/ingress', body: { hubUrl: f.hubUrl, groupId: 'group-b', url: 'https://new-bot.test/salcara-hub' } });
+  await f.context.ACTIONS.rmBotIngress(f.button);
+  assert.equal(f.calls.length, 1, 'same shared lease prevents duplicate recovery');
+  f.pending[0].resolve({ ok: true, hubUrl: f.hubUrl, groupId: 'group-b', ingressUrl: 'https://new-bot.test/salcara-hub/v1' });
+  await changing;
+  assert.match(f.node('rmBotIngressError-1').innerHTML, /原连接身份验证并保存/);
+  assert.equal(f.calls.some(call => /bot-bind|remote\/mode|session|history/.test(call.path)), false);
+  assert.equal(f.routed.length, 0);
+});
+
+test('Bot address recovery preserves the old logical binding when identity verification fails', async () => {
+  const f = botIngressFixture(), before = JSON.stringify(f.context.S.state.config.remoteConnections);
+  const changing = f.context.ACTIONS.rmBotIngress(f.button);
+  f.pending[0].reject(Object.assign(new Error('服务身份已变化'), { status: 409, code: 'hub_identity_changed' }));
+  await changing;
+  assert.equal(JSON.stringify(f.context.S.state.config.remoteConnections), before);
+  assert.match(f.node('rmBotIngressError-1').innerHTML, /身份已变化/);
+  assert.equal(f.notices.length, 0);
+  assert.equal(f.calls.length, 1);
+});
+
+test('a late Bot address recovery cannot repaint a different mode or a newer address draft', async () => {
+  for (const change of ['mode', 'draft']) {
+    const f = botIngressFixture();
+    const changing = f.context.ACTIONS.rmBotIngress(f.button);
+    if (change === 'mode') await f.context.ACTIONS.rmMode({ dataset: { mode: 'direct' } });
+    else { f.node('rmBotIngress-1').value = 'https://newer.test'; f.emit('input', f.node('rmBotIngress-1')); }
+    f.pending[0].resolve({ ok: true, hubUrl: f.hubUrl, groupId: 'group-b', ingressUrl: 'https://new-bot.test/salcara-hub/v1' });
+    await changing;
+    assert.equal(f.node('rmBotIngressError-1').innerHTML, '', change);
+    assert.equal(f.notices.length, 0, change);
+  }
+});
+
+test('Bot address recovery rejects unsafe URLs and unconfirmed target acknowledgements', async () => {
+  for (const url of ['http://new.test', 'https://name:secret@new.test', 'https://new.test/?token=x', 'https://new.test/#secret']) {
+    const f = botIngressFixture();
+    f.node('rmBotIngress-1').value = url;
+    await f.context.ACTIONS.rmBotIngress(f.button);
+    assert.equal(f.calls.length, 0, url);
+    assert.match(f.node('rmBotIngressError-1').innerHTML, /HTTPS/);
+  }
+  const f = botIngressFixture();
+  const changing = f.context.ACTIONS.rmBotIngress(f.button);
+  f.pending[0].resolve({ ok: true, hubUrl: f.hubUrl, groupId: 'group-a', ingressUrl: 'https://new-bot.test/salcara-hub/v1' });
+  await changing;
+  assert.match(f.node('rmBotIngressError-1').innerHTML, /暂未确认/);
+  assert.equal(f.notices.length, 0);
+});
+
+test('saved API selection fills its full address locally and clears another station claim', () => {
   const f = connectionFixture();
   f.context.S.local = { accounts: [{ id: 'a', baseUrl: 'https://api.test/tenant/v1', key: 'never-forward-this-key' }] };
   f.node('rmSourceAPI').value = 'a';
@@ -363,16 +600,15 @@ test('new-thread feature controls appear when the background catalog arrives', a
   assert.match(f.node('cxFeatureMount').innerHTML, /cxCollaborationMode/);
 });
 
-test('standalone Hub enrollment code is sent only on connect and cleared after success', async () => {
+test('standalone Hub enrollment code is sent only on connect and retained after an asynchronous save', async () => {
   const f = fixture();
   f.context.S.route = 'login';
   f.context.S.state = { config: { loggedIn: false, relayRoot: '', hubUrl: '', remoteConnections: [] } };
   const view = { isConnected: true, innerHTML: '' };
   f.context.RENDER_login(view);
   assert.match(view.innerHTML, /id="rmEnrollmentClaim"/);
-  assert.match(view.innerHTML, /首次登记必填，已登记电脑留空/);
-  assert.match(view.innerHTML, /登记失败时保留以便重试/);
-  assert.match(view.innerHTML, /Sub2API 账号或 API Key/);
+  assert.match(view.innerHTML, /id="rmEnrollmentFallback" hidden/);
+  assert.doesNotMatch(view.innerHTML, /首次登记必填/);
 
   f.node('rmStation').value = 'https://hub.example.com/salcara-hub';
   f.node('rmHub').value = '';
@@ -388,9 +624,23 @@ test('standalone Hub enrollment code is sent only on connect and cleared after s
   assert.ok(connect, 'explicit connection should submit after discovery');
   assert.equal(connect.body.enrollmentClaim, claim);
   connect.used = true;
-  connect.resolve({ ok: true });
+  connect.resolve({ ok: true, registered: false, stage: 'saved', eligibility: { supported: true, method: 'manual' } });
   await connecting;
-  assert.equal(f.node('rmEnrollmentClaim').value, '');
+  assert.equal(f.node('rmEnrollmentClaim').value, claim);
+  assert.match(f.notices.at(-1).message, /设置已保存.*等待电脑登记和上线确认/);
+  assert.equal(f.routed.length, 0, 'retain the current form while manual registration is not confirmed');
+});
+
+test('a standalone discovery requirement exposes its code field before any mutation', async () => {
+  const f = connectionFixture();
+  f.node('rmEnrollmentClaim').value = '';
+  f.node('rmEnrollmentFallback').hidden = true;
+  const connecting = f.context.ACTIONS.rmConnect({});
+  f.pending[0].resolve({ ok: true, stage: 'discovered', errorCode: 'device_credentials_required', deviceError: '需要管理员提供登记码' });
+  await connecting;
+  assert.equal(f.calls.length, 1);
+  assert.equal(f.node('rmEnrollmentFallback').hidden, false);
+  assert.match(f.node('rmConnectError').innerHTML, /登记码/);
 });
 
 test('every rendered console data-act has a registered action', () => {
@@ -437,10 +687,10 @@ test('double connect is serialized and sends the frozen enrollment only once', a
   assert.equal(commit.body.connect, true);
   await f.context.ACTIONS.rmConnect({});
   assert.equal(f.calls.length, 2);
-  commit.resolve({ ok: true });
+  commit.resolve({ ok: true, registered: true, stage: 'waiting_online' });
   await connecting;
   assert.equal(f.node('rmEnrollmentClaim').value, '');
-  assert.match(f.notices.at(-1).message, /连接设置已保存/);
+  assert.match(f.notices.at(-1).message, /登记已确认.*等待连接上线/);
   assert.doesNotMatch(f.notices.at(-1).message, /^已连接/);
 });
 
@@ -455,7 +705,7 @@ test('accepted connection never clears newer input or navigates a replacement pa
   f.node('rmEnrollmentClaim').value = 'b'.repeat(64);
   f.emit('input', f.node('rmEnrollmentClaim'));
   f.context.S.route = 'accounts';
-  commit.resolve({ ok: true });
+  commit.resolve({ ok: true, registered: true, stage: 'waiting_online' });
   await connecting;
   assert.equal(reads, 1, 'accepted changes still reconcile current state');
   assert.equal(f.node('rmEnrollmentClaim').value, 'b'.repeat(64));
@@ -467,9 +717,9 @@ test('accepted connection followed by refresh failure remains saved and never re
   const f = connectionFixture();
   f.context.loadState = async () => { throw new Error('display refresh failed'); };
   const connecting = f.context.ACTIONS.rmConnect({});
-  pendingFor(f, '/api/remote/discover').resolve({ ok: true });
+  pendingFor(f, '/api/remote/discover').resolve({ ok: true, stage: 'discovered', eligibility: { supported: true, method: 'manual' } });
   await tick();
-  pendingFor(f, '/api/remote/discover').resolve({ ok: true });
+  pendingFor(f, '/api/remote/discover').resolve({ ok: true, registered: true, stage: 'waiting_online' });
   await connecting;
   assert.equal(f.calls.length, 2);
   assert.equal(f.notices.at(-1).kind, 'ok');
@@ -504,10 +754,10 @@ test('connection drafts survive mode changes and initial state refresh cannot er
   await f.context.ACTIONS.rmMode({ dataset: { mode: 'bot' } });
   await f.context.ACTIONS.rmMode({ dataset: { mode: 'station' } });
   assert.equal(vm.runInContext('RM.stationDraft.url', f.context), 'https://draft.test');
-  assert.equal(vm.runInContext('RM.stationDraft.claim', f.context), 'a'.repeat(64));
+  assert.equal(vm.runInContext('RM.stationDraft.claim', f.context), '', 'a claim for an old address is cleared');
 });
 
-test('remote mode controls stay in the header while a first state request is pending', async () => {
+test('remote mode controls stay in the connection section while a first state request is pending', async () => {
   const f = connectionFixture();
   f.context.S.state = null;
   const first = deferred(), current = deferred();
@@ -516,14 +766,15 @@ test('remote mode controls stay in the header while a first state request is pen
   const view = f.node('view');
   f.context.route = () => { f.context.S.routeRevision++; f.context.RENDER_login(view); };
   f.context.RENDER_login(view);
-  assert.match(f.node('headActions').innerHTML, /class="rm-tabs rm-head-tabs"/);
-  assert.match(f.node('headActions').innerHTML, /data-mode="station" aria-pressed="true"/);
+  assert.equal(f.node('headActions').innerHTML, '');
+  assert.match(view.innerHTML, /id="rmModeTabs"/);
+  assert.match(view.innerHTML, /data-mode="station" aria-pressed="true"/);
   await f.context.ACTIONS.rmMode({ dataset: { mode: 'bot' } });
-  assert.match(f.node('headActions').innerHTML, /data-mode="bot" aria-pressed="true"/);
+  assert.match(view.innerHTML, /data-mode="bot" aria-pressed="true"/);
   current.resolve({ config: { loggedIn: false, remoteConnections: [] } });
   await tick();
   assert.match(view.innerHTML, /id="rmBotPanel"/);
-  assert.doesNotMatch(view.innerHTML, /class="rm-tabs/);
+  assert.match(view.innerHTML, /class="rm-tabs/);
   const rendered = view.innerHTML;
   first.reject(new Error('obsolete load failure'));
   await tick();
@@ -580,12 +831,12 @@ test('shared direct status request refreshes the newest page and keeps a live QR
   assert.equal(f.calls.length, 1);
   pendingFor(f, '/api/local/direct/status').resolve({ enabled: true, running: true, paired: false });
   await Promise.all([first, second]);
-  assert.match(f.node('rmDirectPanel').outerHTML, /data:fixture/);
+  assert.match(f.node('rmPhoneBinding').innerHTML, /data:fixture/);
   const paired = f.context.rmLoadDirect(2);
   pendingFor(f, '/api/local/direct/status').resolve({ enabled: true, running: true, paired: true });
   await paired;
-  assert.doesNotMatch(f.node('rmDirectPanel').outerHTML, /data:fixture/);
-  assert.match(f.node('rmDirectPanel').outerHTML, /已配对/);
+  assert.doesNotMatch(f.node('rmPhoneBinding').innerHTML, /data:fixture/);
+  assert.match(f.node('rmPhoneBinding').innerHTML, /已配对/);
 });
 
 test('direct revoke invalidates old reads and cannot run beside QR generation', async () => {
@@ -618,7 +869,7 @@ test('leaving a confirmation cancels direct revoke before dispatch', async () =>
 
 test('Bot registration status belongs to the active station and waits for its connection', () => {
   const f = connectionFixture('bot');
-  const config = { loggedIn: true, effectiveHubUrl: 'https://current.test/salcara-hub', remoteConnections: [{ hubUrl: 'https://saved.test/salcara-hub', botGroupId: 'old' }] };
+  const config = { loggedIn: true, effectiveHubUrl: 'https://current.test/salcara-hub', remoteModes: { bot: { groupId: 'current' } }, remoteConnections: [{ hubUrl: 'https://saved.test/salcara-hub', botGroupId: 'old' }] };
   assert.match(f.context.renderRemoteBotPanel(config), /已保存，未启用/);
   config.remoteConnections.push({ hubUrl: config.effectiveHubUrl, botGroupId: 'current' });
   assert.match(f.context.renderRemoteBotPanel(config), /正在连接/);
@@ -636,7 +887,7 @@ test('saved station and typed connection use the same mutation lease', async () 
   await f.context.ACTIONS.remoteStationSelect(button);
   assert.equal(f.calls.length, 1);
   pendingFor(f, '/api/remote/discover').resolve({ ok: true }); await tick();
-  pendingFor(f, '/api/remote/discover').resolve({ ok: true }); await connecting;
+  pendingFor(f, '/api/remote/discover').resolve({ ok: true, registered: true, stage: 'waiting_online' }); await connecting;
   const saved = f.context.ACTIONS.remoteStationSelect(button);
   const request = pendingFor(f, '/api/remote/mode');
   assert.equal(request.body.hubUrl, button.dataset.hub);
@@ -661,7 +912,7 @@ test('an abandoned preflight cannot block or clear a newer connection lease', as
   newerProbe.resolve({ ok: true }); await tick();
   const commit = pendingFor(f, '/api/remote/discover');
   assert.equal(commit.body.url, 'https://new.test');
-  commit.resolve({ ok: true }); await current;
+  commit.resolve({ ok: true, registered: true, stage: 'waiting_online' }); await current;
   assert.equal(f.calls.filter(call => call.body?.connect).length, 1);
 });
 
@@ -826,9 +1077,9 @@ test('Hub and Bot at the same URL remain separate across initial render, refresh
     const f = connectionFixture();
     const hubUrl = 'https://shared.test/salcara-hub';
     const hub = { hubUrl, name: 'saved-hub', support: { checkedAt: 1 } };
-    const bot = { hubUrl, name: 'saved-bot', mode: 'bot', support: { checkedAt: 3 } };
+    const bot = { hubUrl, name: 'saved-bot', mode: 'bot', groupId: 'group-a', support: { checkedAt: 3 } };
     const config = f.context.S.state.config;
-    Object.assign(config, { loggedIn: true, effectiveRemoteMode: 'bot', effectiveHubUrl: hubUrl, remoteConnections: botFirst ? [bot, hub, { ...hub }] : [hub, { ...hub }, bot] });
+    Object.assign(config, { loggedIn: true, effectiveRemoteMode: 'bot', effectiveHubUrl: hubUrl, remoteModes: { bot: { groupId: 'group-a' } }, remoteConnections: botFirst ? [bot, hub, { ...hub }] : [hub, { ...hub }, bot] });
     f.context.S.local = { accounts: [], remoteStations: [bot] };
     f.context.S.state.hub.state = 'connected';
     f.context.loadState = async () => f.context.S.state;
@@ -863,9 +1114,9 @@ test('Hub and Bot at the same URL remain separate across initial render, refresh
     assert.doesNotMatch(f.context.rmSavedBotsMarkup(config), />已连接</);
 
     await f.context.ACTIONS.rmMode({ dataset: { mode: 'bot' } });
-    const enableBot = f.context.ACTIONS.rmActivateMode({ dataset: { mode: 'bot', hub: hubUrl } });
+    const enableBot = f.context.ACTIONS.rmActivateMode({ dataset: { mode: 'bot', hub: hubUrl, group: bot.groupId } });
     const botRequest = pendingFor(f, '/api/remote/mode');
-    assert.deepEqual({ ...botRequest.body }, { mode: 'bot', hubUrl });
+    assert.deepEqual({ ...botRequest.body }, { mode: 'bot', hubUrl, groupId: bot.groupId });
     config.effectiveRemoteMode = 'bot';
     botRequest.resolve({ ok: true, activeMode: 'bot' });
     await enableBot;

@@ -42,6 +42,7 @@ func (s *Server) routes(m *http.ServeMux) {
 	m.HandleFunc("POST /api/pair/revoke", s.handlePairRevoke)
 	m.HandleFunc("POST /api/remote/discover", s.handleRemoteDiscover)
 	m.HandleFunc("POST /api/remote/bot-bind", s.handleBotBind)
+	m.HandleFunc("POST /api/remote/ingress", s.handleRemoteIngress)
 	m.HandleFunc("POST /api/remote/mode", s.handleRemoteMode)
 	m.HandleFunc("GET /api/toolcfg", s.handleToolcfg)
 	m.HandleFunc("POST /api/toolcfg", s.handleToolcfgAction)

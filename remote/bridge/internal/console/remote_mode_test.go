@@ -206,3 +206,30 @@ func TestRemoteModeSelectsExactSameServerBinding(t *testing.T) {
 		}
 	}
 }
+
+func TestRemoteModeSelectsExactBotGroupAtSameURL(t *testing.T) {
+	s, h := newTestServer(t)
+	const root, hub = "https://shared.example.test", "https://shared.example.test/salcara-hub"
+	ids := map[string]string{}
+	if err := s.d.Store.Update(func(c *config.Config) error {
+		for _, group := range []string{"group-a", "group-b"} {
+			c.ConnectRemoteWithBotBinding(root, hub, group, "invite-"+group, "signature-"+group)
+			ids[group] = c.DeviceID
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	before := s.d.Store.Get()
+	if w := localRequest(s, h, "POST", "/api/remote/mode", map[string]any{"mode": "bot", "hubUrl": hub}); w.Code != 409 {
+		t.Fatal("ambiguous Bot group was guessed")
+	}
+	for _, group := range []string{"group-a", "group-b", "group-a"} {
+		w := localRequest(s, h, "POST", "/api/remote/mode", map[string]any{"mode": "bot", "hubUrl": hub, "groupId": group})
+		cfg := s.d.Store.Get()
+		active, _, _ := cfg.BotEnrollment()
+		if w.Code != 200 || cfg.DeviceID != ids[group] || active != group || !reflect.DeepEqual(before.RemoteConnections, cfg.RemoteConnections) {
+			t.Fatal("Bot activation crossed group identity or rewrote another binding")
+		}
+	}
+}

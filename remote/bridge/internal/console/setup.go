@@ -144,22 +144,40 @@ func bundledCodex(path string) bool {
 
 func (s *Server) setupItems() ([]setupItem, bool) {
 	tools, pending := s.d.Local.InventorySnapshot(s.d.Store.Get().LocalToolPaths)
+	git, gitAvailable := "", false
+	if runtime.GOOS == "windows" {
+		git, gitAvailable = gitPath()
+	}
+	sdkItem, sdkPending := setupClaudeSDKSnapshot()
+	items := setupInventoryItems(runtime.GOOS, tools, git, gitAvailable, sdkItem)
+	for i := range items {
+		if items[i].Installed && items[i].Path != "" && (items[i].ID == "claude" || items[i].ID == "codex" || items[i].ID == "git") {
+			var versionPending bool
+			items[i].Version, versionPending = setupVersionSnapshot(items[i].Path)
+			pending = pending || versionPending
+		}
+	}
+	return items, pending || sdkPending
+}
+
+// Agent tools are optional for registration and pairing. Their own launch
+// admission checks the chosen tool; the global setup screen must not require
+// unrelated Agents (or Claude's Windows Git dependency) to be installed.
+func setupInventoryItems(goos string, tools []launcher.Tool, git string, gitAvailable bool, sdkItem setupItem) []setupItem {
 	byID := map[string]launcher.Tool{}
 	for _, t := range tools {
 		byID[t.ID] = t
 	}
 	items := []setupItem{}
-	if runtime.GOOS == "windows" {
-		p, ok := gitPath()
-		items = append(items, setupItem{ID: "git", Name: "Git", Role: "Claude Code 运行命令需要它", Installed: ok, Path: p, Installable: !ok, Required: true,
+	if goos == "windows" {
+		items = append(items, setupItem{ID: "git", Name: "Git", Role: "使用 Claude Code 的 Windows 命令功能时需要", Installed: gitAvailable, Path: git, Installable: !gitAvailable,
 			Download: "https://git-scm.com/download/win"})
 	}
 	claude := byID["claude"]
-	items = append(items, setupItem{ID: "claude", Name: "Claude Code", Role: "手机继续 Claude Code / Claude Desktop 的会话", Installed: claude.Available, Path: claude.Path, Installable: true, Required: true})
-	sdkItem, sdkPending := setupClaudeSDKSnapshot()
-	items, pending = append(items, sdkItem), pending || sdkPending
+	items = append(items, setupItem{ID: "claude", Name: "Claude Code", Role: "运行 Claude Code 任务时使用", Installed: claude.Available, Path: claude.Path, Installable: true})
+	items = append(items, sdkItem)
 	codex := byID["codex"]
-	ci := setupItem{ID: "codex", Name: "Codex CLI", Role: "手机继续 Codex / Codex App 的对话", Installed: codex.Available, Path: codex.Path, Installable: true, Required: true}
+	ci := setupItem{ID: "codex", Name: "Codex CLI", Role: "运行 Codex CLI 任务时使用", Installed: codex.Available, Path: codex.Path, Installable: true}
 	if codex.Available && bundledCodex(codex.Path) {
 		ci.Source, ci.Note = "codex-app", "正在使用 Codex App 自带的版本，可以直接用；单独安装后更新更及时"
 	}
@@ -179,14 +197,7 @@ func (s *Server) setupItems() ([]setupItem, bool) {
 	items = append(items, setupItem{ID: "codex-desktop", Name: "Codex App", Role: "桌面应用（可选）", Installed: cd.Available, Path: cd.Path, Download: "https://chatgpt.com/codex"})
 	cl := byID["claude-desktop"]
 	items = append(items, setupItem{ID: "claude-desktop", Name: "Claude Desktop", Role: "桌面应用（可选）", Installed: cl.Available, Path: cl.Path, Download: "https://claude.ai/download"})
-	for i := range items {
-		if items[i].Installed && items[i].Path != "" && (items[i].ID == "claude" || items[i].ID == "codex" || items[i].ID == "git") {
-			var versionPending bool
-			items[i].Version, versionPending = setupVersionSnapshot(items[i].Path)
-			pending = pending || versionPending
-		}
-	}
-	return items, pending
+	return items
 }
 
 func (s *Server) handleSetupStatus(w http.ResponseWriter, r *http.Request) {

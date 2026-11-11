@@ -14,17 +14,30 @@ import (
 	qrcode "github.com/skip2/go-qrcode"
 )
 
+type remoteDiscoverInput struct {
+	URL                    string  `json:"url"`
+	HubURL                 string  `json:"hubUrl"`
+	EnrollmentClaim        string  `json:"enrollmentClaim"`
+	Connect                bool    `json:"connect"`
+	RequireOfficial        bool    `json:"requireOfficial,omitempty"`
+	Reenroll               bool    `json:"reenroll,omitempty"`
+	AccountID              string  `json:"accountId,omitempty"`
+	ExpectedSourceRevision *string `json:"expectedSourceRevision,omitempty"`
+	RetryEnrollment        bool    `json:"retryEnrollment,omitempty"`
+}
+
 func (s *Server) handleRemoteDiscover(w http.ResponseWriter, r *http.Request) {
-	var in struct {
-		URL             string `json:"url"`
-		HubURL          string `json:"hubUrl"`
-		EnrollmentClaim string `json:"enrollmentClaim"`
-		Connect         bool   `json:"connect"`
-		RequireOfficial bool   `json:"requireOfficial,omitempty"`
-		Reenroll        bool   `json:"reenroll,omitempty"`
-	}
+	var in remoteDiscoverInput
 	if err := readJSON(r, &in); err != nil {
 		writeErr(w, 400, err.Error())
+		return
+	}
+	if in.AccountID != "" {
+		s.handleRemoteAccountDiscover(w, r, in)
+		return
+	}
+	if in.ExpectedSourceRevision != nil || in.RetryEnrollment {
+		writeErr(w, http.StatusBadRequest, "请选择对应的 API 来源")
 		return
 	}
 	target, targetErr := remoteDiscoveryTarget(in.URL, in.HubURL)
@@ -135,6 +148,12 @@ func (s *Server) handleRemoteDiscover(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	err := s.d.Store.Update(func(c *config.Config) error {
+		// A canceled probe must not clear a saved observation or select a
+		// connection after the caller has switched away. Check inside the
+		// transaction too, since admission may wait for the mode/config locks.
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if c.GatewayRuntimeKey != runtimeKey || c.RemoteConnectionEpoch != snapshot.RemoteConnectionEpoch {
 			return errors.New("设备状态已更新，请重新检测")
 		}
@@ -228,6 +247,11 @@ func (s *Server) handleRemoteDiscover(w http.ResponseWriter, r *http.Request) {
 		s.finishRemoteModeSwitch()
 	}
 	out := map[string]any{"ok": true, "plugin": info, "connected": in.Connect, "message": "插件兼容，设备连接不需要模型 API Key；电脑在线后生成二维码"}
+	out["registered"], out["stage"] = false, "discovered"
+	out["eligibility"] = map[string]any{"supported": true, "method": "manual"}
+	if in.Connect {
+		out["stage"] = "saved"
+	}
 	if policyErr != nil {
 		out["deviceError"], out["errorCode"] = policyErr.Error(), hubclient.RemoteErrorCode(policyErr)
 	}

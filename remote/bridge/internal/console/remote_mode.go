@@ -14,6 +14,7 @@ import (
 
 func remoteModeChoices(c config.Config) map[string]any {
 	hub, bot := !c.RemoteDeviceOnly && c.LoggedIn(), false
+	groupID, _, _ := c.BotEnrollment()
 	for _, saved := range c.RemoteConnections {
 		if saved.DeviceID == "" || saved.DeviceSecret == "" {
 			continue
@@ -26,7 +27,7 @@ func remoteModeChoices(c config.Config) map[string]any {
 	}
 	return map[string]any{
 		"direct": map[string]bool{"configured": len(c.DirectRelayHosts) != 0 || c.DirectPhoneID != "", "paired": c.DirectPhoneID != "" && c.DirectPhoneHash != ""},
-		"hub":    map[string]bool{"configured": hub}, "bot": map[string]bool{"configured": bot},
+		"hub":    map[string]bool{"configured": hub}, "bot": map[string]any{"configured": bot, "groupId": groupID},
 	}
 }
 
@@ -49,8 +50,9 @@ func (s *Server) finishRemoteModeSwitch() {
 
 func (s *Server) handleRemoteMode(w http.ResponseWriter, r *http.Request) {
 	var in struct {
-		Mode   string `json:"mode"`
-		HubURL string `json:"hubUrl,omitempty"`
+		Mode    string `json:"mode"`
+		HubURL  string `json:"hubUrl,omitempty"`
+		GroupID string `json:"groupId,omitempty"`
 	}
 	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 8192))
 	dec.DisallowUnknownFields()
@@ -62,7 +64,7 @@ func (s *Server) handleRemoteMode(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "不支持的远程方式")
 		return
 	}
-	if (in.Mode == "none" || in.Mode == "direct") && in.HubURL != "" {
+	if (in.Mode == "none" || in.Mode == "direct") && in.HubURL != "" || in.Mode != "bot" && in.GroupID != "" {
 		writeErr(w, 400, "此方式不接受中转站地址")
 		return
 	}
@@ -78,6 +80,7 @@ func (s *Server) handleRemoteMode(w http.ResponseWriter, r *http.Request) {
 				return nil
 			}
 			var chosen *config.RemoteConnection
+			ambiguous := false
 			for _, saved := range c.RemoteConnections {
 				if saved.DeviceID == "" || saved.DeviceSecret == "" || (saved.BotGroupID != "") != (in.Mode == "bot") {
 					continue
@@ -85,10 +88,19 @@ func (s *Server) handleRemoteMode(w http.ResponseWriter, r *http.Request) {
 				if in.HubURL != "" && config.NormalizeHubURL(saved.HubURL) != config.NormalizeHubURL(in.HubURL) {
 					continue
 				}
-				if chosen == nil || config.NormalizeHubURL(saved.HubURL) == config.NormalizeHubURL(c.EffectiveHubURL()) {
+				if in.GroupID != "" && saved.BotGroupID != in.GroupID {
+					continue
+				}
+				if chosen != nil {
+					ambiguous = true
+				}
+				if chosen == nil || saved.DeviceID == c.DeviceID && config.NormalizeHubURL(saved.HubURL) == config.NormalizeHubURL(c.EffectiveHubURL()) {
 					item := saved
 					chosen = &item
 				}
+			}
+			if ambiguous && (in.HubURL != "" || in.GroupID != "") {
+				return errors.New("此地址有多个已保存的连接，请选择确切的 Bot 组")
 			}
 			if chosen == nil {
 				if in.Mode == "hub" && in.HubURL == "" && !c.RemoteDeviceOnly && c.LoggedIn() {

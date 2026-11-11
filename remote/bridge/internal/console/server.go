@@ -114,6 +114,7 @@ type Server struct {
 	accountTests             map[string]bool
 	accountTestHTTP          *http.Client
 	remoteDiscoveryMu        sync.Mutex
+	remoteEnrollmentMu       sync.Mutex
 	remoteModeMu             sync.Mutex
 	remoteModeSeq            uint64
 	remoteDiscoverySeq       uint64

@@ -122,6 +122,27 @@ function rmRememberConnectionDraft() {
   if (RM.remoteMode === 'station' && document.getElementById('rmStation')) {
     RM.stationDraft = { url: document.getElementById('rmStation').value || '', hubUrl: document.getElementById('rmHub')?.value || '', claim: document.getElementById('rmEnrollmentClaim')?.value || '', accountId: document.getElementById('rmSourceAPI')?.value || '' };
   } else if (RM.remoteMode === 'bot' && document.getElementById('rmBotBinding')) RM.botDraft = document.getElementById('rmBotBinding').value || '';
+  if (RM.remoteMode === 'bot') for (const field of $$('[data-rm-ingress]')) {
+    RM.botIngressDrafts ||= {};
+    RM.botIngressDrafts[field.dataset.rmIngress] = field.value || '';
+  }
+}
+function rmSelectedSourceMatches(id, revision, url) {
+  const account = (S.local?.accounts || []).find(row => row.id === id);
+  return !!account && account.sourceRevision === revision && rmNormalizeSource(account.baseUrl) === rmNormalizeSource(url);
+}
+const rmNormalizeSource = value => String(value || '').trim().replace(/\/+$/, '');
+function rmEnrollmentTargetKey(accountId, revision, url, hubUrl) { return JSON.stringify([accountId || '', revision || '', rmNormalizeSource(url), rmNormalizeSource(hubUrl)]); }
+function rmCurrentEnrollmentTargetKey() {
+  const id = document.getElementById('rmSourceAPI')?.value || '';
+  const account = (S.local?.accounts || []).find(row => row.id === id);
+  return rmEnrollmentTargetKey(id, account?.sourceRevision, document.getElementById('rmStation')?.value, document.getElementById('rmHub')?.value);
+}
+function rmShowEnrollmentFallback(owner, error, hasAPI) {
+  if (!owner.current() || hasAPI || !['device_enrollment_required', 'device_credentials_required', 'enrollment_claim_invalid'].includes(error.code)) return;
+  RM.enrollmentRequired = true;
+  const fallback = document.getElementById('rmEnrollmentFallback');
+  if (fallback) fallback.hidden = false;
 }
 async function rmRefreshAcceptedConnection() {
   try { return await loadState(); }
@@ -129,9 +150,12 @@ async function rmRefreshAcceptedConnection() {
 }
 function rmConnectionError(owner, node, error) {
   if (!owner.current()) return;
-  const unknown = owner.submitted && (!Number.isInteger(error.status) || error.status >= 500 || error.status === 408);
-  const message = unknown ? `操作结果暂未确认，请刷新状态核对后再操作。${error.message || ''}` : error.message || '操作失败，请重试';
-  if (node?.isConnected !== false && node) node.innerHTML = `<div class="rm-error">${esc(message)}</div>`;
+  const unknown = owner.submitted && (!Number.isInteger(error.status) || error.status >= 500 || error.status === 408 || error.code === 'enrollment_result_unknown');
+  const reasons = { api_enrollment_unsupported: '本站暂不支持 API 自动登记，请联系站点管理员开通或提供独立中转站的授权方式。', api_credentials_invalid: 'API 凭据无效或已过期，请在 API 密钥页更新后重试。', api_enrollment_denied: '此 API 未获得电脑远程登记权限，请联系站点管理员。', api_verifier_unavailable: '本站的 API 验证服务暂不可用，请稍后重试。', source_changed: '所选 API 已更新，请重新选择后连接。', enrollment_issuer_untrusted: '本站的登记授权来源不可信，请联系站点管理员。', enrollment_grant_invalid: '本站返回的电脑登记授权未通过校验，请联系站点管理员。' };
+  const detail = reasons[error.code] || error.message || '操作失败，请重试';
+  const message = unknown ? `操作结果暂未确认，请刷新状态核对后再操作。${detail}` : detail;
+  if (error.code === 'enrollment_result_unknown' && owner.enrollmentKey) RM.pendingEnrollment = { key: owner.enrollmentKey };
+  if (node?.isConnected !== false && node) node.innerHTML = `<div class="rm-error">${esc(message)}</div>${error.code === 'enrollment_result_unknown' && owner.enrollmentKey ? rmEnrollmentRecoveryMarkup() : ''}`;
   else toast(message, 'bad');
 }
 
@@ -201,8 +225,8 @@ const rmNormalizeHub = value => String(value || '').trim().replace(/\/+$/, '').r
 function rmSavedConnections(config, mode) {
   const rows = new Map();
   for (const row of config?.remoteConnections || []) {
-    if (!row?.hubUrl || ((row.mode === 'bot' || row.botGroupId) ? 'bot' : 'hub') !== mode) continue;
-    const key = rmNormalizeHub(row.hubUrl), old = rows.get(key);
+    if (!row?.hubUrl || ((row.mode === 'bot' || row.botGroupId || row.groupId) ? 'bot' : 'hub') !== mode) continue;
+    const key = rmNormalizeHub(row.hubUrl) + (mode === 'bot' ? '\u0000' + String(row.groupId || row.botGroupId || '') : ''), old = rows.get(key);
     if (!old || (row.support?.checkedAt || 0) >= (old.support?.checkedAt || 0)) rows.set(key, row);
   }
   return [...rows.values()];
@@ -230,8 +254,10 @@ function rmUpdateModeStatus() {
   if (S.route !== 'login') return;
   const banner = document.getElementById('rmActiveMode');
   if (banner) banner.innerHTML = rmModeStatusMarkup();
-  const tabs = document.getElementById('headActions');
+  const tabs = document.getElementById('rmModeTabs');
   if (tabs) tabs.innerHTML = remoteTabMarkup();
+  const steps = document.getElementById('rmConnectionSteps');
+  if (steps) steps.innerHTML = rmConnectionStepsMarkup();
 }
 
 function rmConnectionLabel(hub) {
@@ -249,6 +275,11 @@ function rmConnectionLabel(hub) {
   if (['remote_rate_limited', 'source_challenge_capacity'].includes(hub?.errorCode)) return '远程请求过于频繁，稍后重试';
   if (['remote_unavailable', 'source_policy_unavailable', 'source_challenge_unavailable'].includes(hub?.errorCode)) return '远程服务暂不可用，自动重连中';
   if (hub?.errorCode === 'source_acquisition_pending') return '正在验证 API 来源，稍后重试';
+  if (hub?.errorCode === 'api_credentials_invalid') return 'API 凭据无效或已过期';
+  if (hub?.errorCode === 'api_enrollment_denied') return '此 API 未获电脑登记权限';
+  if (hub?.errorCode === 'api_enrollment_unsupported') return '本站暂不支持 API 自动登记';
+  if (hub?.errorCode === 'api_verifier_unavailable') return 'API 验证服务暂不可用';
+  if (['enrollment_issuer_untrusted', 'enrollment_grant_invalid'].includes(hub?.errorCode)) return '站点登记授权校验失败';
   if (hub?.state === 'not_logged_in') return '未连接';
   return hub?.error ? '连接中断，自动重连中' : '正在连接';
 }
@@ -282,6 +313,8 @@ function rmUpdateRemoteStatus(hub = S.state?.hub) {
   if (typeof syncRemoteSupport === 'function') syncRemoteSupport();
   const recovery = document.getElementById('rmRecovery');
   if (recovery?.isConnected !== false && recovery) recovery.innerHTML = rmRecoveryMarkup(hub);
+  const binding = document.getElementById('rmPhoneBinding');
+  if (binding?.isConnected !== false && binding) binding.innerHTML = rmPhoneBindingMarkup();
   if (RM.remoteMode === 'bot') {
     const saved = document.getElementById('rmSavedBots');
     if (saved) saved.innerHTML = rmSavedBotsMarkup(S.state?.config || {});
@@ -327,103 +360,9 @@ function rmPairStatus(st) {
   if (consumed && pair.paired) toast('手机绑定成功', 'ok');
 }
 
-function remoteTabMarkup() {
-  const active = rmEffectiveMode();
-  return `<nav class="rm-tabs rm-head-tabs" aria-label="手机远程连接方式">
-    ${[['station', '中转站', 'server'], ['direct', '直连', 'link'], ['bot', 'Bot', 'box']].map(([id, label, glyph]) => `<button class="rm-tab ${RM.remoteMode === id ? 'on' : ''}" data-act="rmMode" data-mode="${id}" aria-pressed="${RM.remoteMode === id}">${icon(glyph)}<span>${label}</span>${active === (id === 'station' ? 'hub' : id) ? '<i class="rm-tab-enabled" title="当前启用" aria-label="当前启用"></i>' : ''}</button>`).join('')}
-  </nav>`;
-}
-
-function renderRemoteDirectPanel(withSelfhost = true) {
-  if (withSelfhost && typeof selfhostRememberDraft === 'function') selfhostRememberDraft();
-  const d = RM.direct || {};
-  const active = rmEffectiveMode() === 'direct';
-  const paired = d.paired || S.state?.config?.remoteModes?.direct?.paired;
-  const status = !active ? paired ? '已配对，未启用' : '未启用' : d.error ? '暂不可用' : d.connected ? '手机已连接' : paired ? '已配对，等待连接' : d.running ? '等待配对' : d.enabled ? '启动失败' : '正在启动';
-  const tone = !active ? '' : d.error || d.enabled && !d.running ? 'bad' : d.connected ? 'ok' : 'wait';
-  return `<section class="rm-sec rm-mode-panel" id="rmDirectPanel">
-    <div class="rm-mode-head"><div><h2>电脑直连</h2><p>通过局域网或 VPN 的 TLS 连接，消息不经过 Hub。</p></div><span class="rm-mode-state"><i class="rm-dot ${tone}"></i>${esc(status)}</span></div>
-    ${d.error ? `<div class="rm-error">${esc(d.error)}</div>` : ''}
-    <div class="rm-direct-facts"><div><span>连接地址</span><b>${esc(active && d.running ? (d.secureUrls || []).join(', ') || 'TLS 已启动' : '未启动')}</b></div><div><span>手机</span><b>${esc(active && d.connected ? '已连接' : paired ? '已配对' : '未配对')}</b></div></div>
-    <div class="rm-mode-actions">${paired ? `<button class="btn primary" data-act="rmActivateMode" data-mode="direct" ${RM.connectionAction || active && d.running ? 'disabled' : ''}>${active && d.running ? '直连已启用' : active ? '恢复直连' : '启用直连'}</button>` : `<button class="btn primary" data-act="rmDirectQR" ${RM.connectionAction ? 'disabled' : ''}>${icon('phone')}${active ? '生成配对二维码' : '启用并配对'}</button>`}<button class="btn" data-act="rmDirectRefresh">${icon('refresh')}刷新</button><button class="rm-link bad" data-act="rmDirectRevoke" ${!RM.connectionAction && (paired || d.enabled) ? '' : 'disabled'}>撤销直连</button></div>
-    ${!active && paired ? '<p class="rm-recovery-note">配对已保留，启用后手机可继续连接，无需重新扫码。</p>' : ''}
-    ${active && d.qrDataURL && Number(d.expiresAt) > Date.now() ? `<div class="rm-direct-qr"><img src="${esc(d.qrDataURL)}" alt="直连配对二维码"><span>二维码有效至 ${esc(new Date(Number(d.expiresAt)).toLocaleTimeString())}</span></div>` : ''}
-    <button class="rm-help-link" data-act="rmDirectTutorial">查看直连说明</button>
-  </section>${withSelfhost && typeof renderSelfhostHubPanel === 'function' ? renderSelfhostHubPanel() : ''}`;
-}
-
-function rmSavedBotsMarkup(c) {
-  return rmSavedConnections(c, 'bot').map(entry => {
-    const current = rmEffectiveMode(c) === 'bot' && rmNormalizeHub(entry.hubUrl) === rmNormalizeHub(c.effectiveHubUrl || c.hubUrl);
-    const connected = current && c.loggedIn && rmHubState() === 'connected';
-    const status = !current ? '已保存，未启用' : connected ? '已连接' : S.state?.hub?.error || S.state?.hub?.state === 'invalid_key' ? rmConnectionLabel(S.state?.hub) : '正在连接';
-    return `<div class="rm-saved-mode"><div><b>${esc(entry.name || entry.botGroupId || entry.groupId || 'Bot 中继')}</b><span>${esc(host(entry.hubUrl))}</span></div><span class="rm-mode-state"><i class="rm-dot ${connected ? 'ok' : current ? 'wait' : ''}"></i>${status}</span><button class="btn sm ${current ? '' : 'primary'}" data-act="rmActivateMode" data-mode="bot" data-hub="${esc(entry.hubUrl)}" ${RM.connectionAction || current ? 'disabled' : ''}>${current ? '已启用' : '启用 Bot'}</button></div>`;
-  }).join('');
-}
-function renderRemoteBotPanel(c) {
-  const entries = rmSavedConnections(c, 'bot');
-  return `<section class="rm-sec rm-mode-panel" id="rmBotPanel">
-    <div class="rm-mode-head"><div><h2>Bot 中继</h2><p>只转发电脑与手机消息，Agent 仍运行在本机。</p></div>${entries.length ? '' : '<span class="rm-mode-state">未登记</span>'}</div>
-    <div id="rmSavedBots" class="rm-saved-modes">${rmSavedBotsMarkup(c)}</div>
-    ${entries.length ? `<details class="rm-new-connection" ${RM.botDraft ? 'open' : ''}><summary>添加其他 Bot 绑定</summary>` : ''}
-    <label class="field"><span>绑定 JSON</span><textarea class="input rm-bot-input" id="rmBotBinding" rows="6" placeholder="粘贴 Hub 管理页生成的 JSON">${esc(RM.botDraft)}</textarea></label>
-    <div class="rm-mode-actions"><button class="btn primary" data-act="rmBotBind">${icon('upload')}导入并登记</button><button class="rm-help-link" data-act="rmBotTutorial">查看教程</button></div>
-    <div id="rmBotError"></div>${entries.length ? '</details>' : ''}
-  </section>`;
-}
-
-function renderRemoteStationPanel(view, st, c, linked, connected, station, qrLive) {
-  const draft = RM.stationDraft;
-  const apis = (S.local?.accounts || []).filter(a => a.baseUrl && !a.credentialRef && ['api_key', 'reverse_proxy'].includes(a.sourceType));
-  const chosen = apis.find(a => a.id === draft?.accountId) || apis.find(a => a.id === S.local?.activeCodexAccount) || apis[0];
-  const saved = rmSavedConnections(c, 'hub').length > 0;
-  const savedMarkup = typeof remoteSavedStationsHTML === 'function' ? remoteSavedStationsHTML(c) : '';
-  return `${!linked && saved ? savedMarkup : ''}${linked ? `<section class="rm-sec">
-      <div class="rm-line">
-        <span id="rmHubConnectionDot" class="rm-dot ${connected ? 'ok' : st.hub?.error ? 'bad' : 'wait'}"></span>
-        <div class="rm-grow"><div class="rm-device-name" id="devName">${S.editingName
-          ? `<input class="input" id="devInput" value="${esc(c.deviceName)}" maxlength="40"><button class="btn sm primary" data-act="saveName">保存</button><button class="btn sm ghost" data-act="cancelName">取消</button>`
-          : `${esc(c.deviceName)}<button class="icon-btn" data-act="editName" title="修改电脑名称">${icon('edit')}</button>`}</div>
-          <div class="rm-meta" id="rmHubConnectionMeta">${esc(rmConnectionLabel(st.hub))} · ${esc(station)}</div></div>
-        <button class="rm-link" data-act="rmActivateMode" data-mode="none">停用</button>
-      </div><div id="rmHubConnectionError">${!connected && st.hub && st.hub.error ? `<div class="rm-error">${esc(st.hub.error)}</div>` : ''}</div>
-    </section><section class="rm-sec"><details class="rm-adv"><summary>重新登记这台电脑</summary>
-      <p>设备凭证失效或站点重置后，在这里重新登记，再让手机扫码。API、项目和聊天记录会保留。</p>
-      <label class="field"><span>新的设备登记码</span><input class="input" id="rmRecoveryClaim" type="password" maxlength="64" autocomplete="off" placeholder="按本站要求填写；开放站点可留空"></label>
-      <button class="btn" data-act="rmReenroll">重新登记并绑定手机</button><div id="rmReenrollError"></div>
-    </details></section>`
-  : `<section class="rm-sec rm-hero">${saved ? `<details class="rm-new-connection" ${draft?.url || draft?.claim ? 'open' : ''}><summary>添加其他中转站</summary>` : ''}
-      ${saved ? '' : '<h2>连接中转站</h2>'}
-      <p>使用普通 API 地址自动检测本站远程能力。模型仍由这台电脑上的 Agent 调用。</p>
-      ${apis.length ? `<label class="field"><span>已保存的 API</span><select class="input" id="rmSourceAPI">${apis.map(a => `<option value="${esc(a.id)}" ${a.id === chosen?.id ? 'selected' : ''}>${esc(a.name || host(a.baseUrl))}</option>`).join('')}<option value="">其他地址</option></select></label>` : ''}
-      <div class="rm-form"><input class="input" id="rmStation" placeholder="API 地址，例如 https://api.example.com/v1" value="${esc(draft ? draft.url : chosen?.baseUrl || c.relayRoot || '')}" autocomplete="url">
-        <button class="btn primary" data-act="rmConnect">连接</button></div>
-      <details class="rm-adv"><summary>高级选项</summary>
-        <label class="field"><span>自定义 Hub 路径（可选）</span><input class="input" id="rmHub" placeholder="自动发现，无需填写" value="${esc(draft ? draft.hubUrl : '')}" autocomplete="url"></label>
-        <label class="field"><span>新电脑首次登记码</span><input class="input" id="rmEnrollmentClaim" type="password" maxlength="64" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="首次登记必填，已登记电脑留空" value="${esc(draft?.claim || '')}"></label>
-        <p class="rm-note">登记失败时保留以便重试；这里填写设备登记码，不是 Sub2API 账号或 API Key。</p>
-      </details>
-      <div id="rmConnectError"></div>
-    ${saved ? '</details>' : ''}</section>`}
-  ${!saved || linked ? savedMarkup : ''}
-  ${linked ? `<section class="rm-sec ${connected ? '' : 'off'}" id="rmPairSection">
-    <div class="rm-sec-head"><h3>绑定手机</h3>${linked ? `<button class="rm-link" id="rmPairRevoke" data-act="pairRevoke" ${connected ? '' : 'disabled'}>解除绑定</button>` : ''}</div>
-    <div class="rm-pair">
-      <div class="rm-qr ${qrLive ? 'live' : ''}" id="pairQR">${qrLive
-        ? `<img src="${esc(S.pairQR)}" alt="手机绑定二维码"><span class="rm-timer" id="rmTimer"></span>`
-        : connected ? st.hub?.pairing?.paired ? `${icon('check')}<span>手机已绑定</span>` : `<button class="btn primary sm" data-act="rmShowQR">${icon('scan')}显示二维码</button>` : '<span>先连接中转站</span>'}</div>
-      <ol class="rm-steps"><li>手机打开 Salcara →「编程」→「我的电脑」</li><li>点「绑定新电脑」扫码</li><li>确认 Agent</li><li class="rm-tip">二维码 5 分钟有效，只能用一次</li></ol>
-    </div>
-  </section>` : ''}
-  <div id="rmLive"></div><p class="rm-note">API Key 始终留在这台电脑上，中转站只转发对话。</p>`;
-}
-
 function renderRemoteLoginPage(view, st) {
   if (view.isConnected === false) return;
   const pageEpoch = ++RM.loginEpoch;
-  const c = st.config, state = rmHubState();
-  const linked = c.loggedIn && rmEffectiveMode(c) === 'hub';
-  const connected = linked && state === 'connected';
   clearInterval(RM.poll);
   if (RM.remoteMode === 'direct') RM.poll = setInterval(() => {
     if (S.route !== 'login' || RM.remoteMode !== 'direct' || pageEpoch !== RM.loginEpoch) { clearInterval(RM.poll); return; }
@@ -437,10 +376,8 @@ function renderRemoteLoginPage(view, st) {
     if (document.hidden || RM.connectionAction) return;
     loadState().then(() => { if (pageEpoch === RM.loginEpoch && S.route === 'login') rmUpdateRemoteStatus(); }).catch(() => undefined);
   }, 5000);
-  const station = host(c.relayRoot || c.effectiveHubUrl);
-  const qrLive = S.pairQR && S.pairExpires > Date.now();
-  view.innerHTML = `<div class="rm-page"><div id="rmActiveMode">${rmModeStatusMarkup(c)}</div><div id="rmModeError" aria-live="polite"></div><div id="approvalsBox"></div>
-    ${RM.remoteMode === 'station' ? renderRemoteStationPanel(view, st, c, linked, connected, station, qrLive) : RM.remoteMode === 'bot' ? renderRemoteBotPanel(c) : renderRemoteDirectPanel()}<section class="rm-sec" id="rmRecovery" aria-label="消息与恢复">${rmRecoveryMarkup(st.hub)}</section></div>`;
+  if (typeof selfhostRememberDraft === 'function') selfhostRememberDraft();
+  view.innerHTML = renderRemoteConnectionLayout(view, st);
   if (typeof renderApprovalsBox === 'function') renderApprovalsBox();
   rmTickQR();
   if (typeof selfhostAttach === 'function') selfhostAttach(view, pageEpoch);
@@ -454,20 +391,22 @@ RENDER_login = function (view) {
   if (target.isConnected === false) return;
   const routeRevision = S.routeRevision;
   rmSelectInitialMode(S.state?.config);
-  $('#headActions').innerHTML = remoteTabMarkup();
+  $('#headActions').innerHTML = '';
   if (S.state) renderRemoteLoginPage(target, S.state);
+  else target.innerHTML = renderRemoteConnectionLayout(target, { config: {}, loading: true });
   const inputRevision = RM.connectionRevision;
+  const localRevision = S.localAccountsRevision;
   const ownsTarget = () => target.isConnected !== false && S.route === 'login' && routeRevision === S.routeRevision;
   void loadState().then((st) => {
     if (!ownsTarget() || inputRevision !== RM.connectionRevision || RM.connectionAction) return;
     rmSelectInitialMode(st.config);
-    $('#headActions').innerHTML = remoteTabMarkup();
+    $('#headActions').innerHTML = '';
     renderRemoteLoginPage(target, st);
   }).catch((e) => {
     if (!S.state && ownsTarget() && inputRevision === RM.connectionRevision) target.innerHTML = `<div class="rm-error" style="margin:20px">${esc(e.message)}</div>`;
   });
   void api('/api/local/accounts').then(local => {
-    if (!ownsTarget() || inputRevision !== RM.connectionRevision || RM.connectionAction || RM.stationDraft) return;
+    if (!ownsTarget() || inputRevision !== RM.connectionRevision || localRevision !== S.localAccountsRevision || RM.connectionAction || RM.stationDraft) return;
     S.local = local;
     if (S.state && RM.remoteMode === 'station') renderRemoteLoginPage(target, S.state);
   }).catch(() => undefined);
@@ -502,7 +441,12 @@ async function rmLoadDirect(pageEpoch = RM.loginEpoch) {
   await request.promise;
   const box = document.getElementById('rmDirectPanel');
   if (generation === RM.directGeneration && typeof setConn === 'function') setConn(S.state?.hub);
-  if (generation === RM.directGeneration && pageEpoch === RM.loginEpoch && S.route === 'login' && RM.remoteMode === 'direct' && box?.isConnected !== false && box) box.outerHTML = renderRemoteDirectPanel(false);
+  if (generation === RM.directGeneration && pageEpoch === RM.loginEpoch && S.route === 'login' && RM.remoteMode === 'direct' && box?.isConnected !== false && box) {
+    box.outerHTML = renderRemoteDirectPanel(false);
+    rmUpdateModeStatus();
+    const binding = document.getElementById('rmPhoneBinding');
+    if (binding?.isConnected !== false && binding) binding.innerHTML = rmPhoneBindingMarkup();
+  }
   return RM.direct;
 }
 
@@ -648,6 +592,7 @@ Object.assign(ACTIONS, {
     if (out) out.innerHTML = '';
     const body = { mode };
     if (b.dataset.hub) body.hubUrl = b.dataset.hub;
+    if (mode === 'bot' && b.dataset.group) body.groupId = b.dataset.group;
     ++RM.directGeneration;
     try { await busy(b, async () => {
       try {
@@ -662,30 +607,91 @@ Object.assign(ACTIONS, {
       } catch (error) { await rmRefreshAcceptedConnection(); rmConnectionError(owner, out, error); }
     }); } finally { rmFinishConnectionAction(owner); }
   },
-  rmConnect: async (b) => {
-    const owner = rmBeginConnectionAction(b, 'station', ['rmStation', 'rmHub', 'rmEnrollmentClaim']);
+  rmRetryEnrollment: async (b) => {
+    if (!RM.pendingEnrollment || RM.pendingEnrollment.key !== rmCurrentEnrollmentTargetKey()) { toast('所选 API 已变化，请重新检查登记结果', 'bad'); return; }
+    await ACTIONS.rmConnect(b, { retryEnrollment: true });
+  },
+  rmConnect: async (b, options = {}) => {
+    const owner = rmBeginConnectionAction(b, 'station', ['rmStation', 'rmHub', 'rmEnrollmentClaim', 'rmSourceAPI']);
     if (!owner) return;
-    const [url, hubUrl, enrollmentClaim] = owner.fields.map(field => field.value.trim());
+    const [url, hubUrl, enrollmentClaim, accountId] = owner.fields.map(field => field.value.trim());
     const body = { url, hubUrl };
+    const account = (S.local?.accounts || []).find(row => row.id === accountId);
+    const sourceRevision = account?.sourceRevision;
+    const retryEnrollment = options.retryEnrollment === true;
+    if (accountId && sourceRevision) owner.enrollmentKey = rmEnrollmentTargetKey(accountId, sourceRevision, url, hubUrl);
+    if (accountId) {
+      body.accountId = accountId;
+      body.expectedSourceRevision = sourceRevision;
+      if (sourceRevision && rmSelectedSourceMatches(accountId, sourceRevision, url)) {
+        const controlsCurrent = owner.current;
+        owner.current = () => controlsCurrent() && rmSelectedSourceMatches(accountId, sourceRevision, url);
+      }
+    }
     rmRememberConnectionDraft();
     const out = document.getElementById('rmConnectError');
     if (out) out.innerHTML = '';
     try { await busy(b, async () => {
       try {
         if (!body.url) throw new Error('请输入中转站地址');
+        if (accountId && (!sourceRevision || !rmSelectedSourceMatches(accountId, sourceRevision, url))) throw new Error('所选 API 已变化，请重新选择后连接');
+        if (retryEnrollment && (!accountId || !RM.pendingEnrollment || RM.pendingEnrollment.key !== owner.enrollmentKey)) throw new Error('请先检查当前 API 的登记结果');
+        if (accountId && enrollmentClaim) throw new Error('使用已保存 API 时无需填写电脑登记码，请重新选择 API');
         if (enrollmentClaim && !/^[a-f0-9]{64}$/i.test(enrollmentClaim)) throw new Error('请填写完整的 64 位设备登记码');
-        await api('/api/remote/discover', body);
+        RM.connectionProgress = { state: 'discovering' };
+        rmUpdateModeStatus();
+        const probe = await api('/api/remote/discover', body);
         if (!owner.current()) return;
+        if (!accountId && !enrollmentClaim && ['device_enrollment_required', 'device_credentials_required', 'enrollment_claim_invalid'].includes(probe.errorCode)) throw Object.assign(new Error(probe.deviceError || '本站要求电脑登记授权'), { status: 403, code: probe.errorCode });
+        const deviceVerified = probe.registered === true && probe.eligibility?.method === 'device';
+        RM.connectionProgress = { state: 'registering', discovered: probe.stage === 'discovered', eligible: deviceVerified, registered: deviceVerified };
+        rmUpdateModeStatus();
         const connectBody = Object.assign({ connect: true }, body);
+        if (retryEnrollment) connectBody.retryEnrollment = true;
         if (enrollmentClaim) connectBody.enrollmentClaim = enrollmentClaim;
         owner.submitted = true;
-        await api('/api/remote/discover', connectBody);
-        if (owner.current()) { owner.fields[2].node.value = ''; owner.fields[2].value = ''; RM.stationDraft = null; }
+        const result = await api('/api/remote/discover', connectBody);
+        const registered = result?.registered === true && result?.stage === 'waiting_online';
+        const manualSaved = !accountId && result?.registered === false && result?.stage === 'saved' && result?.eligibility?.method === 'manual';
+        if (!registered && !manualSaved) throw Object.assign(new Error('服务尚未确认电脑登记，请刷新连接状态后核对'), { status: 503 });
+        if (owner.current() && registered) { if (owner.fields[2].node) owner.fields[2].node.value = ''; owner.fields[2].value = ''; RM.stationDraft = null; RM.enrollmentRequired = false; RM.pendingEnrollment = null; }
         S.pairQR = ''; S.pairExpires = 0;
         const state = await rmRefreshAcceptedConnection();
-        toast(`连接设置已保存：${host(body.hubUrl || body.url)}，正在连接中转站`, 'ok');
-        if (owner.current() && state) await route();
-      } catch (e) { if (owner.submitted) await rmRefreshAcceptedConnection(); rmConnectionError(owner, out, e); }
+        RM.connectionProgress = null;
+        if (registered && owner.current() && state?.config?.deviceId && result.plugin?.hubUrl && rmNormalizeHub(result.plugin.hubUrl) === rmNormalizeHub(state.config.effectiveHubUrl)) RM.confirmedRegistration = { deviceId: state.config.deviceId, hubUrl: rmNormalizeHub(result.plugin.hubUrl) };
+        toast(state?.hub?.state === 'connected' ? '电脑已连接，请在已绑定手机中完成授权' : registered ? '电脑登记已确认，正在等待连接上线' : '连接设置已保存，等待电脑登记和上线确认', 'ok');
+        if (registered && owner.current() && state) await route();
+      } catch (e) { if (owner.submitted) await rmRefreshAcceptedConnection(); rmShowEnrollmentFallback(owner, e, !!accountId); rmConnectionError(owner, out, e); }
+    }); } finally { if (RM.connectionAction === owner) RM.connectionProgress = null; rmFinishConnectionAction(owner); }
+  },
+  rmBotIngress: async (b) => {
+    const field = b.dataset.field || '';
+    if (!/^rmBotIngress-\d+$/.test(field)) return;
+    const hubUrl = b.dataset.hub || '', groupId = b.dataset.group || '';
+    const saved = () => rmSavedConnections(S.state?.config, 'bot').some(row => rmNormalizeHub(row.hubUrl) === rmNormalizeHub(hubUrl) && String(row.groupId || row.botGroupId || '') === groupId);
+    if (!groupId || !saved()) return;
+    const owner = rmBeginConnectionAction(b, 'bot', [field]);
+    if (!owner) return;
+    const controlsCurrent = owner.current;
+    owner.current = () => controlsCurrent() && saved();
+    const url = owner.fields[0].value.trim(), out = document.getElementById(field.replace('rmBotIngress-', 'rmBotIngressError-'));
+    if (out) out.innerHTML = '';
+    rmRememberConnectionDraft();
+    try { await busy(b, async () => {
+      try {
+        let target; try { target = new URL(url); } catch (_) { throw new Error('请输入完整的 HTTPS 服务地址'); }
+        if (target.protocol !== 'https:' || target.username || target.password || target.hash || target.search) throw new Error('请输入不含账号、查询参数或片段的 HTTPS 服务地址');
+        if (!owner.current()) return;
+        owner.submitted = true;
+        const result = await api('/api/remote/ingress', { hubUrl, groupId, url });
+        if (result?.ok !== true || rmNormalizeHub(result.hubUrl) !== rmNormalizeHub(hubUrl) || String(result.groupId || '') !== groupId || rmNormalizeHub(result.ingressUrl) !== rmNormalizeHub(target.href)) throw Object.assign(new Error('服务尚未确认新地址，请刷新状态后核对'), { status: 503 });
+        const state = await rmRefreshAcceptedConnection();
+        if (owner.current()) {
+          if (out) out.innerHTML = '<p class="rm-recovery-note">新地址已通过原连接身份验证并保存。</p>';
+          toast('Bot 连接地址已更新，原绑定已保留', 'ok');
+        }
+        if (owner.current() && state) rmUpdateRemoteStatus();
+      } catch (error) { if (owner.submitted) await rmRefreshAcceptedConnection(); rmConnectionError(owner, out, error); }
     }); } finally { rmFinishConnectionAction(owner); }
   },
   rmBotBind: async (b) => {
@@ -1363,8 +1369,28 @@ Object.assign(ACTIONS, {
 });
 
 document.addEventListener('input', (e) => {
+  if (S.route === 'login' && e.target.id?.startsWith('rmBotIngress-')) {
+    RM.connectionRevision++;
+    RM.botIngressDrafts ||= {};
+    if (e.target.dataset?.rmIngress) RM.botIngressDrafts[e.target.dataset.rmIngress] = e.target.value || '';
+  }
   if (S.route === 'login' && ['devInput', 'projPath'].includes(e.target.id)) RM.connectionRevision++;
   if (['rmStation', 'rmHub', 'rmEnrollmentClaim', 'rmBotBinding'].includes(e.target.id)) {
+    if (['rmStation', 'rmHub', 'rmEnrollmentClaim'].includes(e.target.id)) {
+      RM.pendingEnrollment = null;
+      const out = document.getElementById('rmConnectError');
+      if (out) out.innerHTML = '';
+    }
+    if (e.target.id === 'rmStation') {
+      const picker = document.getElementById('rmSourceAPI');
+      const selected = (S.local?.accounts || []).find(row => row.id === picker?.value);
+      if (selected && rmNormalizeSource(e.target.value) !== rmNormalizeSource(selected.baseUrl)) picker.value = '';
+      RM.enrollmentRequired = false;
+      const fallback = document.getElementById('rmEnrollmentFallback');
+      if (fallback) fallback.hidden = true;
+      const claim = document.getElementById('rmEnrollmentClaim');
+      if (claim) claim.value = '';
+    }
     RM.connectionRevision++;
     rmRememberConnectionDraft();
   }
@@ -1373,9 +1399,15 @@ document.addEventListener('input', (e) => {
 });
 document.addEventListener('change', (e) => {
   if (e.target.id === 'rmSourceAPI') {
+    RM.pendingEnrollment = null;
+    const out = document.getElementById('rmConnectError');
+    if (out) out.innerHTML = '';
     const selected = (S.local?.accounts || []).find(a => a.id === e.target.value);
     if (document.getElementById('rmStation')) document.getElementById('rmStation').value = selected?.baseUrl || '';
     for (const id of ['rmHub', 'rmEnrollmentClaim']) { const field = document.getElementById(id); if (field) field.value = ''; }
+    RM.enrollmentRequired = false;
+    const fallback = document.getElementById('rmEnrollmentFallback');
+    if (fallback) fallback.hidden = true;
     ++RM.connectionRevision;
     rmRememberConnectionDraft();
   }

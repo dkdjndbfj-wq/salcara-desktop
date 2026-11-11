@@ -1,0 +1,123 @@
+'use strict';
+/* Phone connection presentation. Requests and their ownership stay in remote.js. */
+
+function remoteTabMarkup() {
+  const active = rmEffectiveMode();
+  return `<nav class="rm-tabs" aria-label="手机远程连接方式">${[['station', '中转站', 'server'], ['bot', 'Bot', 'box'], ['direct', '直连', 'link']].map(([id, label, glyph]) => `<button type="button" class="rm-tab ${RM.remoteMode === id ? 'on' : ''}" data-act="rmMode" data-mode="${id}" aria-pressed="${RM.remoteMode === id}">${icon(glyph)}<span>${label}</span>${active === (id === 'station' ? 'hub' : id) ? '<i class="rm-tab-enabled" title="当前启用" aria-label="当前启用"></i>' : ''}</button>`).join('')}</nav>`;
+}
+
+function rmScopedHubStatus(st) {
+  const hub = st.hub || {}, c = st.config || {};
+  if (hub.deviceId && hub.deviceId !== c.deviceId || hub.hubUrl && rmNormalizeHub(hub.hubUrl) !== rmNormalizeHub(c.effectiveHubUrl || c.hubUrl)) return { state: 'connecting' };
+  return hub;
+}
+
+function rmConnectionStepsMarkup(st = S.state || {}) {
+  const c = st.config || {}, active = rmEffectiveMode(c), hub = rmScopedHubStatus(st), d = RM.direct || {};
+  const progress = RM.connectionAction?.mode === 'station' && RM.connectionAction.current() ? RM.connectionProgress : null;
+  const enabled = active !== 'none';
+  const connected = !progress && (active === 'direct' ? !!d.connected : enabled && hub.state === 'connected');
+  const confirmed = enabled && RM.confirmedRegistration?.deviceId === c.deviceId && RM.confirmedRegistration?.hubUrl === rmNormalizeHub(c.effectiveHubUrl) && !['device_auth_required', 'invalid_key'].includes(hub.state) && hub.errorCode !== 'hub_identity_changed';
+  const ready = progress ? !!progress.registered : active === 'direct' ? !!d.running : connected || confirmed;
+  const eligible = progress ? !!progress.eligible : connected || confirmed;
+  const discovered = progress ? !!progress.discovered : connected || confirmed;
+  const paired = !progress && (active === 'direct' ? !!(d.paired || c.remoteModes?.direct?.paired) : !!hub.pairing?.paired);
+  const error = progress ? '' : active === 'direct' ? d.error || (d.enabled && !d.running ? '直连监听未启动，请刷新状态后重试。' : '') : enabled ? hub.error || '' : '';
+  const label = st.loading ? '正在读取连接状态' : progress?.state === 'discovering' ? '正在发现中转站' : progress?.state === 'registering' ? '正在验证授权并登记电脑' : !enabled ? '尚未启用远程' : active === 'direct' ? d.error ? '直连暂不可用' : connected ? '手机已连接' : ready ? '直连已就绪' : '正在启动直连' : rmConnectionLabel(hub);
+  const step = (title, detail, state) => `<li class="${state}"><i aria-hidden="true">${state === 'done' ? '✓' : state === 'issue' ? '!' : '·'}</i><div><b>${title}</b><span>${esc(detail)}</span></div></li>`;
+  return `<div class="rm-connection-heading"><span class="rm-dot ${error ? 'bad' : connected ? 'ok' : enabled ? 'wait' : ''}"></span><strong>${esc(label)}</strong></div>
+    <details class="rm-check-details" ${error || progress || enabled && !connected ? 'open' : ''}><summary>连接检查</summary><ol class="rm-connection-steps">${active === 'direct' && !progress ? step('电脑监听', ready ? '加密直连已就绪' : '启用后自动检查', ready ? 'done' : error ? 'issue' : 'pending') : `${step('发现中转站', discovered ? '远程服务已发现' : '等待服务确认', discovered ? 'done' : 'pending')}${step('验证远程资格', eligible ? '服务器已确认授权' : '按站点策略验证', eligible ? 'done' : 'pending')}${step('登记电脑', ready ? '服务器已确认电脑登记' : '等待登记确认', ready ? 'done' : error ? 'issue' : 'pending')}`}${step('等待在线', connected ? active === 'direct' ? '手机已连接电脑' : '电脑与远程服务已连接' : enabled ? '等待连接恢复' : '连接后自动检查', connected ? 'done' : 'pending')}${step(active === 'bot' ? 'Bot 授权' : '手机绑定', active === 'bot' ? connected ? 'Bot 组授权已确认' : '由 Bot 入口确认组授权' : paired ? '手机绑定已保留' : '在下方完成手机绑定', active === 'bot' ? connected ? 'done' : 'pending' : paired ? 'done' : 'pending')}</ol></details>
+    ${active === 'hub' || active === 'bot' ? `<p class="rm-connection-address" id="rmHubConnectionMeta">${esc(host(c.relayRoot || c.effectiveHubUrl))}</p>` : ''}
+    <div id="rmHubConnectionError">${error ? `<div class="rm-error" role="status">${esc(error)}</div>` : ''}</div>`;
+}
+
+function renderRemoteDirectPanel(withSelfhost = true) {
+  if (withSelfhost && typeof selfhostRememberDraft === 'function') selfhostRememberDraft();
+  const d = RM.direct || {}, active = rmEffectiveMode() === 'direct';
+  const paired = d.paired || S.state?.config?.remoteModes?.direct?.paired;
+  const qrLive = active && !paired && d.qrDataURL && Number(d.expiresAt) > Date.now();
+  return `<section class="rm-mode-panel" id="rmDirectPanel" aria-label="直连接入">
+    <div class="rm-mode-head"><div><h3>电脑直连</h3><p>手机与电脑在同一局域网或 VPN，通过加密连接直接通信。</p></div></div>
+    <div class="rm-direct-address"><span class="rm-field-label">连接地址</span><b>${esc(active && d.running ? (d.secureUrls || []).join(', ') || '直连已启动' : '启用后显示')}</b></div>
+    <div class="rm-mode-actions">${paired ? active && d.running ? '' : `<button class="btn primary" data-act="rmActivateMode" data-mode="direct" ${RM.connectionAction ? 'disabled' : ''}>${active ? '恢复直连' : '启用直连'}</button>` : qrLive ? '' : `<button class="btn primary" data-act="rmDirectQR" ${RM.connectionAction ? 'disabled' : ''}>${icon('phone')}${active ? '生成配对二维码' : '启用并配对'}</button>`}<button class="rm-help-link" data-act="rmDirectTutorial">直连说明</button></div>
+    ${!active && paired ? '<p class="rm-recovery-note">已配对，未启用。启用后手机可继续连接，无需重新扫码。</p>' : ''}
+  </section>${withSelfhost && typeof renderSelfhostHubPanel === 'function' ? renderSelfhostHubPanel() : ''}`;
+}
+
+function rmSavedBotsMarkup(c) {
+  const hub = rmScopedHubStatus({ config: c, hub: S.state?.hub });
+  return rmSavedConnections(c, 'bot').map(entry => {
+    const group = String(entry.groupId || entry.botGroupId || '');
+    const activeGroup = String(c.remoteModes?.bot?.groupId || '');
+    const current = !!group && rmEffectiveMode(c) === 'bot' && activeGroup === group && rmNormalizeHub(entry.hubUrl) === rmNormalizeHub(c.effectiveHubUrl || c.hubUrl);
+    const connected = current && c.loggedIn && hub.state === 'connected';
+    const status = !current ? '已保存，未启用' : connected ? '已连接' : hub.error || hub.state === 'invalid_key' ? rmConnectionLabel(hub) : '正在连接';
+    return `<div class="rm-saved-mode"><div><b>${esc(entry.name || group || 'Bot 中继')}</b><span>${esc(host(entry.hubUrl))}${group ? ` · 组 ${esc(group)}` : ''}</span></div><span class="rm-mode-state"><i class="rm-dot ${connected ? 'ok' : current ? 'wait' : ''}"></i>${esc(status)}</span>${current ? '' : `<button class="btn sm" data-act="rmActivateMode" data-mode="bot" data-hub="${esc(entry.hubUrl)}" data-group="${esc(group)}" ${RM.connectionAction ? 'disabled' : ''}>启用 Bot</button>`}</div>`;
+  }).join('');
+}
+
+function renderRemoteBotPanel(c) {
+  const entries = rmSavedConnections(c, 'bot');
+  return `<section class="rm-mode-panel" id="rmBotPanel" aria-label="Bot 接入"><div class="rm-mode-head"><div><h3>Bot 中继</h3><p>导入管理员提供的绑定信息，Agent 继续运行在这台电脑上。</p></div></div>
+    <div id="rmSavedBots" class="rm-saved-modes">${rmSavedBotsMarkup(c)}</div>${entries.length ? `<details class="rm-new-connection" ${RM.botDraft ? 'open' : ''}><summary>添加其他 Bot</summary>` : ''}
+    <label class="field"><span>Bot 绑定信息</span><textarea class="input rm-bot-input" id="rmBotBinding" rows="5" placeholder="粘贴 Bot 绑定 JSON">${esc(RM.botDraft)}</textarea></label>
+    <div class="rm-mode-actions"><button class="btn primary" data-act="rmBotBind">导入并连接</button></div><div id="rmBotError" aria-live="polite"></div>${entries.length ? '</details>' : ''}</section>`;
+}
+
+function rmBotIngressSettings(c) {
+  const entries = rmSavedConnections(c, 'bot');
+  if (!entries.length) return '';
+  return `<details class="rm-adv"><summary>更新 Bot 连接地址</summary><p class="rm-recovery-note">旧地址无法连接时，验证新地址是否属于原来的 Bot。验证通过才保存，原手机绑定和电脑身份会保留。</p>${entries.map((entry, index) => {
+    const group = String(entry.groupId || entry.botGroupId || ''), key = JSON.stringify([rmNormalizeHub(entry.hubUrl), group]);
+    return `<div class="rm-ingress-row"><label class="field"><span>${esc(entry.name || host(entry.hubUrl))} · 组 ${esc(group)}</span><input class="input" type="url" id="rmBotIngress-${index}" data-rm-ingress="${esc(key)}" value="${esc(RM.botIngressDrafts?.[key] || '')}" placeholder="新的 HTTPS 服务地址" autocomplete="url"></label><button class="btn sm" data-act="rmBotIngress" data-field="rmBotIngress-${index}" data-hub="${esc(entry.hubUrl)}" data-group="${esc(group)}" ${RM.connectionAction ? 'disabled' : ''}>验证并更新</button><div id="rmBotIngressError-${index}" aria-live="polite"></div></div>`;
+  }).join('')}</details>`;
+}
+
+function rmEnrollmentRecoveryMarkup() {
+  return `<div class="rm-enrollment-recovery"><p class="rm-recovery-note">先检查同一台电脑是否已完成登记。仅在服务器确认原登记未完成后，才允许重新尝试。</p><div class="rm-mode-actions"><button class="btn" data-act="rmConnect">检查登记结果</button><button class="btn" data-act="rmRetryEnrollment">重新尝试登记</button></div></div>`;
+}
+
+function renderRemoteStationPanel(_view, _st, c, linked) {
+  const draft = RM.stationDraft;
+  const apis = (S.local?.accounts || []).filter(a => a.baseUrl && !a.credentialRef && a.sourceType === 'api_key');
+  const chosen = draft ? apis.find(a => a.id === draft.accountId) : apis.find(a => a.id === S.local?.activeCodexAccount) || apis[0];
+  const url = draft ? draft.url : chosen?.baseUrl || c.relayRoot || '';
+  const recovery = RM.pendingEnrollment?.key === rmEnrollmentTargetKey(chosen?.id, chosen?.sourceRevision, url, draft?.hubUrl) ? rmEnrollmentRecoveryMarkup() : '';
+  const saved = rmSavedConnections(c, 'hub');
+  const compactSaved = !linked ? saved.map(entry => `<div class="rm-saved-mode"><div><b>${esc(entry.name || host(entry.hubUrl))}</b></div><button class="btn sm" data-act="rmActivateMode" data-mode="hub" data-hub="${esc(entry.hubUrl)}" ${RM.connectionAction ? 'disabled' : ''}>启用中转站</button></div>`).join('') : '';
+  const collapse = linked || saved.length > 0;
+  return `<section class="rm-mode-panel" aria-label="中转站接入"><div class="rm-mode-head"><div><h3>中转站</h3><p>选择已保存的 API，验证本站远程授权后连接这台电脑。</p></div></div>
+    ${linked ? `<div class="rm-current-computer"><span class="rm-device-icon">${icon('laptop')}</span><div class="rm-grow"><span class="rm-field-label">这台电脑</span><div class="rm-device-name" id="devName">${S.editingName ? `<input class="input" id="devInput" value="${esc(c.deviceName)}" maxlength="40"><button class="btn sm primary" data-act="saveName">保存</button><button class="btn sm ghost" data-act="cancelName">取消</button>` : `${esc(c.deviceName || '我的电脑')}<button class="icon-btn" data-act="editName" aria-label="修改电脑名称">${icon('edit')}</button>`}</div></div></div>` : ''}
+    ${compactSaved}${collapse ? `<details class="rm-new-connection" ${draft?.url || draft?.claim ? 'open' : ''}><summary>连接其他中转站</summary>` : ''}
+    ${apis.length ? `<label class="field"><span>使用的 API</span><select class="input" id="rmSourceAPI">${apis.map(a => `<option value="${esc(a.id)}" ${a.id === chosen?.id ? 'selected' : ''}>${esc(a.name || host(a.baseUrl))}</option>`).join('')}<option value="" ${!chosen ? 'selected' : ''}>其他地址</option></select></label>` : ''}
+    <label class="field"><span>API 或中转站地址</span><input class="input" id="rmStation" placeholder="https://api.example.com/v1" value="${esc(url)}" autocomplete="url"></label>
+    <details class="rm-adv"><summary>自定义接入地址</summary><label class="field"><span>Hub 地址（可选）</span><input class="input" id="rmHub" placeholder="自动发现，无需填写" value="${esc(draft?.hubUrl || '')}" autocomplete="url"></label><p class="rm-recovery-note">仅在站点管理员提供独立地址时填写。</p></details>
+    <div class="rm-enrollment-fallback" id="rmEnrollmentFallback" ${RM.enrollmentRequired || draft?.claim ? '' : 'hidden'}><p class="rm-recovery-note">这个独立站点要求电脑登记码，请向站点管理员获取。</p><label class="field"><span>电脑登记码</span><input class="input" id="rmEnrollmentClaim" type="password" maxlength="64" autocomplete="off" autocapitalize="none" spellcheck="false" value="${esc(draft?.claim || '')}"></label></div>
+    <div class="rm-mode-actions"><button class="btn primary" data-act="rmConnect">${collapse ? '连接其他站点' : '验证并连接'}</button></div><div id="rmConnectError" aria-live="polite">${recovery}</div>${collapse ? '</details>' : ''}</section>`;
+}
+
+function rmPhoneBindingMarkup(st = S.state || {}) {
+  const c = st.config || {}, hub = rmScopedHubStatus(st), mode = RM.remoteMode, active = rmEffectiveMode(c), d = RM.direct || {};
+  if (mode === 'direct') {
+    const paired = d.paired || c.remoteModes?.direct?.paired, enabled = active === 'direct';
+    return `<p class="rm-binding-state"><span class="rm-dot ${enabled && d.connected ? 'ok' : paired ? 'wait' : ''}"></span><strong>${enabled && d.connected ? '手机已连接' : paired ? '已配对' : '尚未绑定手机'}</strong></p>${enabled && !paired && d.qrDataURL && Number(d.expiresAt) > Date.now() ? `<div class="rm-direct-qr"><img src="${esc(d.qrDataURL)}" alt="直连配对二维码"><span>用手机「我的电脑」扫码，核对并确认连接。<br>有效至 ${esc(new Date(Number(d.expiresAt)).toLocaleTimeString())}</span></div>` : `<p class="rm-recovery-note">${paired ? '这台电脑保留一个直连手机配对。' : '启用直连后，用手机扫描二维码完成授权。'}</p>`}${paired ? `<button class="rm-link bad" data-act="rmDirectRevoke" ${RM.connectionAction ? 'disabled' : ''}>撤销手机配对</button>` : ''}`;
+  }
+  if (mode === 'bot') return `<p class="rm-recovery-note">在手机「我的电脑」导入同一份 Bot 绑定信息。电脑列表由该 Bot 的授权范围决定。</p><button class="rm-help-link" data-act="rmBotTutorial">查看手机绑定说明</button>`;
+  const linked = active === 'hub' && c.loggedIn, connected = linked && hub.state === 'connected', paired = linked && hub.pairing?.paired;
+  const qrLive = connected && S.pairQR && S.pairExpires > Date.now();
+  return `<p class="rm-binding-state"><span class="rm-dot ${paired ? 'ok' : ''}"></span><strong>${paired ? '手机已绑定' : '尚未绑定手机'}</strong></p><div class="rm-qr ${qrLive ? 'live' : ''}" id="pairQR" ${paired && !qrLive ? 'hidden' : ''}>${qrLive ? `<img src="${esc(S.pairQR)}" alt="手机绑定二维码"><span class="rm-timer" id="rmTimer"></span>` : !connected ? '<span>连接中转站后可扫码绑定</span>' : paired ? '' : `<button class="btn primary sm" data-act="rmShowQR">${icon('scan')}显示绑定二维码</button>`}</div><p class="rm-recovery-note">${paired ? '手机已获授权，可使用这台电脑上的 Agent。更换手机前请先解除绑定。' : '手机打开「编程 → 我的电脑」，扫码并确认授权。二维码仅使用一次。'}</p>${paired ? `<button class="rm-link bad" id="rmPairRevoke" data-act="pairRevoke" ${connected && !RM.connectionAction ? '' : 'disabled'}>解除手机绑定</button>` : ''}`;
+}
+
+function renderRemoteAdvanced(st) {
+  const c = st.config || {}, linked = c.loggedIn && rmEffectiveMode(c) === 'hub';
+  const stations = RM.remoteMode === 'station' && rmSavedConnections(c, 'hub').length && typeof remoteSavedStationsHTML === 'function' ? `<div class="rm-saved-station-settings">${remoteSavedStationsHTML(c)}</div>` : '';
+  return `<details class="rm-sec rm-advanced" id="rmAdvanced"><summary><span>${icon('gear')}<b>高级设置</b></span><small>恢复、诊断与本机服务</small></summary><div class="rm-advanced-body">
+    ${RM.remoteMode === 'station' && linked ? `<details class="rm-adv"><summary>重新登记这台电脑</summary><p class="rm-recovery-note">设备凭据失效或站点重置后重新登记。完成后手机需要重新扫码；API、项目和聊天记录会保留。</p><label class="field"><span>设备登记码（按站点要求填写）</span><input class="input" id="rmRecoveryClaim" type="password" maxlength="64" autocomplete="off" placeholder="已有授权的站点可留空"></label><button class="btn" data-act="rmReenroll">重新登记</button><div id="rmReenrollError"></div></details>` : ''}
+    ${stations}${RM.remoteMode === 'bot' ? rmBotIngressSettings(c) : ''}${RM.remoteMode === 'direct' && typeof renderSelfhostHubPanel === 'function' ? renderSelfhostHubPanel() : ''}<section id="rmRecovery" aria-label="消息与恢复">${rmRecoveryMarkup(st.hub)}</section><div id="rmLive"></div></div></details>`;
+}
+
+function renderRemoteConnectionLayout(view, st) {
+  const c = st.config || {}, linked = c.loggedIn && rmEffectiveMode(c) === 'hub';
+  return `<div class="rm-page rm-connect-page"><div id="rmModeError" aria-live="polite"></div><div id="approvalsBox"></div><div class="rm-connect-grid"><section class="rm-sec rm-connect-main" aria-labelledby="rmConnectionTitle"><header class="rm-section-heading"><h2 id="rmConnectionTitle">连接方式</h2><p>远程已内置，连接后即可从手机使用本机 Agent。</p></header><div id="rmModeTabs">${remoteTabMarkup()}</div>${RM.remoteMode === 'station' ? renderRemoteStationPanel(view, st, c, linked) : RM.remoteMode === 'bot' ? renderRemoteBotPanel(c) : renderRemoteDirectPanel(false)}</section>
+    <aside class="rm-connect-aside"><section class="rm-sec" aria-labelledby="rmStatusTitle"><div class="rm-sec-head"><h3 id="rmStatusTitle">连接状态</h3><button class="rm-link" data-act="${RM.remoteMode === 'direct' ? 'rmDirectRefresh' : 'rmRecoveryRefresh'}" aria-label="刷新连接状态">${icon('refresh')}刷新</button></div><div id="rmConnectionSteps" aria-live="polite">${rmConnectionStepsMarkup(st)}</div><div id="rmActiveMode">${rmModeStatusMarkup(c)}</div></section><section class="rm-sec" id="rmPairSection" aria-labelledby="rmBindingTitle"><div class="rm-sec-head"><h3 id="rmBindingTitle">已绑定手机</h3></div><div id="rmPhoneBinding">${rmPhoneBindingMarkup(st)}</div></section></aside></div>${renderRemoteAdvanced(st)}</div>`;
+}

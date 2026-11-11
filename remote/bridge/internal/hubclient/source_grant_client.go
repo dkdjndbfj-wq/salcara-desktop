@@ -31,6 +31,8 @@ type sourceIssuer struct {
 	Origins          []string `json:"origins"`
 	APIBases         []string `json:"apiBases"`
 	AuthorizationURL string   `json:"authorizationUrl"`
+	DeviceEnrollment bool     `json:"deviceEnrollment,omitempty"`
+	EnrollmentURL    string   `json:"enrollmentUrl,omitempty"`
 }
 type sourceGrantChallenge struct {
 	ChallengeID    string          `json:"challengeId"`
@@ -103,7 +105,7 @@ func parseSourceGrantChallengeResponse(raw []byte) (sourceGrantChallenge, source
 	}
 	for _, rawIssuer := range fields.Issuers {
 		var issuer sourceIssuer
-		if exactSourceJSON(rawIssuer, []string{"id", "publicKey", "sourceTypes", "agentIds", "origins", "apiBases", "authorizationUrl"}, &issuer) != nil || len(issuer.SourceTypes) > 3 || len(issuer.AgentIDs) > 32 || len(issuer.Origins) > 32 || len(issuer.APIBases) > 32 {
+		if exactSourceJSON(rawIssuer, []string{"id", "publicKey", "sourceTypes", "agentIds", "origins", "apiBases", "authorizationUrl", "deviceEnrollment", "enrollmentUrl"}, &issuer) != nil || len(issuer.SourceTypes) > 3 || len(issuer.AgentIDs) > 32 || len(issuer.Origins) > 32 || len(issuer.APIBases) > 32 {
 			return challenge, policy, errSourceAcquisition
 		}
 		policy.Issuers = append(policy.Issuers, issuer)

@@ -86,3 +86,19 @@ func TestRemoteModeSameServerKeepsIndependentHubAndBotCredentials(t *testing.T) 
 		}
 	}
 }
+
+func TestRemoteModeSameServerKeepsEachBotGroupIndependent(t *testing.T) {
+	const root, hub = "https://shared.example.test", "https://shared.example.test/salcara-hub"
+	c := Config{}
+	c.ConnectRemoteWithBotBinding(root, hub, "group-a", "invite-a", "signature-a")
+	a := c.RemoteConnections[0]
+	c.ConnectRemoteWithBotBinding(root, hub+"/v1/", "group-b", "invite-b", "signature-b")
+	if len(c.RemoteConnections) != 2 || !reflect.DeepEqual(a, c.RemoteConnections[0]) || c.DeviceID == a.DeviceID || c.DeviceSecret == a.DeviceSecret {
+		t.Fatal("another Bot group reused or overwrote the original group identity")
+	}
+	b := c.RemoteConnections[1]
+	c.ConnectRemoteWithBotBinding(root, hub, "group-a", "invite-a2", "signature-a2")
+	if c.DeviceID != a.DeviceID || c.DeviceSecret != a.DeviceSecret || !reflect.DeepEqual(b, c.RemoteConnections[1]) || c.RemoteConnections[0].BotInvite != "invite-a2" {
+		t.Fatal("returning to the first Bot group selected or changed the second group")
+	}
+}

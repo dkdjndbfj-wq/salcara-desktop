@@ -72,11 +72,11 @@ function fixture() {
 
 test('the former local-connection route is merged into the direct tab', () => {
   const index = fs.readFileSync(path.join(webDir, 'index.html'), 'utf8');
-  const remote = fs.readFileSync(path.join(webDir, 'remote.js'), 'utf8');
+  const remote = fs.readFileSync(path.join(webDir, 'remote-connect.js'), 'utf8');
   const shell = fs.readFileSync(path.join(webDir, 'shell.js'), 'utf8');
   assert.doesNotMatch(index, /data-route="selfhost"/);
   assert.match(index, /data-route="login"/);
-  assert.match(remote, /\['station', '中转站'.*\['direct', '直连'.*\['bot', 'Bot'/s);
+  for (const [mode, label] of [['station', '中转站'], ['bot', 'Bot'], ['direct', '直连']]) assert.ok(remote.includes(`['${mode}', '${label}'`));
   assert.match(remote, /renderSelfhostHubPanel\(\)/);
   assert.match(shell, /r === 'selfhost'[\s\S]*RM\.remoteMode = 'direct'[\s\S]*'#login'/);
 });

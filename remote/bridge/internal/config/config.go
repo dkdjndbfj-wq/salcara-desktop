@@ -36,13 +36,14 @@ const (
 
 // Config is the on-disk configuration.
 type Config struct {
-	RelayRoot         string             `json:"relayRoot"`
-	HubURL            string             `json:"hubUrl,omitempty"` // empty = RelayRoot + "/salcara-hub"
-	AccountKey        string             `json:"accountKey"`
-	CodexKey          string             `json:"codexKey,omitempty"`  // empty = AccountKey
-	ClaudeKey         string             `json:"claudeKey,omitempty"` // empty = AccountKey
-	RemoteDeviceOnly  bool               `json:"remoteDeviceOnly,omitempty"`
-	RemoteConnections []RemoteConnection `json:"remoteConnections,omitempty"`
+	RelayRoot                string                    `json:"relayRoot"`
+	HubURL                   string                    `json:"hubUrl,omitempty"` // empty = RelayRoot + "/salcara-hub"
+	AccountKey               string                    `json:"accountKey"`
+	CodexKey                 string                    `json:"codexKey,omitempty"`  // empty = AccountKey
+	ClaudeKey                string                    `json:"claudeKey,omitempty"` // empty = AccountKey
+	RemoteDeviceOnly         bool                      `json:"remoteDeviceOnly,omitempty"`
+	RemoteConnections        []RemoteConnection        `json:"remoteConnections,omitempty"`
+	RemoteEnrollmentAttempts []RemoteEnrollmentAttempt `json:"remoteEnrollmentAttempts,omitempty"`
 	// Exactly one phone transport may execute at a time. Saved credentials for
 	// other transports remain intact; empty retains legacy mode inference.
 	ActiveRemoteMode string `json:"activeRemoteMode,omitempty"`
@@ -190,6 +191,7 @@ func (c Config) Clone() Config {
 		}
 	}
 	c.RemoteConnections = append([]RemoteConnection(nil), c.RemoteConnections...)
+	c.RemoteEnrollmentAttempts = append([]RemoteEnrollmentAttempt(nil), c.RemoteEnrollmentAttempts...)
 	c.DirectRelayHosts = append([]string(nil), c.DirectRelayHosts...)
 	c.DirectSessionKeys = append([]string(nil), c.DirectSessionKeys...)
 	for i := range c.RemoteConnections {

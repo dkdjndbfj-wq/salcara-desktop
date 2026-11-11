@@ -59,10 +59,16 @@ func Bind(req *http.Request, canonical string) *http.Request {
 }
 
 type entry struct {
-	mu        sync.Mutex
-	manifest  Manifest
-	refreshAt time.Time
-	failed    map[string]time.Time
+	mu              sync.Mutex
+	manifest        Manifest
+	refreshAt       time.Time
+	failed          map[string]time.Time
+	refreshing      chan struct{}
+	refreshPin      string
+	lastEndpoint    string
+	identityChanged bool
+	refreshOffset   int
+	users           int // guarded by Transport.mu; prevents eviction during routing/refresh
 }
 type Transport struct {
 	base    http.RoundTripper
@@ -88,8 +94,17 @@ func normalizeURL(raw string) string {
 	return normalizeIngressURL(raw)
 }
 func validManifest(m Manifest, canonical string, now time.Time) bool {
+	return validManifestAt(m, canonical, now, false)
+}
+
+// Expired signed entries may locate a new manifest, but can never authorize
+// traffic. Keep the same structural and future-time checks in both cases.
+func validManifestAt(m Manifest, canonical string, now time.Time, allowExpired bool) bool {
 	key, err := base64.StdEncoding.DecodeString(m.IdentityPublicKey)
-	if m.Version != 1 || !validHex(m.HubInstanceID, 16) || err != nil || len(key) != ed25519.PublicKeySize || canonical == "" || normalizeURL(canonical) != canonical || m.CanonicalURL != canonical || m.Revision < 1 || m.IssuedAt < now.Add(-24*time.Hour).UnixMilli() || m.IssuedAt > now.Add(5*time.Second).UnixMilli() || m.ExpiresAt <= now.UnixMilli() || m.ExpiresAt-m.IssuedAt != int64((24*time.Hour)/time.Millisecond) || len(m.Endpoints) < 1 || len(m.Endpoints) > 8 {
+	if m.Version != 1 || !validHex(m.HubInstanceID, 16) || err != nil || len(key) != ed25519.PublicKeySize || canonical == "" || normalizeURL(canonical) != canonical || m.CanonicalURL != canonical || m.Revision < 1 || m.IssuedAt <= 0 || m.IssuedAt > now.Add(5*time.Second).UnixMilli() || m.ExpiresAt <= m.IssuedAt || m.ExpiresAt-m.IssuedAt != int64((24*time.Hour)/time.Millisecond) || len(m.Endpoints) < 1 || len(m.Endpoints) > 8 {
+		return false
+	}
+	if !allowExpired && (m.IssuedAt < now.Add(-24*time.Hour).UnixMilli() || m.ExpiresAt <= now.UnixMilli()) {
 		return false
 	}
 	seen := map[string]bool{}
@@ -153,15 +168,43 @@ func (t *Transport) persistAs(logical string, m Manifest) {
 func (t *Transport) state(canonical string) *entry {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	return t.stateLocked(canonical)
+}
+
+func (t *Transport) acquireState(canonical string) *entry {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	e := t.stateLocked(canonical)
+	if e != nil {
+		e.users++
+	}
+	return e
+}
+
+func (t *Transport) releaseState(e *entry) {
+	t.mu.Lock()
+	e.users--
+	t.mu.Unlock()
+}
+
+func (t *Transport) stateLocked(canonical string) *entry {
 	if e := t.entries[canonical]; e != nil {
 		return e
 	}
 	// A client normally has one active Hub and a few explicitly paired sites.
 	// Avoid unbounded per-URL memory even if a caller is reconfigured repeatedly.
 	if len(t.entries) >= 16 {
-		for key := range t.entries {
-			delete(t.entries, key)
-			break
+		for key, candidate := range t.entries {
+			if candidate.users == 0 {
+				delete(t.entries, key)
+				break
+			}
+		}
+		if len(t.entries) >= 16 {
+			// Keep one flight and highest revision for each active logical Hub.
+			// A seventeenth simultaneous Hub can retry instead of replacing a
+			// live entry and permitting two writers for the same cache file.
+			return nil
 		}
 	}
 	e := &entry{failed: map[string]time.Time{}}
@@ -172,8 +215,13 @@ func (t *Transport) state(canonical string) *entry {
 				raw, readErr := io.ReadAll(io.LimitReader(file, (32<<10)+1))
 				file.Close()
 				var m Manifest
-				if readErr == nil && len(raw) <= 32<<10 && json.Unmarshal(raw, &m) == nil && validManifest(m, m.CanonicalURL, time.Now()) {
-					e.manifest = m
+				if readErr == nil && len(raw) <= 32<<10 && json.Unmarshal(raw, &m) == nil {
+					if signed, err := verifiedManifestEnvelope(m, "", "", "", time.Now(), true); err == nil {
+						e.manifest = signed
+					} else if m.SignedPayload == "" && m.Signature == "" && validManifest(m, m.CanonicalURL, time.Now()) {
+						// Legacy caches still expire normally and are never pinned hints.
+						e.manifest = m
+					}
 				}
 			}
 		}
@@ -282,7 +330,14 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 	if !matches {
 		return t.base.RoundTrip(req)
 	}
-	e := t.state(canonical)
+	e := t.acquireState(canonical)
+	if e == nil {
+		if req.Body != nil {
+			req.Body.Close()
+		}
+		return nil, errors.New("ingress_busy")
+	}
+	defer t.releaseState(e)
 	routeCtx, cancel := context.WithTimeout(req.Context(), 6*time.Second)
 	defer cancel()
 	m, candidates := t.candidates(routeCtx, canonical, e)

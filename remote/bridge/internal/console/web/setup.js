@@ -57,8 +57,8 @@ function renderSetup(view, r, local) {
   }
   $('#headActions').innerHTML = `<button class="btn sm" data-act="suRefresh">${icon('refresh')}重新检测</button>`;
   view.innerHTML = `
-    ${missing.length ? `<div class="callout warn">${ico('warn')}<div>还差 ${missing.map((item) => esc(item.name)).join('、')}。装好后手机才能继续这台电脑上的对话。</div></div>`
-      : '<div class="callout ok">' + ico('check') + '<div>环境已就绪，手机可以远程继续这台电脑上的对话。</div></div>'}
+    <div class="callout">${ico('box')}<div>远程连接已内置，可先连接电脑并用手机配对。下方工具按需安装，使用哪个 Agent 就准备哪个。</div></div>
+    ${missing.length ? `<div class="callout warn">${ico('warn')}<div>以下功能还有组件需要准备：${missing.map((item) => esc(item.name)).join('、')}。请按各项用途检查。</div></div>` : ''}
     <div class="su-list">${r.items.map((item) => suRow(item, busy)).join('')}</div>
     ${suJob(SU.job)}
     ${local && local.tools ? localToolPathsPanel(local) : ''}

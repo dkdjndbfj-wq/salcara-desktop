@@ -17,13 +17,14 @@ import (
 )
 
 type Discovery struct {
-	RemoteAccess    *config.StationObservation `json:"remoteAccess,omitempty"`
-	Root            string                     `json:"root"`
-	HubURL          string                     `json:"hubUrl"`
-	Version         string                     `json:"version"`
-	ProtocolVersion int                        `json:"protocolVersion"`
-	Capabilities    []string                   `json:"capabilities"`
-	Identity        *hubingress.Manifest       `json:"-"`
+	DeviceEnrollment *DeviceEnrollmentPolicy    `json:"deviceEnrollment,omitempty"`
+	RemoteAccess     *config.StationObservation `json:"remoteAccess,omitempty"`
+	Root             string                     `json:"root"`
+	HubURL           string                     `json:"hubUrl"`
+	Version          string                     `json:"version"`
+	ProtocolVersion  int                        `json:"protocolVersion"`
+	Capabilities     []string                   `json:"capabilities"`
+	Identity         *hubingress.Manifest       `json:"-"`
 }
 
 func RemoteURL(raw string) (*url.URL, error) {
@@ -158,13 +159,14 @@ func discoverAt(ctx context.Context, hubURL string) (Discovery, error) {
 		return Discovery{}, errors.New("远程插件未就绪，或请求被本站反向代理拦截")
 	}
 	var info struct {
-		RemoteAccess    *config.StationObservation `json:"remoteAccess"`
-		Service         string                     `json:"service"`
-		Protocol        string                     `json:"protocol"`
-		Version         string                     `json:"version"`
-		ProtocolVersion int                        `json:"protocolVersion"`
-		Capabilities    []string                   `json:"capabilities"`
-		AuthModes       []string                   `json:"authModes"`
+		DeviceEnrollment *DeviceEnrollmentPolicy    `json:"deviceEnrollment"`
+		RemoteAccess     *config.StationObservation `json:"remoteAccess"`
+		Service          string                     `json:"service"`
+		Protocol         string                     `json:"protocol"`
+		Version          string                     `json:"version"`
+		ProtocolVersion  int                        `json:"protocolVersion"`
+		Capabilities     []string                   `json:"capabilities"`
+		AuthModes        []string                   `json:"authModes"`
 	}
 	body, readErr := io.ReadAll(io.LimitReader(resp.Body, protocol.MaxSourcePolicyWireBytes+1))
 	if readErr != nil || len(body) > protocol.MaxSourcePolicyWireBytes || json.Unmarshal(body, &info) != nil || info.Service != "salcara-hub" {
@@ -194,5 +196,5 @@ func discoverAt(ctx context.Context, hubURL string) (Discovery, error) {
 			info.RemoteAccess = nil
 		}
 	}
-	return Discovery{Root: root, HubURL: hubURL, Version: info.Version, ProtocolVersion: info.ProtocolVersion, Capabilities: info.Capabilities, RemoteAccess: info.RemoteAccess}, nil
+	return Discovery{Root: root, HubURL: hubURL, Version: info.Version, ProtocolVersion: info.ProtocolVersion, Capabilities: info.Capabilities, RemoteAccess: info.RemoteAccess, DeviceEnrollment: info.DeviceEnrollment}, nil
 }

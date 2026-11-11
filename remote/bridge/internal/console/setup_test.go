@@ -4,6 +4,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"salcara/bridge/internal/launcher"
 )
 
 func TestInstallersAreFixedOfficialCommands(t *testing.T) {
@@ -25,5 +27,27 @@ func TestInstallersAreFixedOfficialCommands(t *testing.T) {
 func TestBundledCodexIsRecognised(t *testing.T) {
 	if !bundledCodex(`C:\Users\a\AppData\Local\Programs\Codex\resources\codex.exe`) || bundledCodex(`C:\Users\a\AppData\Local\Programs\OpenAI\Codex\bin\codex.exe`) {
 		t.Fatal("bundled detection")
+	}
+}
+
+func TestSetupKeepsAgentRequirementsLocalToTheChosenTool(t *testing.T) {
+	for _, available := range []string{"", "codex", "claude", "deepseek-harness", "hermes"} {
+		t.Run(available, func(t *testing.T) {
+			items := setupInventoryItems("windows", []launcher.Tool{{ID: available, Available: available != ""}}, "", false, setupItem{ID: "claude-sdk"})
+			found := available == ""
+			for _, item := range items {
+				if item.Required {
+					t.Fatalf("%s incorrectly blocks global setup and pairing", item.ID)
+				}
+				if item.ID == available {
+					found = item.Installed
+				} else if item.Installed {
+					t.Fatalf("missing tool %s was marked available", item.ID)
+				}
+			}
+			if !found {
+				t.Fatal("the selected installed Agent was lost")
+			}
+		})
 	}
 }

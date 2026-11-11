@@ -21,7 +21,7 @@ func (c *Client) refreshStationCapabilities(ctx context.Context, station config.
 	var info Discovery
 	var err error
 	if saved, ok := station.SavedRemoteConnection(station.EffectiveHubURL(), station.DeviceID); ok {
-		info, err = DiscoverForConnection(ctx, station, saved)
+		info, err = c.DiscoverForConnection(ctx, station, saved)
 	} else {
 		info, err = DiscoverForDevice(ctx, station.EffectiveHubURL(), station.EffectiveHubURL(), station.DeviceID, station.DeviceSecret, station.DeviceEnrollmentClaim())
 	}
@@ -29,6 +29,9 @@ func (c *Client) refreshStationCapabilities(ctx context.Context, station config.
 		// Upgrade a trusted exact-URL legacy record before the next credential
 		// request. Pins are durable, unlike short-lived routing manifests.
 		if pinErr := c.o.Store.Update(func(current *config.Config) error {
+			if ctx.Err() != nil || current.RemoteConnectionEpoch != station.RemoteConnectionEpoch {
+				return errors.New("远程连接已变化或检查已取消")
+			}
 			for i := range current.RemoteConnections {
 				saved := &current.RemoteConnections[i]
 				if saved.DeviceID != station.DeviceID || config.NormalizeHubURL(saved.HubURL) != config.NormalizeHubURL(station.EffectiveHubURL()) {
@@ -37,13 +40,14 @@ func (c *Client) refreshStationCapabilities(ctx context.Context, station config.
 				if saved.DeviceSecret != station.DeviceSecret {
 					return ErrHubIdentityChanged
 				}
+				if original, exists := station.SavedRemoteConnection(saved.HubURL, saved.DeviceID); !exists || saved.HubInstanceID != original.HubInstanceID || saved.IdentityPublicKey != original.IdentityPublicKey || saved.IngressURL != original.IngressURL {
+					return errors.New("远程入口已更新，请重新检查")
+				}
 				if saved.HubInstanceID != "" && (saved.HubInstanceID != info.Identity.HubInstanceID || saved.IdentityPublicKey != info.Identity.IdentityPublicKey) {
 					return ErrHubIdentityChanged
 				}
 				saved.HubInstanceID, saved.IdentityPublicKey = info.Identity.HubInstanceID, info.Identity.IdentityPublicKey
-				if saved.IngressURL == "" {
-					saved.IngressURL = info.HubURL + "/v1"
-				}
+				saved.IngressURL = info.HubURL + "/v1"
 				return nil
 			}
 			return ErrHubIdentityChanged

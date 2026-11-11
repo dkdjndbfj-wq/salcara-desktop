@@ -62,9 +62,50 @@ func resolveDiscoveryConnection(ctx context.Context, info Discovery, cfg config.
 // DiscoverForConnection applies the same pin and scoped-policy checks during
 // background refresh and phone-triggered station switches as during setup.
 func DiscoverForConnection(ctx context.Context, cfg config.Config, saved config.RemoteConnection) (Discovery, error) {
+	return discoverForConnection(ctx, cfg, saved, hubingress.New(nil, ""))
+}
+
+// The client's transport retains signed routing hints across refreshes and
+// restarts. Capability discovery must use it before probing an old URL.
+func (c *Client) DiscoverForConnection(ctx context.Context, cfg config.Config, saved config.RemoteConnection) (Discovery, error) {
+	return discoverForConnection(ctx, cfg, saved, c.ingressTransport())
+}
+
+func (c *Client) ingressTransport() *hubingress.Transport {
+	transport, ok := c.o.HTTP.Transport.(*hubingress.Transport)
+	if !ok {
+		transport = hubingress.New(c.o.HTTP.Transport, "")
+	}
+	return transport
+}
+
+func (c *Client) VerifyRemoteIngress(ctx context.Context, saved config.RemoteConnection, endpoint string) (hubingress.Manifest, error) {
+	return c.ingressTransport().VerifyPinnedEndpoint(ctx, saved.HubURL+"/v1", saved.HubInstanceID, saved.IdentityPublicKey, endpoint)
+}
+
+func discoverForConnection(ctx context.Context, cfg config.Config, saved config.RemoteConnection, transport *hubingress.Transport) (Discovery, error) {
 	endpoint := saved.HubURL
 	if saved.IngressURL != "" {
 		endpoint = config.NormalizeHubURL(saved.IngressURL)
+	}
+	if saved.HubInstanceID != "" || saved.IdentityPublicKey != "" {
+		manifest, verifiedEndpoint, err := transport.ResolvePinnedIdentity(ctx, saved.HubURL+"/v1", saved.HubInstanceID, saved.IdentityPublicKey, saved.IngressURL)
+		if err != nil {
+			if errors.Is(err, hubingress.ErrIdentityChanged) {
+				return Discovery{}, ErrHubIdentityChanged
+			}
+			return Discovery{}, ErrHubIdentityVerification
+		}
+		endpoint = config.NormalizeHubURL(verifiedEndpoint)
+		info, err := Discover(ctx, endpoint, endpoint)
+		if err != nil {
+			return info, err
+		}
+		if !info.HasCapability("ingress.signed-manifest.v1") {
+			return info, ErrHubIdentityChanged
+		}
+		info.Identity = &manifest
+		return DiscoverDevicePolicy(ctx, info, saved.DeviceID, saved.DeviceSecret, saved.EnrollmentClaim)
 	}
 	info, err := Discover(ctx, endpoint, endpoint)
 	if err != nil {
