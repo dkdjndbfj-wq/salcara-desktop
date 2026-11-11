@@ -99,6 +99,10 @@ function swapScript({ platform, pid, appDir, newDir, backupDir, launch, log, per
       "$ErrorActionPreference = 'Stop'",
       `$app = ${psQuote(appDir)}; $new = ${psQuote(newDir)}; $bak = ${psQuote(backupDir)}; $exe = ${psQuote(launch)}; $log = ${psQuote(log)}; $permit = ${psQuote(permit || '')}; $receipt = ${psQuote(receipt || '')}; $token = ${psQuote(token || '')}; $helperReady = ${psQuote(ready || '')}`,
       'function Log($m) { try { Add-Content -LiteralPath $log -Value ("{0:o} {1}" -f (Get-Date), $m) } catch {} }',
+      // A failed child can exit before Windows releases its image/directory
+      // handles. Give each rollback rename the same bounded grace as install;
+      // never delete or overwrite either payload if contention persists.
+      'function MoveForRollback($from, $to) { for ($attempt = 0; $attempt -lt 120; $attempt++) { try { [IO.Directory]::Move($from, $to); return } catch { if ($attempt -eq 119) { throw }; if ($attempt -eq 0) { Log "rollback folder busy; waiting" }; Start-Sleep -Milliseconds 500 } } }',
       `$recoveryCommand = ${psQuote(recoveryCommand)}; $runOnce = 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\RunOnce'; $recoveryName = 'SalcaraUpdate-' + $token`,
       'function FinishRecovery { if ($recoveryCommand) { Remove-ItemProperty -LiteralPath $runOnce -Name $recoveryName -ErrorAction SilentlyContinue } }',
       `function OriginalRunning { $p = Get-Process -Id ${Number(pid)} -ErrorAction SilentlyContinue; if (-not $p) { return $false }; if (${Math.floor(parentStarted)} -gt 0) { return [Math]::Abs(([DateTimeOffset]$p.StartTime).ToUnixTimeMilliseconds() - ${Math.floor(parentStarted)}) -lt 5000 }; return $true }`,
@@ -130,7 +134,7 @@ function swapScript({ platform, pid, appDir, newDir, backupDir, launch, log, per
       '$ready = $false; for ($i = 0; $i -lt 120; $i++) { if ((Test-Path -LiteralPath $receipt) -and [IO.File]::ReadAllText($receipt) -eq $token) { $ready = $true; break }; if (-not $started -or $started.HasExited) { break }; Start-Sleep -Milliseconds 500 }',
       'if ($ready) { Log "updated and healthy"; FinishRecovery; try { Remove-Item -LiteralPath $bak -Recurse -Force } catch { Log "old copy retained" }; exit 0 }',
       'if ($started -and -not $started.HasExited) { Log "new app did not acknowledge healthy startup; backup retained without killing it"; FinishRecovery; exit 1 }',
-      'try { [IO.Directory]::Move($app, $new); [IO.Directory]::Move($bak, $app); FinishRecovery; Start-Process -FilePath $exe -WorkingDirectory $parent -WindowStyle Hidden; Log "rolled back" } catch { Log "rollback requires recovery: $_" }; exit 1',
+      'try { MoveForRollback $app $new; MoveForRollback $bak $app; FinishRecovery; Start-Process -FilePath $exe -WorkingDirectory $parent -WindowStyle Hidden; Log "rolled back" } catch { Log "rollback requires recovery: $_" }; exit 1',
       '',
     ].join('\r\n');
   }

@@ -125,6 +125,9 @@ func deepSeekRuntimeEntry(t *testing.T, extension string) string {
 
 func useDeepSeekRuntimeFixtureNode(t *testing.T, node string) {
 	t.Helper()
+	// On Unix the login-shell PATH precedes the process PATH. Keep host Node
+	// installations (including an already-cached shell PATH) out of this fixture.
+	t.Setenv(ShellPathEnv, "1")
 	t.Setenv("PATH", filepath.Dir(node)+string(os.PathListSeparator)+os.Getenv("PATH"))
 }
 

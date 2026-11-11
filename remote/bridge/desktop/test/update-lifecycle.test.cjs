@@ -213,12 +213,14 @@ async function waitWindowsFixtureHelper(record, executable, { signal, stop = fal
   // Capture a process handle, not a fixed observation window or a reused PID.
   // The executable lives in this fixture's unique token directory. Never stop
   // an unrelated process if the original helper has already exited.
-  const command = `$ErrorActionPreference='Stop'; $p=Get-Process -Id ${record.pid} -ErrorAction SilentlyContinue; if($p){try{if($p.Path -ne ${expected}){exit 0}; $null=$p.Handle; ${stop ? '$p.Kill();' : ''}$p.WaitForExit()}catch{if(-not $p.HasExited){throw}}}`;
+  // An already-exited process is success. Without an explicit exit code,
+  // Windows PowerShell preserves Get-Process's false $? and exits with 1.
+  const command = `$ErrorActionPreference='Stop'; $p=Get-Process -Id ${record.pid} -ErrorAction SilentlyContinue; if($p){try{if($p.Path -ne ${expected}){exit 0}; $null=$p.Handle; ${stop ? '$p.Kill();' : ''}$p.WaitForExit()}catch{if(-not $p.HasExited){throw}}}; exit 0`;
   await execFileAsync(path.join(process.env.SystemRoot, 'System32/WindowsPowerShell/v1.0/powershell.exe'),
     ['-NoProfile', '-NonInteractive', '-Command', command], { windowsHide: true, signal, ...(stop ? { timeout: 10000 } : {}) });
 }
 
-async function fullWindowsUpdate(t, acknowledge, holdDirectoryMs = 0) {
+async function fullWindowsUpdate(t, acknowledge, holdDirectoryMs = 0, holdRollbackMs = 0) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'salcara-full-win-update-'));
   const appDir = path.join(root, 'app'), build = path.join(root, 'build'), userData = path.join(root, 'userdata');
   fs.mkdirSync(appDir); fs.mkdirSync(build); fs.mkdirSync(userData);
@@ -233,7 +235,34 @@ async function fullWindowsUpdate(t, acknowledge, holdDirectoryMs = 0) {
   execFileSync(path.join(process.env.SystemRoot, 'System32', 'tar.exe'), ['--format', 'ustar', '-czf', archive, '-C', build, '.'], {windowsHide:true});
   const updaterPath = path.resolve(__dirname, '../updater.cjs');
   const boot = path.join(root, 'boot.cjs');
-  fs.writeFileSync(boot, `if(require('node:path').basename(process.execPath)==='fixture.exe'){const version=require('node:fs').readFileSync(require('node:path').join(require('node:path').dirname(process.execPath),'VERSION'),'utf8');if(version==='1.6.2'&&!${JSON.stringify(acknowledge)})process.exit(1);const u=require(${JSON.stringify(updaterPath)}).createUpdater({app:{getVersion:()=>version},shell:{},platform:process.platform,arch:process.arch,isPackaged:false,userData:${JSON.stringify(userData)},onChange(){}});u.afterRestart();process.exit(0);}`);
+  const rollbackHolderExecutable = path.join(root, 'rollback-holder.exe');
+  const rollbackHolderRecord = path.join(root, 'rollback-holder.json');
+  const rollbackObservation = path.join(root, 'rollback-observation.json');
+  if (holdRollbackMs) fs.copyFileSync(process.execPath, rollbackHolderExecutable);
+  const holdRollback = `
+    const fs=require('node:fs');
+    fs.writeFileSync(${JSON.stringify(rollbackHolderRecord)},JSON.stringify({pid:process.pid}));
+    process.stdout.write('ready');
+    setTimeout(()=>{
+      fs.writeFileSync(${JSON.stringify(rollbackObservation)},JSON.stringify({
+        version:fs.readFileSync(${JSON.stringify(path.join(appDir, 'VERSION'))},'utf8'),
+        backupVersions:fs.readdirSync(${JSON.stringify(root)}).filter(name=>name.startsWith('app.old-')).map(name=>fs.readFileSync(require('node:path').join(${JSON.stringify(root)},name,'VERSION'),'utf8')),
+        completed:/updated and healthy|rolled back/.test(fs.readFileSync(${JSON.stringify(path.join(userData, 'update.log'))},'utf8')),
+      }));
+      process.exit(0);
+    },${holdRollbackMs});
+  `;
+  fs.writeFileSync(boot, `if(require('node:path').basename(process.execPath)==='fixture.exe'){
+    const version=require('node:fs').readFileSync(require('node:path').join(require('node:path').dirname(process.execPath),'VERSION'),'utf8');
+    if(version==='1.6.2'&&!${JSON.stringify(acknowledge)}){
+      if(${holdRollbackMs}){
+        const holder=require('node:child_process').spawn(${JSON.stringify(rollbackHolderExecutable)},['-e',${JSON.stringify(holdRollback)}],{cwd:${JSON.stringify(appDir)},detached:true,windowsHide:true,stdio:['ignore','pipe','ignore'],env:{...process.env,NODE_OPTIONS:''}});
+        holder.once('error',()=>process.exit(2));holder.stdout.once('data',()=>process.exit(1));
+      }else process.exit(1);
+    }else{
+      const u=require(${JSON.stringify(updaterPath)}).createUpdater({app:{getVersion:()=>version},shell:{},platform:process.platform,arch:process.arch,isPackaged:false,userData:${JSON.stringify(userData)},onChange(){}});u.afterRestart();process.exit(0);
+    }
+  }`);
   const host = path.join(root, 'host.cjs');
   fs.writeFileSync(host, `
     const fs=require('node:fs'),path=require('node:path'),crypto=require('node:crypto');
@@ -282,6 +311,13 @@ async function fullWindowsUpdate(t, acknowledge, holdDirectoryMs = 0) {
       assert.deepEqual(heldObservation, { version: '1.6.1', completed: false });
       await holderExit;
     }
+    if (holdRollbackMs) {
+      // The new app has exited, but another fixture process still holds its
+      // directory. Assert rollback waits rather than abandoning the backup.
+      await waitWindowsFixtureHelper(JSON.parse(fs.readFileSync(rollbackHolderRecord)), rollbackHolderExecutable, { signal: t.signal });
+      assert.deepEqual(JSON.parse(fs.readFileSync(rollbackObservation)), { version: '1.6.2', backupVersions: ['1.6.1'], completed: false });
+      assert.match(fs.readFileSync(path.join(userData, 'update.log'), 'utf8'), /rollback folder busy; waiting/);
+    }
     assert.equal(fs.readFileSync(path.join(appDir,'VERSION'),'utf8'), acknowledge?'1.6.2':'1.6.1', fs.readFileSync(path.join(userData,'update.log'),'utf8'));
     assert.match(fs.readFileSync(path.join(userData,'update.log'),'utf8'), acknowledge?/helper acknowledged readiness[\s\S]*updated and healthy/:/helper acknowledged readiness[\s\S]*rolled back/);
     assert.equal(fs.readdirSync(root).some(name => name.startsWith('app.old-')), false);
@@ -304,6 +340,9 @@ async function fullWindowsUpdate(t, acknowledge, holdDirectoryMs = 0) {
       // A timed-out test must not delete staging underneath a live updater.
       // Terminate only the supervisor from this exact fixture before cleanup.
       await waitWindowsFixtureHelper(helperRecord, helperExecutable, { stop: true });
+    }
+    if (fs.existsSync(rollbackHolderRecord)) {
+      await waitWindowsFixtureHelper(JSON.parse(fs.readFileSync(rollbackHolderRecord)), rollbackHolderExecutable, { stop: true });
     }
     // Only synthetic processes/files in this mkdtemp fixture are cleaned up.
     await fs.promises.rm(root,{recursive:true,force:true,maxRetries:30,retryDelay:100});
@@ -366,3 +405,4 @@ test('a withdrawn staged release cannot start a helper even via explicit retry',
 test('Windows full updater survives an app-directory cwd, verifies the archive and relaunches', { skip:process.platform !== 'win32', timeout:90000 }, t => fullWindowsUpdate(t, true));
 test('Windows full updater restores the old payload when the new version fails startup', { skip:process.platform !== 'win32', timeout:90000 }, t => fullWindowsUpdate(t, false));
 test('Windows full updater waits for directory contention before verifying rollback', { skip:process.platform !== 'win32', timeout:90000 }, t => fullWindowsUpdate(t, false, 22000));
+test('Windows full updater retries rollback while the failed new app directory remains occupied', { skip:process.platform !== 'win32', timeout:90000 }, t => fullWindowsUpdate(t, false, 0, 3000));

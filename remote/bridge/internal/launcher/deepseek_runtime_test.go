@@ -61,6 +61,9 @@ func newLauncherDeepSeekRuntimeFixture(t *testing.T, helper []byte) *launcherDee
 	if _, err := os.Stat(f.log); !os.IsNotExist(err) {
 		t.Fatal("fixture readiness must not produce runtime call records", err)
 	}
+	// Unix discovery prefers the cached login-shell PATH over PATH. The
+	// prerequisite scenarios must execute this synthetic Node, not the host's.
+	t.Setenv(agents.ShellPathEnv, "1")
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	return f
 }
