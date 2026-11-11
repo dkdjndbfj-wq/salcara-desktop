@@ -62,6 +62,20 @@ test('saved device configuration does not prove registration or allow a QR', () 
   assert.match(f.html(), /data-act="rmShowQR"/);
 });
 
+test('station without a saved API explains the actual next step without adding another action', () => {
+  const f = fixture('station', { effectiveRemoteMode: 'none' });
+  const empty = f.html();
+  assert.match(empty, /先在「API 密钥」添加 API，或填写管理员提供的中转站地址/);
+  assert.doesNotMatch(empty, /选择已保存的 API|id="rmSourceAPI"/);
+  assert.deepEqual(visibleControls(empty).actions.filter(action => action.primary).map(action => action.action), ['rmConnect']);
+  f.context.S.local.accounts = [{ id: 'api-test', name: '测试 API', sourceType: 'api_key', baseUrl: 'https://api.test/v1' }];
+  const saved = f.html();
+  assert.match(saved, /选择已保存的 API/);
+  assert.match(saved, /id="rmSourceAPI"/);
+  assert.doesNotMatch(saved, /先在「API 密钥」添加 API/);
+  assert.deepEqual(visibleControls(saved).actions.filter(action => action.primary).map(action => action.action), ['rmConnect']);
+});
+
 test('an acknowledged registration is scoped to its exact computer and Hub', () => {
   const f = fixture('station', { deviceId: 'd', effectiveRemoteMode: 'hub', loggedIn: true, effectiveHubUrl: 'https://hub.test' }, { state: 'connecting' });
   vm.runInContext(`RM.confirmedRegistration = { deviceId: 'd', hubUrl: 'https://hub.test' }`, f.context);
