@@ -157,6 +157,7 @@ route = async function () {
   }
   const changed = S.route !== r;
   S.route = r;
+  $('#panel').classList[r === 'login' ? 'add' : 'remove']('rm-compact-route');
   $$('#nav a').forEach((a) => a.classList.toggle('active', a.dataset.route === r));
   $('#pageIco').innerHTML = icon(ROUTE_ICON[r] || 'spark');
   $('#pageTitle').textContent = PAGES[r].title;

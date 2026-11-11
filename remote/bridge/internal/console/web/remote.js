@@ -20,7 +20,7 @@ Object.assign(ICONS, {
   link: '<path d="M9.5 14.5 14.5 9.5M7 17H5.5a3.5 3.5 0 0 1 0-7H9M15 7h1.5a3.5 3.5 0 0 1 0 7H15"/>',
 });
 
-const RM = { tool: 'codex', query: '', expanded: {}, newThread: false, newPrompt: '', agents: null, agentsPromise: null, projects: [], archived: null, archivedOpen: false, qrTimer: null, poll: null, model: '', effort: '', loginEpoch: 0, sessionsEpoch: 0, controlEpoch: 0, controls: null, controlPromise: null, newFeatures: null, featureChoice: { mode: '', skills: [] }, sideChain: null, controlPanel: '', remoteMode: 'station', direct: null, directPromise: null, directGeneration: 0, connectionAction: null, connectionRevision: 0, stationDraft: null, botDraft: '' };
+const RM = { tool: 'codex', query: '', expanded: {}, newThread: false, newPrompt: '', agents: null, agentsPromise: null, projects: [], archived: null, archivedOpen: false, qrTimer: null, poll: null, model: '', effort: '', loginEpoch: 0, sessionsEpoch: 0, controlEpoch: 0, controls: null, controlPromise: null, newFeatures: null, featureChoice: { mode: '', skills: [] }, sideChain: null, controlPanel: '', remoteMode: 'station', direct: null, directPromise: null, directGeneration: 0, connectionAction: null, connectionRevision: 0, stationDraft: null, botDraft: '', switchDraft: null };
 const SESSION_READS = { list: null, detail: null, listState: 'idle', listError: '', hasSnapshot: false, changes: null, detailChanges: null };
 function cancelSessionReads() {
   if (typeof cancelSessionRender === 'function') cancelSessionRender();
@@ -154,6 +154,7 @@ function rmConnectionError(owner, node, error) {
   const reasons = { api_enrollment_unsupported: '本站暂不支持 API 自动登记，请联系站点管理员开通或提供独立中转站的授权方式。', api_credentials_invalid: 'API 凭据无效或已过期，请在 API 密钥页更新后重试。', api_enrollment_denied: '此 API 未获得电脑远程登记权限，请联系站点管理员。', api_verifier_unavailable: '本站的 API 验证服务暂不可用，请稍后重试。', source_changed: '所选 API 已更新，请重新选择后连接。', enrollment_issuer_untrusted: '本站的登记授权来源不可信，请联系站点管理员。', enrollment_grant_invalid: '本站返回的电脑登记授权未通过校验，请联系站点管理员。' };
   const detail = reasons[error.code] || error.message || '操作失败，请重试';
   const message = unknown ? `操作结果暂未确认，请刷新状态核对后再操作。${detail}` : detail;
+  if (owner.switchDraft && RM.switchDraft === owner.switchDraft) owner.switchDraft.error = message;
   if (error.code === 'enrollment_result_unknown' && owner.enrollmentKey) RM.pendingEnrollment = { key: owner.enrollmentKey };
   if (node?.isConnected !== false && node) node.innerHTML = `<div class="rm-error">${esc(message)}</div>${error.code === 'enrollment_result_unknown' && owner.enrollmentKey ? rmEnrollmentRecoveryMarkup() : ''}`;
   else toast(message, 'bad');
@@ -245,10 +246,55 @@ function rmSelectInitialMode(config) {
   const active = rmEffectiveMode(config);
   RM.remoteMode = active === 'hub' || active === 'none' ? 'station' : active;
 }
+function rmConnectionTarget(mode, hubUrl = '', groupId = '') {
+  const hub = mode === 'hub' || mode === 'bot' ? rmNormalizeHub(hubUrl) : '';
+  const group = mode === 'bot' ? String(groupId || '') : '';
+  return { mode, hubUrl: hub, groupId: group, key: JSON.stringify([mode, hub, group]),
+    label: mode === 'bot' ? `Bot · ${group || '未指定组'} — ${hub}` : mode === 'hub' ? `Hub · ${hub}` : RM_MODE_NAMES[mode] };
+}
+function rmActiveTarget(config = S.state?.config) {
+  return rmConnectionTarget(rmEffectiveMode(config), config?.effectiveHubUrl || config?.hubUrl, config?.remoteModes?.bot?.groupId);
+}
+function rmSwitchTargets(config = S.state?.config) {
+  return [...rmSavedConnections(config, 'hub').map(row => rmConnectionTarget('hub', row.hubUrl)),
+    ...rmSavedConnections(config, 'bot').filter(row => row.groupId || row.botGroupId).map(row => rmConnectionTarget('bot', row.hubUrl, row.groupId || row.botGroupId)),
+    rmConnectionTarget('direct')];
+}
+function rmSwitchState(config = S.state?.config) {
+  const mode = RM.remoteMode === 'station' ? 'hub' : RM.remoteMode;
+  const targets = rmSwitchTargets(config).filter(row => row.mode === mode), active = rmActiveTarget(config);
+  if (RM.switchDraft?.mode !== mode) {
+    RM.switchDrafts ||= {};
+    if (RM.switchDraft) RM.switchDrafts[RM.switchDraft.mode] = RM.switchDraft;
+    const initial = targets.find(row => row.key === active.key) || targets[0];
+    RM.switchDraft = RM.switchDrafts[mode] || { mode, key: initial?.key || '', label: initial?.label || '', error: '' };
+  }
+  const draft = RM.switchDraft, target = targets.find(row => row.key === draft.key);
+  const current = !!target && target.key === active.key;
+  const action = RM.connectionAction, busy = !!action && (action.submitted || action.current());
+  const pending = busy && !!action.switchDraft;
+  const note = pending ? action.switchDraft === draft ? '切换请求处理中；以服务器确认后的当前启用目标为准。' : `正在处理此前目标（${action.switchDraft.label}）；当前选择尚未提交。`
+    : !draft.key ? '选择已保存的连接；新 Hub 或 Bot 请先在左侧配置。'
+      : !target ? '此目标已不在已保存连接中，请重新选择；当前连接未因此改变。'
+        : current ? '此目标当前已启用；是否在线请查看上方连接状态。'
+          : '仅选择了待切换目标，尚未启用。确认后将替换当前连接，其他配置保留。';
+  return { mode, targets, draft, target, current, pending, note, disabled: !target || current || busy };
+}
+// A status refresh never replaces the select or its options: selection, focus
+// and a failed switch remain owned by the user's draft, not by server polling.
+function rmUpdateSwitchStatus() {
+  const state = rmSwitchState();
+  const note = document.getElementById('rmSwitchNote');
+  if (note) note.textContent = state.note;
+  const button = document.getElementById('rmSwitchApply');
+  if (button) { button.disabled = state.disabled; button.textContent = state.pending ? '正在切换…' : '切换连接'; }
+  const error = document.getElementById('rmSwitchError');
+  if (error) error.innerHTML = state.draft.error ? `<div class="rm-error">${esc(state.draft.error)}</div>` : '';
+}
 function rmModeStatusMarkup(config = S.state?.config) {
   const active = rmEffectiveMode(config);
-  const detail = active === 'none' ? '选择一种方式启用；已保存的配置可随时恢复。' : '同一时间只启用一种连接方式，切换时保留其他配置。';
-  return `<div class="rm-active-mode"><div><strong>当前启用：${RM_MODE_NAMES[active]}</strong><span>${detail}</span></div>${active !== 'none' ? `<button class="rm-link" data-act="rmActivateMode" data-mode="none" ${RM.connectionAction ? 'disabled' : ''}>停用远程</button>` : ''}</div>`;
+  const detail = active === 'none' ? '尚未启用连接' : rmActiveTarget(config).label;
+  return `<div class="rm-active-mode"><div><strong>当前启用：${RM_MODE_NAMES[active]}</strong><span>${esc(detail)}</span></div>${active !== 'none' ? `<button class="rm-link" data-act="rmActivateMode" data-mode="none" ${RM.connectionAction ? 'disabled' : ''}>停用远程</button>` : ''}</div>`;
 }
 function rmUpdateModeStatus() {
   if (S.route !== 'login') return;
@@ -258,6 +304,7 @@ function rmUpdateModeStatus() {
   if (tabs) tabs.innerHTML = remoteTabMarkup();
   const steps = document.getElementById('rmConnectionSteps');
   if (steps) steps.innerHTML = rmConnectionStepsMarkup();
+  rmUpdateSwitchStatus();
 }
 
 function rmConnectionLabel(hub) {
@@ -307,7 +354,9 @@ function rmRecoveryMarkup(hub = {}) {
 // Replace only read-only status surfaces; never erase an enrollment draft,
 // device-name edit, QR timer or connection action while state is refreshed.
 function rmUpdateRemoteStatus(hub = S.state?.hub) {
-  if (S.route !== 'login' || !hub || hub.deviceId && hub.deviceId !== S.state?.config?.deviceId) return;
+  if (S.route !== 'login') return;
+  rmSyncAgentForm();
+  if (!hub || hub.deviceId && hub.deviceId !== S.state?.config?.deviceId) return;
   if (hub.hubUrl && rmNormalizeHub(hub.hubUrl) !== rmNormalizeHub(S.state?.config?.effectiveHubUrl || S.state?.config?.hubUrl)) return;
   rmUpdateModeStatus();
   if (typeof syncRemoteSupport === 'function') syncRemoteSupport();
@@ -319,8 +368,7 @@ function rmUpdateRemoteStatus(hub = S.state?.hub) {
     const saved = document.getElementById('rmSavedBots');
     if (saved) saved.innerHTML = rmSavedBotsMarkup(S.state?.config || {});
   }
-  if (RM.remoteMode !== 'station') return;
-  const active = rmEffectiveMode() === 'hub';
+  const active = ['hub', 'bot'].includes(rmEffectiveMode());
   const connected = active && hub.state === 'connected';
   const meta = document.getElementById('rmHubConnectionMeta');
   if (meta) meta.textContent = `${active ? rmConnectionLabel(hub) : '已保存，未启用'} · ${host(S.state?.config?.relayRoot || S.state?.config?.effectiveHubUrl)}`;
@@ -329,7 +377,7 @@ function rmUpdateRemoteStatus(hub = S.state?.hub) {
   const error = document.getElementById('rmHubConnectionError');
   if (error) error.innerHTML = active && !connected && hub.error ? `<div class="rm-error">${esc(hub.error)}</div>` : '';
   const section = document.getElementById('rmPairSection');
-  if (section?.classList) section.classList.toggle('off', !connected);
+  if (section?.classList) section.classList.toggle('off', rmEffectiveMode() === 'hub' && !connected);
   const revoke = document.getElementById('rmPairRevoke');
   if (revoke) revoke.disabled = !connected;
   const box = document.getElementById('pairQR');
@@ -350,7 +398,7 @@ function rmPairStatus(st) {
   const consumed = Boolean(S.pairQR && pair.pendingExpiresAt === 0);
   if (pair.pendingExpiresAt === 0) {
     S.pairQR = ''; S.pairExpires = 0; clearInterval(RM.qrTimer);
-    const box = S.route === 'login' && RM.remoteMode === 'station' && rmEffectiveMode() === 'hub' && st.state === 'connected' ? $('#pairQR') : null;
+    const box = S.route === 'login' && rmEffectiveMode() === 'hub' && st.state === 'connected' ? $('#pairQR') : null;
     if (box) {
       box.classList.remove('live');
       box.innerHTML = pair.paired ? `${icon('check')}<span>手机已绑定</span>`
@@ -374,15 +422,16 @@ function renderRemoteLoginPage(view, st) {
   else RM.poll = setInterval(() => {
     if (S.route !== 'login' || pageEpoch !== RM.loginEpoch) { clearInterval(RM.poll); return; }
     if (document.hidden || RM.connectionAction) return;
-    loadState().then(() => { if (pageEpoch === RM.loginEpoch && S.route === 'login') rmUpdateRemoteStatus(); }).catch(() => undefined);
+    loadState().then(() => { if (pageEpoch === RM.loginEpoch && S.route === 'login') { rmUpdateRemoteStatus(); if (rmEffectiveMode() === 'direct') void rmLoadDirect(pageEpoch); } }).catch(() => undefined);
   }, 5000);
   if (typeof selfhostRememberDraft === 'function') selfhostRememberDraft();
   view.innerHTML = renderRemoteConnectionLayout(view, st);
   if (typeof renderApprovalsBox === 'function') renderApprovalsBox();
   rmTickQR();
   if (typeof selfhostAttach === 'function') selfhostAttach(view, pageEpoch);
-  if (RM.remoteMode === 'station') { rmLoadAgents(pageEpoch); rmLoadLive(pageEpoch); }
-  if (RM.remoteMode === 'direct') rmLoadDirect(pageEpoch);
+  if (RM.remoteMode === 'station' && RM.agentSettingsOpen) rmLoadAgents(pageEpoch);
+  if (RM.remoteMode === 'station') rmLoadLive(pageEpoch);
+  if (RM.remoteMode === 'direct' || rmEffectiveMode() === 'direct') rmLoadDirect(pageEpoch);
   if (typeof syncRemoteSupport === 'function') syncRemoteSupport();
 }
 
@@ -441,8 +490,8 @@ async function rmLoadDirect(pageEpoch = RM.loginEpoch) {
   await request.promise;
   const box = document.getElementById('rmDirectPanel');
   if (generation === RM.directGeneration && typeof setConn === 'function') setConn(S.state?.hub);
-  if (generation === RM.directGeneration && pageEpoch === RM.loginEpoch && S.route === 'login' && RM.remoteMode === 'direct' && box?.isConnected !== false && box) {
-    box.outerHTML = renderRemoteDirectPanel(false);
+  if (generation === RM.directGeneration && pageEpoch === RM.loginEpoch && S.route === 'login') {
+    if (RM.remoteMode === 'direct' && box?.isConnected !== false && box) box.outerHTML = renderRemoteDirectPanel(false);
     rmUpdateModeStatus();
     const binding = document.getElementById('rmPhoneBinding');
     if (binding?.isConnected !== false && binding) binding.innerHTML = rmPhoneBindingMarkup();
@@ -457,6 +506,8 @@ Object.assign(ACTIONS, {
     await busy(button, async () => {
       try {
         await loadState();
+        if (pageEpoch !== RM.loginEpoch || revision !== RM.connectionRevision || S.route !== 'login') return;
+        if (rmEffectiveMode() === 'direct') await rmLoadDirect(pageEpoch);
         if (pageEpoch !== RM.loginEpoch || revision !== RM.connectionRevision || S.route !== 'login') return;
         rmUpdateRemoteStatus();
         toast('状态已刷新', 'ok');
@@ -523,13 +574,40 @@ function rmAPIStationReason(option) {
   }[option.remoteEligibility.reason] || '';
 }
 
+function rmAgentIdentity() { return JSON.stringify([rmActiveTarget().key, S.state?.config?.deviceId || '', rmNormalizeHub(S.state?.config?.effectiveHubUrl || S.state?.config?.hubUrl)]); }
+function rmAgentFormCurrent(form) {
+  return !!form && RM.agentForm === form && form.box === document.getElementById('rmAgents') && form.box.isConnected !== false
+    && S.route === 'login' && RM.remoteMode === 'station' && form.pageEpoch === RM.loginEpoch
+    && form.routeRevision === S.routeRevision && form.identity === rmAgentIdentity();
+}
+function rmSyncAgentForm() {
+  const form = RM.agentForm;
+  if (!form || form.identity === rmAgentIdentity() || form.box !== document.getElementById('rmAgents')) return;
+  // Remove stale controls immediately, including while the replacement read is
+  // pending. The save handler independently checks this mount's identity.
+  RM.agentForm = null;
+  if (form.box.isConnected !== false) form.box.innerHTML = '<p class="rm-recovery-note">连接已改变，请展开读取当前连接的 Agent API。</p>';
+  if (RM.remoteMode === 'station' && RM.agentSettingsOpen) void rmLoadAgents();
+}
 async function rmLoadAgents(pageEpoch = RM.loginEpoch) {
   const box = document.getElementById('rmAgents');
   if (!box) return;
+  if (rmAgentFormCurrent(RM.agentForm)) {
+    if (RM.agentForm.ready) return RM.agentForm.catalog;
+    if (RM.agentForm.promise) return RM.agentForm.promise;
+  }
+  const form = { box, identity: rmAgentIdentity(), pageEpoch, routeRevision: S.routeRevision, ready: false, catalog: null };
+  RM.agentForm = form;
+  const current = () => rmAgentFormCurrent(form);
+  box.innerHTML = '<p class="rm-recovery-note">正在读取当前连接的 Agent API…</p>';
   try {
-    RM.agents = await api('/api/remote/agents');
-  } catch (e) { if (pageEpoch === RM.loginEpoch && S.route === 'login' && box.isConnected !== false) box.innerHTML = `<div class="rm-error" style="margin:12px">${esc(e.message)}</div>`; return; }
-  if (pageEpoch !== RM.loginEpoch || S.route !== 'login' || box.isConnected === false) return;
+    form.promise = api('/api/remote/agents');
+    const agents = await form.promise;
+    if (!current()) return;
+    RM.agents = form.catalog = agents;
+  } catch (e) { if (current()) box.innerHTML = `<div class="rm-error" style="margin:12px">${esc(e.message)}</div>`; return; }
+  finally { form.promise = null; }
+  if (!current()) return;
   const apis = RM.agents.apis || [];
   box.innerHTML = Object.keys(AGENT_INFO).map((id) => {
     const a = (RM.agents.agents || []).find((x) => x.id === id) || { api: {} };
@@ -538,18 +616,21 @@ async function rmLoadAgents(pageEpoch = RM.loginEpoch) {
     const chosen = apis.find((x) => x.id === a.api.accountId);
     return `<div class="rm-agent" data-agent="${id}">
       <span class="rm-badge ${id}">${AGENT_INFO[id].badge}</span>
-      <div><div class="rm-agent-name">${AGENT_INFO[id].name}${a.available ? '' : ' <span class="chip">未安装</span>'}</div><div class="rm-agent-sub">${phone ? '远程任务：' : '跟随电脑：'}${esc(current)}</div>${rmAPIStationReason(chosen) ? `<div class="rm-error">${esc(rmAPIStationReason(chosen))}；请选择已授权的来源。</div>` : ''}</div>
-      <select class="input" data-rm-api="${id}"><option value="">跟随电脑设置</option>${apis.map((x) => `<option value="${esc(x.id)}" ${phone && x.id === a.api.accountId ? 'selected' : ''} ${rmAPIStationReason(x) ? 'disabled' : ''}>${esc(x.name)}${rmAPIStationReason(x) ? ' · ' + esc(rmAPIStationReason(x)) : ''}</option>`).join('')}</select>
-      <input class="input" data-rm-model="${id}" list="rmModels-${id}" placeholder="模型（可选）" value="${esc(phone ? a.api.model : '')}" ${phone ? '' : 'disabled'}>
+      <div><div class="rm-agent-name">${AGENT_INFO[id].name}${a.available ? '' : ' <span class="chip">未安装</span>'}</div><div class="rm-agent-sub" id="rmAgentSummary-${id}">${phone ? '远程任务：' : '跟随电脑：'}${esc(current)}</div>${rmAPIStationReason(chosen) ? `<div class="rm-error">${esc(rmAPIStationReason(chosen))}；请选择已授权的来源。</div>` : ''}</div>
+      <select class="input" id="rmAgentApi-${id}" data-rm-api="${id}"><option value="">跟随电脑设置</option>${apis.map((x) => `<option value="${esc(x.id)}" ${phone && x.id === a.api.accountId ? 'selected' : ''} ${rmAPIStationReason(x) ? 'disabled' : ''}>${esc(x.name)}${rmAPIStationReason(x) ? ' · ' + esc(rmAPIStationReason(x)) : ''}</option>`).join('')}</select>
+      <input class="input" id="rmAgentModel-${id}" data-rm-model="${id}" list="rmModels-${id}" placeholder="模型（可选）" value="${esc(phone ? a.api.model : '')}" ${phone ? '' : 'disabled'}>
       <datalist id="rmModels-${id}">${((chosen && chosen.models) || []).map((m) => `<option value="${esc(m)}">`).join('')}</datalist>
       <button class="rm-btn sm soft" data-act="rmSaveApi" data-agent="${id}">保存</button>
+      <div class="rm-agent-result" id="rmAgentResult-${id}" aria-live="polite"></div>
     </div>`;
   }).join('') + (apis.length ? '' : '<div class="rm-note" style="padding:12px">API 密钥库是空的；在「API」页添加后可在这里为远程任务单独选择。</div>');
+  form.ready = true;
 }
 
 document.addEventListener('change', (e) => {
   const id = e.target.dataset && e.target.dataset.rmApi;
   if (!id || !RM.agents) return;
+  if (S.route === 'login') ++RM.connectionRevision;
   const model = document.querySelector(`[data-rm-model="${id}"]`);
   const list = document.getElementById('rmModels-' + id);
   const chosen = (RM.agents.apis || []).find((x) => x.id === e.target.value);
@@ -583,27 +664,46 @@ Object.assign(ACTIONS, {
     finally { rmFinishConnectionAction(owner); }
   },
   rmActivateMode: async (b) => {
-    const mode = b.dataset.mode;
+    const switching = b.dataset.target === 'switch';
+    const selection = switching ? rmSwitchState() : null;
+    const picker = switching ? document.getElementById('rmSwitchTarget') : null;
+    if (switching && (!selection.target || selection.current || picker?.value !== selection.draft.key)) { rmUpdateSwitchStatus(); return; }
+    const mode = switching ? selection.target.mode : b.dataset.mode;
     if (!['none', 'direct', 'hub', 'bot'].includes(mode)) return;
-    const owner = rmBeginConnectionAction(b, RM.remoteMode);
+    const owner = rmBeginConnectionAction(b, RM.remoteMode, switching ? ['rmSwitchMode', 'rmSwitchTarget'] : []);
     if (!owner) return;
+    if (switching) { owner.switchDraft = selection.draft; selection.draft.error = ''; }
     rmRememberConnectionDraft();
-    const out = document.getElementById('rmModeError');
+    const out = document.getElementById(switching ? 'rmSwitchError' : 'rmModeError');
     if (out) out.innerHTML = '';
     const body = { mode };
-    if (b.dataset.hub) body.hubUrl = b.dataset.hub;
-    if (mode === 'bot' && b.dataset.group) body.groupId = b.dataset.group;
+    const hub = switching ? selection.target.hubUrl : b.dataset.hub;
+    const group = switching ? selection.target.groupId : b.dataset.group;
+    if (hub) body.hubUrl = hub;
+    if (mode === 'bot' && group) body.groupId = group;
+    rmUpdateSwitchStatus();
     ++RM.directGeneration;
     try { await busy(b, async () => {
       try {
+        if (!owner.current()) return;
+        if (switching && !rmSwitchTargets().some(row => row.key === selection.target.key)) throw Object.assign(new Error('此目标已不在已保存连接中，请重新选择'), { status: 409 });
         owner.submitted = true;
         const result = await api('/api/remote/mode', body);
         if (result?.ok !== true || result.activeMode !== mode) throw new Error('服务器未确认连接方式，请刷新状态后核对');
         S.pairQR = ''; S.pairExpires = 0;
         RM.direct = null;
         const state = await rmRefreshAcceptedConnection();
+        if (switching && (!state || rmActiveTarget(state.config).key !== selection.target.key)) throw new Error('切换请求已确认，但目标状态尚未核对，请刷新连接状态后确认');
+        if (switching && !owner.current()) return;
         toast(mode === 'none' ? '远程已停用，配置和配对已保留' : `${RM_MODE_NAMES[mode]}已启用，连接状态正在刷新`, 'ok');
-        if (owner.current() && state) await route();
+        if (owner.current() && state) {
+          if (switching) {
+            rmUpdateRemoteStatus();
+            if (mode === 'direct') void rmLoadDirect(owner.pageEpoch);
+            if (RM.remoteMode === 'station' && RM.agentSettingsOpen) void rmLoadAgents(owner.pageEpoch);
+          }
+          else await route();
+        }
       } catch (error) { await rmRefreshAcceptedConnection(); rmConnectionError(owner, out, error); }
     }); } finally { rmFinishConnectionAction(owner); }
   },
@@ -716,14 +816,17 @@ Object.assign(ACTIONS, {
     }); } finally { rmFinishConnectionAction(owner); }
   },
   rmDirectQR: async (b) => {
-    const owner = rmBeginConnectionAction(b, 'direct');
+    if (RM.remoteMode !== 'direct' && rmEffectiveMode() !== 'direct') return;
+    const owner = rmBeginConnectionAction(b, RM.remoteMode);
     if (!owner) return;
+    const identity = rmActiveTarget().key;
     const generation = ++RM.directGeneration;
     try { await busy(b, async () => {
       try {
+        if (!owner.current() || rmActiveTarget().key !== identity) return;
         owner.submitted = true;
         const qr = await api('/api/local/direct/qr', {});
-        if (generation !== RM.directGeneration) return;
+        if (generation !== RM.directGeneration || rmActiveTarget().key !== identity && rmEffectiveMode() !== 'direct') return;
         RM.direct = { ...RM.direct, ...qr, paired: false, error: '' };
         await rmRefreshAcceptedConnection();
         await rmLoadDirect(owner.pageEpoch);
@@ -738,13 +841,16 @@ Object.assign(ACTIONS, {
     if (epoch === RM.loginEpoch) rmUpdateRemoteStatus();
   },
   rmDirectRevoke: async (b) => {
-    const owner = rmBeginConnectionAction(b, 'direct');
+    if (RM.remoteMode !== 'direct' && rmEffectiveMode() !== 'direct') return;
+    const owner = rmBeginConnectionAction(b, RM.remoteMode);
     if (!owner) return;
+    const identity = rmActiveTarget().key;
     try {
-      if (!await confirm('撤销电脑与手机的直连配对，并关闭直连监听？') || !owner.current()) return;
+      if (!await confirm('撤销电脑与手机的直连配对，并关闭直连监听？') || !owner.current() || rmActiveTarget().key !== identity) return;
       ++RM.directGeneration;
       await busy(b, async () => {
         try {
+          if (!owner.current() || rmActiveTarget().key !== identity) return;
           owner.submitted = true;
           await api('/api/local/direct/revoke', {});
           RM.direct = null;
@@ -779,26 +885,31 @@ Object.assign(ACTIONS, {
     } finally { rmFinishConnectionAction(owner); }
   },
   rmShowQR: async (b) => {
-    const owner = rmBeginConnectionAction(b, 'station');
+    if (rmEffectiveMode() !== 'hub') return;
+    const owner = rmBeginConnectionAction(b, RM.remoteMode);
     if (!owner) return;
     const identity = JSON.stringify([S.state?.config?.deviceId, S.state?.config?.effectiveHubUrl]);
     try { await busy(b, async () => {
       try {
+        if (!owner.current() || rmEffectiveMode() !== 'hub' || identity !== JSON.stringify([S.state?.config?.deviceId, S.state?.config?.effectiveHubUrl])) return;
         owner.submitted = true;
         const result = await api('/api/pair/start', {});
-        if (identity !== JSON.stringify([S.state?.config?.deviceId, S.state?.config?.effectiveHubUrl])) return;
+        if (rmEffectiveMode() !== 'hub' || identity !== JSON.stringify([S.state?.config?.deviceId, S.state?.config?.effectiveHubUrl])) return;
         S.pairCode = result.code; S.pairQR = result.qrUrl || ''; S.pairExpires = result.expiresAt;
         if (owner.current()) { toast('请用手机扫码绑定这台电脑', 'ok'); await route(); }
       } catch (e) { await rmRefreshAcceptedConnection(); rmConnectionError(owner, null, e); }
     }); } finally { rmFinishConnectionAction(owner); }
   },
   pairRevoke: async (b) => {
-    const owner = rmBeginConnectionAction(b, 'station');
+    if (rmEffectiveMode() !== 'hub') return;
+    const owner = rmBeginConnectionAction(b, RM.remoteMode);
     if (!owner) return;
+    const identity = JSON.stringify([rmActiveTarget().key, S.state?.config?.deviceId]);
     try {
       if (!await confirm('解除这台电脑的手机绑定？旧手机和未使用的二维码都会失效，本地 API 密钥与会话保留。') || !owner.current()) return;
       await busy(b, async () => {
         try {
+          if (!owner.current() || identity !== JSON.stringify([rmActiveTarget().key, S.state?.config?.deviceId])) return;
           owner.submitted = true;
           const result = await api('/api/pair/revoke', {});
           S.pairQR = ''; S.pairExpires = 0;
@@ -811,15 +922,31 @@ Object.assign(ACTIONS, {
   },
   rmSaveApi: async (b) => {
     const id = b.dataset.agent;
-    const sel = document.querySelector(`[data-rm-api="${id}"]`);
-    const model = document.querySelector(`[data-rm-model="${id}"]`);
-    await busy(b, async () => {
+    const form = RM.agentForm;
+    if (!AGENT_INFO[id] || !form?.ready || !rmAgentFormCurrent(form)) { rmSyncAgentForm(); return; }
+    const fields = ['rmAgentApi-' + id, 'rmAgentModel-' + id];
+    if (fields.some(field => !document.getElementById(field) || form.box.contains && !form.box.contains(document.getElementById(field)))) return;
+    const owner = rmBeginConnectionAction(b, RM.remoteMode, fields, () => rmAgentFormCurrent(form));
+    if (!owner) return;
+    const accountId = owner.fields[0].value, model = accountId ? owner.fields[1].value.trim() : '';
+    const out = document.getElementById('rmAgentResult-' + id);
+    if (out) out.innerHTML = '';
+    try { await busy(b, async () => {
       try {
-        await api('/api/remote/agents/api', { agent: id, accountId: sel.value, model: sel.value ? model.value.trim() : '' });
-        toast(sel.value ? '已保存：手机发起的任务将使用这个 API' : '已改为跟随电脑设置', 'ok');
-    rmLoadAgents();
-      } catch (e) { toast(e.message, 'bad'); }
-    });
+        if (!owner.current()) return;
+        const chosen = (form.catalog.apis || []).find(row => row.id === accountId);
+        if (accountId && (!chosen || rmAPIStationReason(chosen))) throw Object.assign(new Error('所选 API 不再可用或未获当前站点授权，请重新选择'), { status: 409 });
+        owner.submitted = true;
+        const result = await api('/api/remote/agents/api', { agent: id, accountId, model });
+        const saved = result?.agents?.find(row => row.id === id)?.api;
+        if (!saved || (accountId ? saved.source !== 'phone' || saved.accountId !== accountId || model && saved.model !== model : saved.source === 'phone')) throw new Error('服务器未确认 API 设置，请重新读取后核对');
+        if (!owner.current()) return;
+        RM.agents = form.catalog = result;
+        const summary = document.getElementById('rmAgentSummary-' + id);
+        if (summary) summary.textContent = accountId ? `远程任务：${saved.name || chosen.name || '所选 API'}${saved.model ? ' · ' + saved.model : ''}` : '跟随电脑设置';
+        toast(accountId ? '已保存：手机发起的任务将使用这个 API' : '已改为跟随电脑设置', 'ok');
+      } catch (e) { rmConnectionError(owner, out, e); }
+    }); } finally { rmFinishConnectionAction(owner); }
   },
   rmProj: async (b) => {
     if (!await confirm('移除后手机不能再在这个文件夹里新建对话。确定吗？')) return;
@@ -1369,6 +1496,7 @@ Object.assign(ACTIONS, {
 });
 
 document.addEventListener('input', (e) => {
+  if (S.route === 'login' && e.target.dataset?.rmModel) ++RM.connectionRevision;
   if (S.route === 'login' && e.target.id?.startsWith('rmBotIngress-')) {
     RM.connectionRevision++;
     RM.botIngressDrafts ||= {};
@@ -1398,6 +1526,16 @@ document.addEventListener('input', (e) => {
   if (e.target.id === 'cxPrompt') RM.newPrompt = e.target.value;
 });
 document.addEventListener('change', (e) => {
+  if (e.target.id === 'rmSwitchMode' && S.route === 'login') {
+    const mode = e.target.value === 'hub' ? 'station' : e.target.value;
+    if (['station', 'bot', 'direct'].includes(mode)) void ACTIONS.rmMode({ dataset: { mode } });
+  }
+  if (e.target.id === 'rmSwitchTarget' && S.route === 'login') {
+    const state = rmSwitchState(), target = state.targets.find(row => row.key === e.target.value);
+    RM.switchDraft = { mode: state.mode, key: e.target.value || '', label: target?.label || '', error: '' };
+    ++RM.connectionRevision;
+    rmUpdateSwitchStatus();
+  }
   if (e.target.id === 'rmSourceAPI') {
     RM.pendingEnrollment = null;
     const out = document.getElementById('rmConnectError');
@@ -1419,6 +1557,13 @@ document.addEventListener('change', (e) => {
     RM.featureChoice = featureChoicesFromDOM();
   }
 });
+document.addEventListener('toggle', (e) => {
+  if (e.target.id !== 'rmAgentSettings' || S.route !== 'login' || RM.remoteMode !== 'station' || e.target !== document.getElementById('rmAgentSettings')) return;
+  if (RM.agentSettingsOpen === e.target.open) return;
+  RM.agentSettingsOpen = e.target.open;
+  ++RM.connectionRevision;
+  if (e.target.open) void rmLoadAgents();
+}, true);
 document.addEventListener('keydown', (e) => {
   if (e.target.id === 'cxPrompt' && e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); ACTIONS.cxStart($('[data-act=cxStart]')); }
   if (e.target.id === 'rmStation' && e.key === 'Enter') ACTIONS.rmConnect($('[data-act=rmConnect]'));

@@ -36,7 +36,7 @@ function visibleControls(html) {
   return { actions, images };
 }
 
-test('all connection modes have four sections, one form and one stop action', () => {
+test('all connection modes have a right-side switch, one form and one stop action without duplicate tabs', () => {
   for (const mode of ['station', 'bot', 'direct']) {
     const f = fixture(mode, { effectiveRemoteMode: 'hub', loggedIn: true }, { state: 'connected' });
     const html = f.html();
@@ -45,10 +45,76 @@ test('all connection modes have four sections, one form and one stop action', ()
     assert.equal(html.includes('id="rmStation"'), mode === 'station');
     assert.equal(html.includes('id="rmBotBinding"'), mode === 'bot');
     assert.equal(html.includes('id="rmDirectPanel"'), mode === 'direct');
+    assert.doesNotMatch(html, /id="rmModeTabs"|id="rmConnectionTitle"|远程已内置/);
+    assert.ok(html.indexOf('id="rmSwitchMode"') > html.indexOf('<aside'));
+    assert.ok(html.indexOf('id="rmSwitchTarget"') > html.indexOf('<aside'));
     assert.match(html, /<details class="rm-sec rm-advanced" id="rmAdvanced">/);
     assert.doesNotMatch(html.slice(0, html.indexOf('id="rmAdvanced"')), /data-act="rmRecoverySessions"/);
     assert.doesNotMatch(html, /首次登记必填|安装远程模块|API Key 始终留在/);
   }
+});
+
+test('switch choices distinguish every saved Hub and Bot group while keeping effective identity separate', () => {
+  const config = { effectiveRemoteMode: 'bot', effectiveHubUrl: 'https://shared.test/hub', remoteModes: { bot: { groupId: 'alpha' } }, remoteConnections: [
+    { mode: 'hub', hubUrl: 'https://shared.test/hub' }, { mode: 'hub', hubUrl: 'https://second.test/hub' },
+    { mode: 'bot', hubUrl: 'https://shared.test/hub', groupId: 'alpha' }, { mode: 'bot', hubUrl: 'https://shared.test/hub', groupId: 'beta' },
+    { mode: 'bot', hubUrl: 'https://other.test/hub', groupId: 'alpha' },
+  ] };
+  for (const mode of ['station', 'bot', 'direct']) {
+    const f = fixture(mode, config);
+    const html = f.html(), select = /<select[^>]+id="rmSwitchTarget"[^>]*>([\s\S]*?)<\/select>/.exec(html)[1];
+    assert.equal((select.match(/<option /g) || []).length, mode === 'station' ? 2 : mode === 'bot' ? 3 : 1);
+    assert.match(html, /当前启用：Bot/);
+    assert.match(f.context.rmModeStatusMarkup(config), /Bot · alpha — https:\/\/shared.test\/hub/);
+    assert.match(html, /<option value="hub"/); assert.match(html, /<option value="bot"/); assert.match(html, /<option value="direct"/);
+  }
+  const f = fixture('bot', config), targets = f.context.rmSwitchTargets(config);
+  assert.equal(new Set(targets.map(row => row.key)).size, 6);
+});
+
+test('phone route alone suppresses the shared visual title and retains its accessible heading', () => {
+  const shell = fs.readFileSync(path.join(web, 'shell.js'), 'utf8'), css = fs.readFileSync(path.join(web, 'remote.css'), 'utf8');
+  assert.match(shell, /\$\('#panel'\)\.classList\[r === 'login' \? 'add' : 'remove'\]\('rm-compact-route'\)/);
+  assert.match(css, /\.panel\.rm-compact-route > \.page-head > \.page-title \{[^}]*clip-path: inset\(50%\)/);
+  assert.doesNotMatch(css, /\.page-title \{[^}]*display: none/);
+});
+
+test('active identity text escapes untrusted saved Hub and Bot group values', () => {
+  const payload = '\"><img src=x onerror=alert(1)>', config = { effectiveRemoteMode: 'bot', effectiveHubUrl: 'https://hub.test/' + payload, remoteModes: { bot: { groupId: payload } } };
+  const f = fixture('bot', config), markup = f.context.rmModeStatusMarkup(config);
+  assert.doesNotMatch(markup, /<img|<script/);
+  assert.match(markup, /&lt;img/);
+  config.effectiveRemoteMode = 'hub';
+  assert.doesNotMatch(f.context.rmModeStatusMarkup(config), /<img/);
+});
+
+test('phone binding and status always describe effective connection while another mode is only browsed', () => {
+  for (const browse of ['station', 'bot', 'direct']) {
+    const f = fixture(browse, { effectiveRemoteMode: 'hub', loggedIn: true, effectiveHubUrl: 'https://active.test' }, { state: 'connected', pairing: { paired: true } });
+    assert.match(f.context.rmPhoneBindingMarkup(), /手机已绑定/);
+    assert.match(f.context.rmPhoneBindingMarkup(), /data-act="pairRevoke"/);
+    assert.doesNotMatch(f.context.rmPhoneBindingMarkup(), /rmDirectRevoke|同一份 Bot/);
+    assert.match(f.context.rmConnectionStepsMarkup(), /电脑与远程服务已连接/);
+    f.context.S.state.config.effectiveRemoteMode = 'bot';
+    assert.match(f.context.rmPhoneBindingMarkup(), /同一份 Bot/);
+    assert.doesNotMatch(f.context.rmPhoneBindingMarkup(), /data-act="pairRevoke"|rmShowQR/);
+    f.context.S.state.config.effectiveRemoteMode = 'direct';
+    vm.runInContext('RM.direct = { enabled: true, paired: true, running: true, connected: true }', f.context);
+    assert.match(f.context.rmPhoneBindingMarkup(), /手机已连接/);
+    assert.match(f.context.rmPhoneBindingMarkup(), /rmDirectRevoke/);
+    f.context.S.state.config.effectiveRemoteMode = 'none';
+    assert.match(f.context.rmPhoneBindingMarkup(), /尚未启用远程/);
+    assert.doesNotMatch(f.context.rmPhoneBindingMarkup(), /data-act=/);
+  }
+});
+
+test('remote Agent API and permission navigation remain reachable without adding upfront session reads', () => {
+  const html = fixture('station').html();
+  assert.match(html, /<details[^>]+id="rmAgentSettings"\s*>/);
+  assert.match(html, /id="rmAgents"/);
+  assert.match(html, /应用于当前启用连接，不随待切换目标改变/);
+  assert.match(html, /href="#settings"/); assert.match(html, /href="#accounts"/);
+  assert.doesNotMatch(fixture('direct').html(), /id="rmAgents"/);
 });
 
 test('saved device configuration does not prove registration or allow a QR', () => {
@@ -127,6 +193,19 @@ test('a direct pairing QR appears once in phone management and not in the form',
   assert.doesNotMatch(f.context.renderRemoteDirectPanel(false), /data:fixture/);
   f.context.S.state.config.effectiveRemoteMode = 'hub';
   assert.doesNotMatch(f.html(), /data:fixture/);
+});
+
+test('active direct pairing offers one QR action in the phone card regardless of browsed form', () => {
+  for (const mode of ['station', 'bot', 'direct']) {
+    const f = fixture(mode, { effectiveRemoteMode: 'direct' });
+    vm.runInContext('RM.direct = { enabled: true, running: true, paired: false }', f.context);
+    const html = f.html();
+    assert.match(f.context.rmPhoneBindingMarkup(), /data-act="rmDirectQR"/);
+    assert.equal((html.match(/data-act="rmDirectQR"/g) || []).length, 1);
+    assert.doesNotMatch(f.context.rmPhoneBindingMarkup(), /启用直连后/);
+  }
+  const inactive = fixture('direct', { effectiveRemoteMode: 'none' });
+  assert.match(inactive.context.renderRemoteDirectPanel(false), /data-act="rmDirectQR"[^>]*>[^<]*启用并配对/);
 });
 
 test('status refresh preserves editable form nodes and open advanced settings', () => {

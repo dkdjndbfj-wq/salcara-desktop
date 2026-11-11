@@ -35,11 +35,10 @@ function renderRemoteDirectPanel(withSelfhost = true) {
   if (withSelfhost && typeof selfhostRememberDraft === 'function') selfhostRememberDraft();
   const d = RM.direct || {}, active = rmEffectiveMode() === 'direct';
   const paired = d.paired || S.state?.config?.remoteModes?.direct?.paired;
-  const qrLive = active && !paired && d.qrDataURL && Number(d.expiresAt) > Date.now();
   return `<section class="rm-mode-panel" id="rmDirectPanel" aria-label="直连接入">
     <div class="rm-mode-head"><div><h3>电脑直连</h3><p>手机与电脑在同一局域网或 VPN，通过加密连接直接通信。</p></div></div>
     <div class="rm-direct-address"><span class="rm-field-label">连接地址</span><b>${esc(active && d.running ? (d.secureUrls || []).join(', ') || '直连已启动' : '启用后显示')}</b></div>
-    <div class="rm-mode-actions">${paired ? active && d.running ? '' : `<button class="btn primary" data-act="rmActivateMode" data-mode="direct" ${RM.connectionAction ? 'disabled' : ''}>${active ? '恢复直连' : '启用直连'}</button>` : qrLive ? '' : `<button class="btn primary" data-act="rmDirectQR" ${RM.connectionAction ? 'disabled' : ''}>${icon('phone')}${active ? '生成配对二维码' : '启用并配对'}</button>`}<button class="rm-help-link" data-act="rmDirectTutorial">直连说明</button></div>
+    <div class="rm-mode-actions">${paired ? active && d.running ? '' : `<button class="btn primary" data-act="rmActivateMode" data-mode="direct" ${RM.connectionAction ? 'disabled' : ''}>${active ? '恢复直连' : '启用直连'}</button>` : active ? '' : `<button class="btn primary" data-act="rmDirectQR" ${RM.connectionAction ? 'disabled' : ''}>${icon('phone')}启用并配对</button>`}<button class="rm-help-link" data-act="rmDirectTutorial">直连说明</button></div>
     ${!active && paired ? '<p class="rm-recovery-note">已配对，未启用。启用后手机可继续连接，无需重新扫码。</p>' : ''}
   </section>${withSelfhost && typeof renderSelfhostHubPanel === 'function' ? renderSelfhostHubPanel() : ''}`;
 }
@@ -98,10 +97,12 @@ function renderRemoteStationPanel(_view, _st, c, linked) {
 }
 
 function rmPhoneBindingMarkup(st = S.state || {}) {
-  const c = st.config || {}, hub = rmScopedHubStatus(st), mode = RM.remoteMode, active = rmEffectiveMode(c), d = RM.direct || {};
+  const c = st.config || {}, hub = rmScopedHubStatus(st), active = rmEffectiveMode(c), mode = active, d = RM.direct || {};
+  if (active === 'none') return '<p class="rm-recovery-note">尚未启用远程。已保存的手机配对会保留，启用连接后可查看或管理绑定。</p>';
   if (mode === 'direct') {
     const paired = d.paired || c.remoteModes?.direct?.paired, enabled = active === 'direct';
-    return `<p class="rm-binding-state"><span class="rm-dot ${enabled && d.connected ? 'ok' : paired ? 'wait' : ''}"></span><strong>${enabled && d.connected ? '手机已连接' : paired ? '已配对' : '尚未绑定手机'}</strong></p>${enabled && !paired && d.qrDataURL && Number(d.expiresAt) > Date.now() ? `<div class="rm-direct-qr"><img src="${esc(d.qrDataURL)}" alt="直连配对二维码"><span>用手机「我的电脑」扫码，核对并确认连接。<br>有效至 ${esc(new Date(Number(d.expiresAt)).toLocaleTimeString())}</span></div>` : `<p class="rm-recovery-note">${paired ? '这台电脑保留一个直连手机配对。' : '启用直连后，用手机扫描二维码完成授权。'}</p>`}${paired ? `<button class="rm-link bad" data-act="rmDirectRevoke" ${RM.connectionAction ? 'disabled' : ''}>撤销手机配对</button>` : ''}`;
+    const qrLive = enabled && !paired && d.qrDataURL && Number(d.expiresAt) > Date.now();
+    return `<p class="rm-binding-state"><span class="rm-dot ${enabled && d.connected ? 'ok' : paired ? 'wait' : ''}"></span><strong>${enabled && d.connected ? '手机已连接' : paired ? '已配对' : '尚未绑定手机'}</strong></p>${qrLive ? `<div class="rm-direct-qr"><img src="${esc(d.qrDataURL)}" alt="直连配对二维码"><span>用手机「我的电脑」扫码，核对并确认连接。<br>有效至 ${esc(new Date(Number(d.expiresAt)).toLocaleTimeString())}</span></div>` : `<p class="rm-recovery-note">${paired ? '这台电脑保留一个直连手机配对。' : '用手机扫描配对二维码，核对并确认授权。'}</p>`}${paired ? `<button class="rm-link bad" data-act="rmDirectRevoke" ${RM.connectionAction ? 'disabled' : ''}>撤销手机配对</button>` : !qrLive ? `<button class="btn primary sm" data-act="rmDirectQR" ${RM.connectionAction ? 'disabled' : ''}>生成配对二维码</button>` : ''}`;
   }
   if (mode === 'bot') return `<p class="rm-recovery-note">在手机「我的电脑」导入同一份 Bot 绑定信息。电脑列表由该 Bot 的授权范围决定。</p><button class="rm-help-link" data-act="rmBotTutorial">查看手机绑定说明</button>`;
   const linked = active === 'hub' && c.loggedIn, connected = linked && hub.state === 'connected', paired = linked && hub.pairing?.paired;
@@ -117,8 +118,17 @@ function renderRemoteAdvanced(st) {
     ${stations}${RM.remoteMode === 'bot' ? rmBotIngressSettings(c) : ''}${RM.remoteMode === 'direct' && typeof renderSelfhostHubPanel === 'function' ? renderSelfhostHubPanel() : ''}<section id="rmRecovery" aria-label="消息与恢复">${rmRecoveryMarkup(st.hub)}</section><div id="rmLive"></div></div></details>`;
 }
 
+function rmConnectionSwitchMarkup(config) {
+  const state = rmSwitchState(config), { draft, target } = state;
+  return `<div class="rm-connection-switch"><label class="field"><span>连接方式</span><select class="input" id="rmSwitchMode" aria-describedby="rmSwitchNote">${[['hub', '中转站'], ['bot', 'Bot'], ['direct', '直连']].map(([mode, label]) => `<option value="${mode}" ${state.mode === mode ? 'selected' : ''}>${label}</option>`).join('')}</select></label>
+    <label class="field"><span>已保存目标</span><select class="input" id="rmSwitchTarget" aria-describedby="rmSwitchNote" ${state.targets.length ? '' : 'disabled'}>${!draft.key ? '<option value="" selected>请先在左侧添加连接</option>' : !target ? `<option value="${esc(draft.key)}" selected>${esc(draft.label || '原选择')}（已不可用）</option>` : ''}${state.targets.map(row => `<option value="${esc(row.key)}" ${row.key === draft.key ? 'selected' : ''}>${esc(row.label)}</option>`).join('')}</select></label>
+    <p class="rm-recovery-note" id="rmSwitchNote" aria-live="polite">${esc(state.note)}</p><button class="btn sm" id="rmSwitchApply" data-act="rmActivateMode" data-target="switch" ${state.disabled ? 'disabled' : ''}>${state.pending ? '正在切换…' : '切换连接'}</button><div id="rmSwitchError" aria-live="polite">${draft.error ? `<div class="rm-error">${esc(draft.error)}</div>` : ''}</div></div>`;
+}
+
 function renderRemoteConnectionLayout(view, st) {
   const c = st.config || {}, linked = c.loggedIn && rmEffectiveMode(c) === 'hub';
-  return `<div class="rm-page rm-connect-page"><div id="rmModeError" aria-live="polite"></div><div id="approvalsBox"></div><div class="rm-connect-grid"><section class="rm-sec rm-connect-main" aria-labelledby="rmConnectionTitle"><header class="rm-section-heading"><h2 id="rmConnectionTitle">连接方式</h2><p>远程已内置，连接后即可从手机使用本机 Agent。</p></header><div id="rmModeTabs">${remoteTabMarkup()}</div>${RM.remoteMode === 'station' ? renderRemoteStationPanel(view, st, c, linked) : RM.remoteMode === 'bot' ? renderRemoteBotPanel(c) : renderRemoteDirectPanel(false)}</section>
-    <aside class="rm-connect-aside"><section class="rm-sec" aria-labelledby="rmStatusTitle"><div class="rm-sec-head"><h3 id="rmStatusTitle">连接状态</h3><button class="rm-link" data-act="${RM.remoteMode === 'direct' ? 'rmDirectRefresh' : 'rmRecoveryRefresh'}" aria-label="刷新连接状态">${icon('refresh')}刷新</button></div><div id="rmConnectionSteps" aria-live="polite">${rmConnectionStepsMarkup(st)}</div><div id="rmActiveMode">${rmModeStatusMarkup(c)}</div></section><section class="rm-sec" id="rmPairSection" aria-labelledby="rmBindingTitle"><div class="rm-sec-head"><h3 id="rmBindingTitle">已绑定手机</h3></div><div id="rmPhoneBinding">${rmPhoneBindingMarkup(st)}</div></section></aside></div>${renderRemoteAdvanced(st)}</div>`;
+  return `<div class="rm-page rm-connect-page"><div id="rmModeError" aria-live="polite"></div><div id="approvalsBox"></div><div class="rm-connect-grid"><section class="rm-sec rm-connect-main" aria-label="所选连接方式的配置">${RM.remoteMode === 'station' ? renderRemoteStationPanel(view, st, c, linked) : RM.remoteMode === 'bot' ? renderRemoteBotPanel(c) : renderRemoteDirectPanel(false)}</section>
+    <aside class="rm-connect-aside"><section class="rm-sec" aria-labelledby="rmStatusTitle"><div class="rm-sec-head"><h3 id="rmStatusTitle">连接状态</h3><button class="rm-link" data-act="rmRecoveryRefresh" aria-label="刷新连接状态">${icon('refresh')}刷新</button></div><div id="rmConnectionSteps" aria-live="polite">${rmConnectionStepsMarkup(st)}</div><div id="rmActiveMode">${rmModeStatusMarkup(c)}</div>${rmConnectionSwitchMarkup(c)}</section><section class="rm-sec" id="rmPairSection" aria-labelledby="rmBindingTitle"><div class="rm-sec-head"><h3 id="rmBindingTitle">已绑定手机</h3></div><div id="rmPhoneBinding">${rmPhoneBindingMarkup(st)}</div></section></aside></div>
+    ${RM.remoteMode === 'station' ? `<details class="rm-sec rm-advanced" id="rmAgentSettings" ${RM.agentSettingsOpen ? 'open' : ''}><summary><span>${icon('code')}<b>远程 Agent API</b></span><small>跟随电脑或单独设置</small></summary><p class="rm-recovery-note rm-agent-scope">应用于当前启用连接，不随待切换目标改变。API 来源与模型仍需通过当前站点授权。</p><div class="rm-agents" id="rmAgents"><p class="rm-recovery-note">展开后读取 Agent 与 API 配置。</p></div></details>` : ''}
+    <nav class="rm-settings-links" aria-label="远程权限设置"><a class="rm-link" href="#settings">项目目录授权 / 审批策略 · 设置</a><a class="rm-link" href="#accounts">API 站点来源权限 · API 密钥</a></nav>${renderRemoteAdvanced(st)}</div>`;
 }
