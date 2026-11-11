@@ -60,7 +60,8 @@ function renderRemoteBotPanel(c) {
   const entries = rmSavedConnections(c, 'bot');
   return `<section class="rm-mode-panel" id="rmBotPanel" aria-label="Bot 接入"><div class="rm-mode-head"><div><h3>Bot 中继</h3><p>导入管理员提供的绑定信息，Agent 继续运行在这台电脑上。</p></div></div>
     <div id="rmSavedBots" class="rm-saved-modes">${rmSavedBotsMarkup(c)}</div>${entries.length ? `<details class="rm-new-connection" ${RM.botDraft ? 'open' : ''}><summary>添加其他 Bot</summary>` : ''}
-    <label class="field"><span>Bot 绑定信息</span><textarea class="input rm-bot-input" id="rmBotBinding" rows="5" placeholder="粘贴 Bot 绑定 JSON">${esc(RM.botDraft)}</textarea></label>
+    <label class="field"><span>Bot 绑定信息</span><textarea class="input rm-bot-input" id="rmBotBinding" rows="5" placeholder="粘贴 Bot 绑定 JSON" aria-describedby="rmBotSecretNote">${esc(RM.botDraft)}</textarea></label>
+    <p class="rm-recovery-note" id="rmBotSecretNote">绑定信息含授权邀请，请勿公开分享。导入后，以连接状态确认是否已上线。</p>
     <div class="rm-mode-actions"><button class="btn primary" data-act="rmBotBind">导入并连接</button></div><div id="rmBotError" aria-live="polite"></div>${entries.length ? '</details>' : ''}</section>`;
 }
 

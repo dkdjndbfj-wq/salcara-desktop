@@ -88,6 +88,23 @@ test('Bot phone management explains group authorization and never exposes Hub pa
   assert.doesNotMatch(f.html(), /data-act="rmShowQR"|data-act="pairRevoke"|id="pairQR"/);
 });
 
+test('Bot import explains invitation sensitivity and real online confirmation without extra primary actions', () => {
+  const f = fixture('bot');
+  const html = f.html();
+  assert.match(html, /绑定信息含授权邀请，请勿公开分享/);
+  assert.match(html, /以连接状态确认是否已上线/);
+  assert.match(html, /aria-describedby="rmBotSecretNote"/);
+  assert.equal(visibleControls(html).actions.filter(item => item.primary).length, 1);
+  f.nodes.set('modalRoot', { innerHTML: '' });
+  f.context.ACTIONS.rmBotTutorial();
+  const help = f.nodes.get('modalRoot').innerHTML;
+  assert.match(help, /不要手改 JSON/);
+  assert.match(help, /开机、联网且不休眠/);
+  assert.match(help, /重置原组手机绑定/);
+  assert.match(help, /撤销邀请只停止新增绑定/);
+  assert.doesNotMatch(help, /data-act="rmRecoverySessions"/);
+});
+
 test('a direct pairing QR appears once in phone management and not in the form', () => {
   const f = fixture('direct', { effectiveRemoteMode: 'direct' });
   vm.runInContext(`RM.direct = { enabled: true, running: true, paired: false, qrDataURL: 'data:fixture', expiresAt: Date.now() + 60000 }`, f.context);

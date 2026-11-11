@@ -53,7 +53,14 @@ func (s *Server) handleBotBind(w http.ResponseWriter, r *http.Request) {
 	root := u.Scheme + "://" + u.Host
 	s.remoteModeMu.Lock()
 	defer s.remoteModeMu.Unlock()
+	if r.Context().Err() != nil {
+		writeErr(w, http.StatusConflict, "Bot 导入已取消，原连接已保留")
+		return
+	}
 	if err := s.d.Store.Update(func(c *config.Config) error {
+		if err := r.Context().Err(); err != nil {
+			return err
+		}
 		c.ConnectRemoteWithBotBinding(root, in.HubURL, in.GroupID, in.Invite, in.Signature)
 		return nil
 	}); err != nil {
@@ -61,5 +68,7 @@ func (s *Server) handleBotBind(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.finishRemoteModeSwitch()
-	writeJSON(w, map[string]any{"ok": true, "hubUrl": config.NormalizeHubURL(in.HubURL), "groupId": in.GroupID})
+	// Import persists a local invitation. The background Hub registration and
+	// authenticated command stream determine whether this computer is online.
+	writeJSON(w, map[string]any{"ok": true, "hubUrl": config.NormalizeHubURL(in.HubURL), "groupId": in.GroupID, "stage": "saved", "registered": false})
 }
