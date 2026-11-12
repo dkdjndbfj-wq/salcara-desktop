@@ -140,6 +140,156 @@ test('repair shortcuts only reveal relevant controls and never issue a mutation'
   assert.equal(advanced.open, true); assert.equal(enrollment.open, true); assert.equal(focused, true); assert.equal(f.calls.length, 0);
 });
 
+test('structured enrollment failures expose recovery without error text and reject stale connection status', () => {
+  const f = fixture(); f.RM.remoteMode = 'station';
+  f.c.S.state.config = { effectiveRemoteMode: 'hub', loggedIn: true, deviceId: 'current-device', effectiveHubUrl: 'https://current.example.test', remoteAgentSettingsScope: 'scope-fixture' };
+  f.RM.confirmedRegistration = { deviceId: 'current-device', hubUrl: 'https://current.example.test', settingsScope: 'scope-fixture', revision: f.RM.connectionRevision };
+  assert.match(f.c.rmConnectionStepsMarkup(), /服务器已确认电脑登记/);
+  for (const failure of [{ state: 'device_auth_required', errorCode: '' }, { state: 'connecting', errorCode: 'device_enrollment_required' }]) {
+    f.c.S.state.hub = { ...failure, error: '', deviceId: 'current-device', hubUrl: 'https://current.example.test' };
+    const html = f.c.rmConnectionStepsMarkup();
+    assert.match(html, /data-act="rmShowRecovery" data-section="enrollment"/);
+    assert.match(html, /class="issue"[^]*登记电脑/); assert.doesNotMatch(html, /服务器已确认电脑登记/);
+  }
+  for (const mismatch of [{ deviceId: 'old-device' }, { hubUrl: 'https://old.example.test' }]) {
+    f.c.S.state.hub = { state: 'device_auth_required', errorCode: 'device_enrollment_required', ...mismatch };
+    assert.doesNotMatch(f.c.rmConnectionStepsMarkup(), /data-act="rmShowRecovery"/);
+  }
+  f.c.S.state.hub = { state: 'connected' };
+  assert.doesNotMatch(f.c.rmConnectionStepsMarkup(), /data-act="rmShowRecovery"/);
+  assert.equal(f.calls.length, 0);
+});
+
+test('unpaired Hub status offers rescan after enrollment despite retained local pairing fields', () => {
+  const f = fixture();
+  f.c.S.state.config = { effectiveRemoteMode: 'hub', loggedIn: true, deviceId: 'current-device', effectiveHubUrl: 'https://current.example.test', phoneHash: 'synthetic-retained-pairing' };
+  f.c.S.state.hub = { deviceId: 'current-device', hubUrl: 'https://current.example.test', state: 'device_auth_required', errorCode: 'device_enrollment_required', pairing: { deviceId: 'current-device', paired: false } };
+  let html = f.c.rmPhoneBindingMarkup();
+  assert.match(html, /先完成电脑登记并等待连接成功/); assert.match(html, /请重新扫码/);
+  assert.match(html, /data-act="rmShowQR" disabled/); assert.doesNotMatch(html, /手机已绑定|data-act="pairRevoke"/);
+  f.c.S.state.hub.state = 'connected'; f.c.S.state.hub.errorCode = '';
+  html = f.c.rmPhoneBindingMarkup();
+  assert.match(html, /data-act="rmShowQR"/); assert.doesNotMatch(html, /data-act="rmShowQR" disabled/);
+  f.c.S.state.hub.pairing = { deviceId: 'old-device', paired: true };
+  assert.doesNotMatch(f.c.rmPhoneBindingMarkup(), /手机已绑定|data-act="pairRevoke"/);
+  f.c.S.state.hub.pairing = { deviceId: 'current-device', paired: true };
+  html = f.c.rmPhoneBindingMarkup(); assert.match(html, /手机已绑定/); assert.doesNotMatch(html, /data-act="rmShowQR"/);
+  assert.equal(f.calls.length, 0);
+});
+
+test('polling and consumed QR updates retain the same scoped rescan action', () => {
+  const f = fixture(); f.RM.remoteMode = 'station';
+  f.c.S.state.config = { effectiveRemoteMode: 'hub', loggedIn: true, deviceId: 'current-device', effectiveHubUrl: 'https://current.example.test' };
+  f.c.S.state.hub = { deviceId: 'current-device', state: 'device_auth_required', errorCode: 'device_enrollment_required', pairing: { deviceId: 'current-device', paired: false } };
+  const binding = f.node('rmPhoneBinding'), qr = f.node('pairQR', { classList: { toggle() {}, remove() {} } });
+  for (let i = 0; i < 3; i++) f.c.rmUpdateRemoteStatus();
+  assert.match(binding.innerHTML, /请重新扫码/); assert.match(qr.innerHTML, /data-act="rmShowQR" disabled/);
+  f.c.S.state.hub.state = 'connected'; f.c.S.state.hub.errorCode = ''; f.c.S.state.hub.pairing.pendingExpiresAt = 0;
+  f.c.S.pairQR = 'data:image/png;base64,synthetic'; f.c.S.pairExpires = Date.now() + 60000;
+  f.c.rmPairStatus(f.c.S.state.hub);
+  assert.equal(f.c.S.pairQR, ''); assert.match(qr.innerHTML, /扫码绑定手机/); assert.doesNotMatch(qr.innerHTML, /disabled|<img/);
+  assert.equal(f.calls.length, 0);
+});
+
+function enrollmentFixture() {
+  const f = fixture(), toasts = [];
+  const hubUrl = 'https://fixture.example.test/hub';
+  Object.assign(f.c.S.state.config, { effectiveRemoteMode: 'hub', effectiveHubUrl: hubUrl, deviceId: 'fixture-device', loggedIn: true });
+  f.c.S.state.hub = { hubUrl, deviceId: 'fixture-device', state: 'connecting' };
+  f.node('rmStation', { value: hubUrl }); f.node('rmHub', { value: hubUrl });
+  f.node('rmEnrollmentClaim'); f.node('rmSourceAPI'); f.node('rmConnectError');
+  f.c.toast = message => toasts.push(message);
+  f.result = { registered: true, stage: 'waiting_online', plugin: { hubUrl }, registration: { hubUrl, deviceId: 'fixture-device' } };
+  f.c.api = async (path, body) => { f.calls.push({ path, body }); return body?.connect ? f.result : { stage: 'discovered' }; };
+  f.connect = () => f.c.ACTIONS.rmConnect({ isConnected: true });
+  return Object.assign(f, { hubUrl, toasts });
+}
+
+test('manual save cannot claim connection from an older device or Hub snapshot', async () => {
+  for (const mismatch of ['deviceId', 'hubUrl']) {
+    const f = enrollmentFixture();
+    f.result = { registered: false, stage: 'saved', eligibility: { method: 'manual' }, plugin: { hubUrl: f.hubUrl } };
+    f.c.S.state.hub.state = 'connected'; f.c.S.state.hub[mismatch] = 'old-fixture';
+    await f.connect();
+    assert.equal(f.toasts.length, 1); assert.match(f.toasts[0], /连接设置已保存/); assert.doesNotMatch(f.toasts[0], /电脑已连接/);
+    assert.equal(f.RM.confirmedRegistration, undefined);
+  }
+});
+
+test('registration receipts require exact device and Hub before clearing draft or confirming registration', async () => {
+  for (const mismatch of ['deviceId', 'hubUrl', 'missing']) {
+    const f = enrollmentFixture();
+    f.node('rmEnrollmentClaim', { value: 'a'.repeat(64) }); f.c.S.pairQR = 'synthetic-current-qr';
+    if (mismatch === 'missing') delete f.result.registration;
+    else f.result.registration[mismatch] = 'old-fixture';
+    await f.connect();
+    assert.equal(f.RM.confirmedRegistration, undefined); assert.equal(f.nodes.get('rmEnrollmentClaim').value, 'a'.repeat(64));
+    assert.equal(f.c.S.pairQR, 'synthetic-current-qr'); assert.match(f.toasts[0], /刷新状态核对/);
+    assert.doesNotMatch(f.c.rmConnectionStepsMarkup(), /服务器已确认电脑登记/);
+  }
+});
+
+test('late receipts do not apply after connection action generation or page changes', async () => {
+  for (const changed of ['revision', 'page']) {
+    const f = enrollmentFixture(), pending = gate(), submitted = gate();
+    f.c.api = async (_path, body) => { if (!body.connect) return { stage: 'discovered' }; submitted.resolve(); return pending.promise; };
+    const work = f.connect(); await submitted.promise;
+    if (changed === 'revision') f.RM.connectionRevision++;
+    else f.RM.loginEpoch++;
+    f.c.S.pairQR = 'synthetic-new-generation-qr'; f.c.S.pairExpires = 123456;
+    pending.resolve(f.result); await work;
+    assert.equal(f.RM.confirmedRegistration, undefined); assert.equal(f.toasts.length, 0);
+    assert.equal(f.c.S.pairQR, 'synthetic-new-generation-qr'); assert.equal(f.c.S.pairExpires, 123456);
+  }
+});
+
+test('refresh after an accepted old receipt cannot confirm or clear QR for a replacement device', async () => {
+  const f = enrollmentFixture(), refreshed = gate(), refreshing = gate();
+  f.c.loadState = async () => { refreshing.resolve(); await refreshed.promise; return f.c.S.state; };
+  const work = f.connect(); await refreshing.promise;
+  f.c.S.state.config.deviceId = 'replacement-device';
+  f.c.S.state.config.remoteAgentSettingsScope = 'replacement-scope';
+  f.c.S.state.hub = { hubUrl: f.hubUrl, deviceId: 'replacement-device', state: 'connecting', pairing: { deviceId: 'replacement-device', paired: false } };
+  f.c.S.pairQR = 'synthetic-replacement-qr'; f.c.S.pairExpires = 654321;
+  refreshed.resolve(); await work;
+  assert.equal(f.RM.confirmedRegistration, undefined);
+  assert.equal(f.c.S.pairQR, 'synthetic-replacement-qr'); assert.equal(f.c.S.pairExpires, 654321);
+  assert.doesNotMatch(f.c.rmConnectionStepsMarkup(), /服务器已确认电脑登记/);
+  assert.match(f.toasts[0], /刷新状态核对/);
+});
+
+test('matching registration confirms only its generation and distinguishes phone rescan from retained pairing', async () => {
+  const f = enrollmentFixture(); await f.connect();
+  assert.equal(f.RM.confirmedRegistration.deviceId, 'fixture-device');
+  assert.match(f.c.rmConnectionStepsMarkup(), /服务器已确认电脑登记/);
+  for (const changed of ['scope', 'revision']) {
+    if (changed === 'scope') f.c.S.state.config.remoteAgentSettingsScope = 'replacement-generation';
+    else { f.c.S.state.config.remoteAgentSettingsScope = 'scope-fixture'; f.RM.connectionRevision++; }
+    assert.doesNotMatch(f.c.rmConnectionStepsMarkup(), /服务器已确认电脑登记/);
+  }
+  for (const paired of [false, true]) {
+    const current = enrollmentFixture(); current.c.S.state.hub.state = 'connected'; current.c.S.state.hub.pairing = { paired };
+    await current.connect(); assert.match(current.toasts[0], paired ? /已绑定手机/ : /扫码绑定手机/);
+  }
+});
+
+test('definitively unsent enrollment is retryable while an unknown result stays protected', () => {
+  const f = enrollmentFixture(), owner = f.c.rmBeginConnectionAction({ isConnected: true }, 'station');
+  owner.submitted = true; owner.enrollmentKey = 'fixture-attempt';
+  const output = f.nodes.get('rmConnectError');
+  f.c.rmConnectionError(owner, output, { status: 503, code: 'enrollment_result_unknown' });
+  assert.equal(f.RM.pendingEnrollment.key, owner.enrollmentKey); assert.match(output.innerHTML, /检查登记结果/);
+  f.c.rmConnectionError(owner, output, { status: 503, code: 'enrollment_not_sent' });
+  assert.equal(f.RM.pendingEnrollment, null); assert.match(output.innerHTML, /登记尚未发送，请检查连接后重试/);
+  assert.doesNotMatch(output.innerHTML, /操作结果暂未确认|检查登记结果/);
+  f.RM.pendingEnrollment = { key: 'another-attempt' };
+  f.c.rmConnectionError(owner, output, { status: 409, code: 'enrollment_not_sent' });
+  assert.equal(f.RM.pendingEnrollment.key, 'another-attempt');
+  f.c.rmConnectionError(owner, output, new Error('response lost'));
+  assert.match(output.innerHTML, /操作结果暂未确认/);
+  assert.equal(f.RM.pendingEnrollment.key, 'another-attempt');
+});
+
 test('diagnostic summary excludes identities, addresses, paths, raw errors and credentials', () => {
   const f = fixture(); let copied = '';
   f.c.copyText = text => { copied = text; };

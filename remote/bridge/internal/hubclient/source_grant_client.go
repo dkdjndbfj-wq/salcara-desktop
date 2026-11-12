@@ -232,7 +232,7 @@ func (c *Client) acquireSourceGrantFor(ctx context.Context, challengeID string, 
 	if !cfg.RemoteExecutionArmed {
 		return nil, errSourceAcquisition
 	}
-	challengeCtx, challengeCancel := context.WithTimeout(ctx, 8*time.Second)
+	challengeCtx, challengeCancel := context.WithTimeout(ctx, hubAuthenticatedRequestTimeout)
 	defer challengeCancel()
 	req, err := c.requestFor(challengeCtx, cfg, "GET", "/bridge/source/challenge?challengeId="+url.QueryEscape(challengeID), nil, false)
 	if err != nil {

@@ -156,11 +156,12 @@ async function rmRefreshAcceptedConnection() {
 }
 function rmConnectionError(owner, node, error) {
   if (!owner.current()) return;
-  const unknown = owner.submitted && (!Number.isInteger(error.status) || error.status >= 500 || error.status === 408 || error.code === 'enrollment_result_unknown');
+  const unknown = owner.submitted && error.code !== 'enrollment_not_sent' && (!Number.isInteger(error.status) || error.status >= 500 || error.status === 408 || error.code === 'enrollment_result_unknown');
   const reasons = { api_enrollment_unsupported: '本站暂不支持 API 自动登记，请联系站点管理员开通或提供独立中转站的授权方式。', api_credentials_invalid: 'API 凭据无效或已过期，请在 API 密钥页更新后重试。', api_enrollment_denied: '此 API 未获得电脑远程登记权限，请联系站点管理员。', api_verifier_unavailable: '本站的 API 验证服务暂不可用，请稍后重试。', source_changed: '所选 API 已更新，请重新选择后连接。', enrollment_issuer_untrusted: '本站的登记授权来源不可信，请联系站点管理员。', enrollment_grant_invalid: '本站返回的电脑登记授权未通过校验，请联系站点管理员。' };
-  const detail = reasons[error.code] || error.message || '操作失败，请重试';
+  const detail = error.code === 'enrollment_not_sent' ? '登记尚未发送，请检查连接后重试。' : reasons[error.code] || error.message || '操作失败，请重试';
   const message = unknown ? `操作结果暂未确认，请刷新状态核对后再操作。${detail}` : detail;
   if (owner.switchDraft && RM.switchDraft === owner.switchDraft) owner.switchDraft.error = message;
+  if (error.code === 'enrollment_not_sent' && RM.pendingEnrollment?.key === owner.enrollmentKey) RM.pendingEnrollment = null;
   if (error.code === 'enrollment_result_unknown' && owner.enrollmentKey) RM.pendingEnrollment = { key: owner.enrollmentKey };
   if (node?.isConnected !== false && node) node.innerHTML = `<div class="rm-error">${esc(message)}</div>${error.code === 'enrollment_result_unknown' && owner.enrollmentKey ? rmEnrollmentRecoveryMarkup() : ''}`;
   else toast(message, 'bad');
@@ -386,7 +387,7 @@ function rmUpdateRemoteStatus(hub = S.state?.hub) {
   const recovery = document.getElementById('rmRecovery');
   if (recovery?.isConnected !== false && recovery) recovery.innerHTML = rmRecoveryMarkup(hub);
   const binding = document.getElementById('rmPhoneBinding');
-  if (binding?.isConnected !== false && binding) binding.innerHTML = rmPhoneBindingMarkup();
+  if (binding?.isConnected !== false && binding) binding.innerHTML = rmPhoneBindingMarkup({ ...S.state, hub });
   {
     const saved = document.getElementById('rmSavedBots');
     if (saved && !document.activeElement?.closest?.('#rmSavedBots')) saved.innerHTML = rmSavedBotsMarkup(S.state?.config || {});
@@ -407,9 +408,7 @@ function rmUpdateRemoteStatus(hub = S.state?.hub) {
   if (box) {
     const qrLive = connected && S.pairQR && S.pairExpires > Date.now();
     box.classList?.toggle('live', Boolean(qrLive));
-    box.innerHTML = qrLive ? `<img src="${esc(S.pairQR)}" alt="手机绑定二维码"><span class="rm-timer" id="rmTimer"></span>`
-      : !connected ? '<span>连接恢复后可绑定手机</span>' : hub.pairing?.paired
-        ? `${icon('check')}<span>手机已绑定</span>` : `<button class="btn primary sm" data-act="rmShowQR">${icon('scan')}显示二维码</button>`;
+    box.innerHTML = rmHubPhoneQRMarkup({ ...S.state, hub });
     if (qrLive) rmTickQR();
   }
 }
@@ -424,8 +423,7 @@ function rmPairStatus(st) {
     const box = S.route === 'login' && rmEffectiveMode() === 'hub' && st.state === 'connected' ? $('#pairQR') : null;
     if (box) {
       box.classList.remove('live');
-      box.innerHTML = pair.paired ? `${icon('check')}<span>手机已绑定</span>`
-        : '<button class="btn primary sm" data-act="rmShowQR">' + icon('scan') + '显示二维码</button>';
+      box.innerHTML = rmHubPhoneQRMarkup({ ...S.state, hub: st });
     }
   }
   if (consumed && pair.paired) toast('手机绑定成功', 'ok');
@@ -880,13 +878,25 @@ Object.assign(ACTIONS, {
         const registered = result?.registered === true && result?.stage === 'waiting_online';
         const manualSaved = !accountId && result?.registered === false && result?.stage === 'saved' && result?.eligibility?.method === 'manual';
         if (!registered && !manualSaved) throw Object.assign(new Error('服务尚未确认电脑登记，请刷新连接状态后核对'), { status: 503 });
-        if (owner.current() && registered) { if (owner.fields[2].node) owner.fields[2].node.value = ''; owner.fields[2].value = ''; RM.stationDraft = null; RM.enrollmentRequired = false; RM.pendingEnrollment = null; }
-        S.pairQR = ''; S.pairExpires = 0;
         const state = await rmRefreshAcceptedConnection();
         RM.connectionProgress = null;
-        if (registered && owner.current() && state?.config?.deviceId && result.plugin?.hubUrl && rmNormalizeHub(result.plugin.hubUrl) === rmNormalizeHub(state.config.effectiveHubUrl)) RM.confirmedRegistration = { deviceId: state.config.deviceId, hubUrl: rmNormalizeHub(result.plugin.hubUrl) };
-        toast(state?.hub?.state === 'connected' ? '电脑已连接，请在已绑定手机中完成授权' : registered ? '电脑登记已确认，正在等待连接上线' : '连接设置已保存，等待电脑登记和上线确认', 'ok');
-        if (registered && owner.current() && state) await route();
+        if (!owner.current()) return;
+        if (manualSaved) { S.pairQR = ''; S.pairExpires = 0; }
+        const config = state?.config || {}, receipt = result.registration;
+        const receiptCurrent = registered && rmEffectiveMode(config) === 'hub' && receipt?.deviceId && receipt.deviceId === config.deviceId
+          && receipt.hubUrl && rmNormalizeHub(receipt.hubUrl) === rmNormalizeHub(config.effectiveHubUrl);
+        if (receiptCurrent) {
+          if (owner.fields[2].node) owner.fields[2].node.value = '';
+          owner.fields[2].value = ''; RM.stationDraft = null; RM.enrollmentRequired = false; RM.pendingEnrollment = null;
+          S.pairQR = ''; S.pairExpires = 0;
+          RM.confirmedRegistration = { deviceId: receipt.deviceId, hubUrl: rmNormalizeHub(receipt.hubUrl), settingsScope: config.remoteAgentSettingsScope, revision: owner.revision };
+        }
+        // A saved manual configuration is not a registration receipt. Only the
+        // matching receipt plus current Hub status can confirm this computer.
+        const hub = state ? rmScopedHubStatus(state) : {};
+        toast(receiptCurrent ? hub.state === 'connected' ? hub.pairing?.paired === true ? '电脑已连接，请在已绑定手机中完成授权' : '电脑已连接，请扫码绑定手机' : '电脑登记已确认，正在等待连接上线'
+          : registered ? '登记请求已处理，请刷新状态核对当前连接' : '连接设置已保存，等待电脑登记和上线确认', 'ok');
+        if (receiptCurrent) await route();
       } catch (e) { if (owner.submitted) await rmRefreshAcceptedConnection(); rmShowEnrollmentFallback(owner, e, !!accountId); rmConnectionError(owner, out, e); }
     }); } finally { if (RM.connectionAction === owner) RM.connectionProgress = null; rmFinishConnectionAction(owner); }
   },

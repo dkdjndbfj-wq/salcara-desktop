@@ -42,6 +42,8 @@ func (e *RemoteHTTPError) Error() string {
 		return "本站暂时无法验证 API，请稍后重试"
 	case "enrollment_result_unknown":
 		return "电脑登记结果尚未确认，请再次检查；不会重复创建电脑"
+	case "enrollment_not_sent":
+		return "电脑登记尚未发送，请检查连接后重试"
 	case "device_credentials_invalid", "device_authorization_expired":
 		return "这台电脑的设备登记已失效，请重新登记并绑定手机；本机 API、项目与对话保留"
 	case "device_enrollment_required":

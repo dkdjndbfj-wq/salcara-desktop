@@ -9,7 +9,12 @@ function remoteTabMarkup() {
 function rmScopedHubStatus(st) {
   const hub = st.hub || {}, c = st.config || {};
   if (hub.deviceId && hub.deviceId !== c.deviceId || hub.hubUrl && rmNormalizeHub(hub.hubUrl) !== rmNormalizeHub(c.effectiveHubUrl || c.hubUrl)) return { state: 'connecting' };
+  if (hub.pairing?.deviceId && hub.pairing.deviceId !== c.deviceId) return { ...hub, pairing: undefined };
   return hub;
+}
+
+function rmNeedsEnrollment(hub) {
+  return ['device_auth_required', 'invalid_key'].includes(hub?.state) || /device_|enrollment_|hub_identity_changed/.test(hub?.errorCode || '');
 }
 
 function rmConnectionStepsMarkup(st = S.state || {}) {
@@ -17,25 +22,26 @@ function rmConnectionStepsMarkup(st = S.state || {}) {
   const progress = RM.connectionAction?.mode === 'station' && RM.connectionAction.current() ? RM.connectionProgress : null;
   const enabled = active !== 'none';
   const connected = !progress && (active === 'direct' ? !!d.connected : enabled && hub.state === 'connected');
-  const confirmed = enabled && RM.confirmedRegistration?.deviceId === c.deviceId && RM.confirmedRegistration?.hubUrl === rmNormalizeHub(c.effectiveHubUrl) && !['device_auth_required', 'invalid_key'].includes(hub.state) && hub.errorCode !== 'hub_identity_changed';
+  const confirmed = active === 'hub' && !!c.remoteAgentSettingsScope && RM.confirmedRegistration?.deviceId === c.deviceId && RM.confirmedRegistration?.hubUrl === rmNormalizeHub(c.effectiveHubUrl) && RM.confirmedRegistration?.settingsScope === c.remoteAgentSettingsScope && RM.confirmedRegistration?.revision === RM.connectionRevision && !rmNeedsEnrollment(hub);
   const ready = progress ? !!progress.registered : active === 'direct' ? !!d.running : connected || confirmed;
   const eligible = progress ? !!progress.eligible : connected || confirmed;
   const discovered = progress ? !!progress.discovered : connected || confirmed;
   const paired = !progress && (active === 'direct' ? !!(d.paired || c.remoteModes?.direct?.paired) : !!hub.pairing?.paired);
   const error = progress ? '' : active === 'direct' ? d.error || (d.enabled && !d.running ? '直连监听未启动，请刷新状态后重试。' : '') : enabled ? hub.error || '' : '';
+  const issue = !!error || !progress && enabled && active !== 'direct' && (!!hub.errorCode || ['device_auth_required', 'invalid_key', 'source_unauthorized', 'pair_required', 'remote_blocked'].includes(hub.state));
   const label = st.loading ? '正在读取连接状态' : progress?.state === 'discovering' ? '正在发现中转站' : progress?.state === 'registering' ? '正在验证授权并登记电脑' : !enabled ? '尚未启用远程' : active === 'direct' ? d.error ? '直连暂不可用' : connected ? '手机已连接' : ready ? '直连已就绪' : '正在启动直连' : rmConnectionLabel(hub);
   const step = (title, detail, state) => `<li class="${state}"><i aria-hidden="true">${state === 'done' ? '✓' : state === 'issue' ? '!' : '·'}</i><div><b>${title}</b><span>${esc(detail)}</span></div></li>`;
-  return `<div class="rm-connection-heading"><span class="rm-dot ${error ? 'bad' : connected ? 'ok' : enabled ? 'wait' : ''}"></span><strong>${esc(label)}</strong></div>
-    <details class="rm-check-details" ${error || progress || enabled && !connected ? 'open' : ''}><summary>连接检查</summary><ol class="rm-connection-steps">${active === 'direct' && !progress ? step('电脑监听', ready ? '加密直连已就绪' : '启用后自动检查', ready ? 'done' : error ? 'issue' : 'pending') : `${step('发现中转站', discovered ? '远程服务已发现' : '等待服务确认', discovered ? 'done' : 'pending')}${step('验证远程资格', eligible ? '服务器已确认授权' : '按站点策略验证', eligible ? 'done' : 'pending')}${step('登记电脑', ready ? '服务器已确认电脑登记' : '等待登记确认', ready ? 'done' : error ? 'issue' : 'pending')}`}${step('等待在线', connected ? active === 'direct' ? '手机已连接电脑' : '电脑与远程服务已连接' : enabled ? '等待连接恢复' : '连接后自动检查', connected ? 'done' : 'pending')}${step(active === 'bot' ? 'Bot 授权' : '手机绑定', active === 'bot' ? connected ? 'Bot 组授权已确认' : '由 Bot 入口确认组授权' : paired ? '手机绑定已保留' : '在下方完成手机绑定', active === 'bot' ? connected ? 'done' : 'pending' : paired ? 'done' : 'pending')}</ol></details>
+  return `<div class="rm-connection-heading"><span class="rm-dot ${issue ? 'bad' : connected ? 'ok' : enabled ? 'wait' : ''}"></span><strong>${esc(label)}</strong></div>
+    <details class="rm-check-details" ${issue || progress || enabled && !connected ? 'open' : ''}><summary>连接检查</summary><ol class="rm-connection-steps">${active === 'direct' && !progress ? step('电脑监听', ready ? '加密直连已就绪' : '启用后自动检查', ready ? 'done' : issue ? 'issue' : 'pending') : `${step('发现中转站', discovered ? '远程服务已发现' : '等待服务确认', discovered ? 'done' : 'pending')}${step('验证远程资格', eligible ? '服务器已确认授权' : '按站点策略验证', eligible ? 'done' : 'pending')}${step('登记电脑', ready ? '服务器已确认电脑登记' : '等待登记确认', ready ? 'done' : issue ? 'issue' : 'pending')}`}${step('等待在线', connected ? active === 'direct' ? '手机已连接电脑' : '电脑与远程服务已连接' : enabled ? '等待连接恢复' : '连接后自动检查', connected ? 'done' : 'pending')}${step(active === 'bot' ? 'Bot 授权' : '手机绑定', active === 'bot' ? connected ? 'Bot 组授权已确认' : '由 Bot 入口确认组授权' : paired ? '手机绑定已保留' : '在下方完成手机绑定', active === 'bot' ? connected ? 'done' : 'pending' : paired ? 'done' : 'pending')}</ol></details>
     ${active === 'hub' || active === 'bot' ? `<p class="rm-connection-address" id="rmHubConnectionMeta">${esc(host(c.relayRoot || c.effectiveHubUrl))}</p>` : ''}
-    <div id="rmHubConnectionError">${error ? `<div class="rm-error" role="status">${esc(error)}</div>${rmConnectionHelpMarkup(active, hub)}` : ''}</div>`;
+    <div id="rmHubConnectionError">${error ? `<div class="rm-error" role="status">${esc(error)}</div>` : ''}${issue ? rmConnectionHelpMarkup(active, hub) : ''}</div>`;
 }
 
 function rmConnectionHelpMarkup(mode, hub) {
   if (mode === 'direct') return '<button class="rm-link" data-act="rmDirectTutorial">检查局域网 / VPN 与直连设置</button><a class="rm-link" href="#settings">查看运行日志</a>';
   const code = hub?.errorCode || '', state = hub?.state || '';
   if (state === 'source_unauthorized' || /api_credentials|api_enrollment|source_/.test(code)) return '<a class="rm-link" href="#accounts">检查 API 与站点授权</a>';
-  if (mode === 'hub' && (['device_auth_required', 'invalid_key'].includes(state) || /device_|enrollment_|hub_identity_changed/.test(code))) return '<button class="rm-link" data-act="rmShowRecovery" data-section="enrollment">检查电脑登记</button>';
+  if (mode === 'hub' && rmNeedsEnrollment(hub)) return '<button class="rm-link" data-act="rmShowRecovery" data-section="enrollment">检查电脑登记</button>';
   if (mode === 'bot') return '<button class="rm-link" data-act="rmShowRecovery" data-section="bot">检查 Bot 地址与绑定</button>';
   return '<a class="rm-link" href="#settings">查看运行日志</a>';
 }
@@ -121,6 +127,14 @@ function renderRemoteStationPanel(_view, _st, c, linked) {
     <div class="rm-mode-actions"><button class="btn primary" data-act="rmConnect">${collapse ? '连接其他站点' : '验证并连接'}</button></div><div id="rmConnectError" aria-live="polite">${recovery}</div>${collapse ? '</details>' : ''}</section>`;
 }
 
+function rmHubPhoneQRMarkup(st = S.state || {}) {
+  const c = st.config || {}, hub = rmScopedHubStatus(st);
+  const connected = rmEffectiveMode(c) === 'hub' && c.loggedIn && hub.state === 'connected';
+  if (connected && S.pairQR && S.pairExpires > Date.now()) return `<img src="${esc(S.pairQR)}" alt="手机绑定二维码"><span class="rm-timer" id="rmTimer"></span>`;
+  if (hub.pairing?.paired === true) return '';
+  return `<button class="btn primary sm" data-act="rmShowQR" ${connected && !RM.connectionAction ? '' : 'disabled'}>${icon('scan')}扫码绑定手机</button>${connected ? '' : '<span>电脑连接成功后可扫码</span>'}`;
+}
+
 function rmPhoneBindingMarkup(st = S.state || {}) {
   const c = st.config || {}, hub = rmScopedHubStatus(st), active = rmEffectiveMode(c), mode = active, d = RM.direct || {};
   if (active === 'none') return '<p class="rm-recovery-note">尚未启用远程。已保存的手机配对会保留，启用连接后可查看或管理绑定。</p>';
@@ -130,9 +144,10 @@ function rmPhoneBindingMarkup(st = S.state || {}) {
     return `<p class="rm-binding-state"><span class="rm-dot ${enabled && d.connected ? 'ok' : paired ? 'wait' : ''}"></span><strong>${enabled && d.connected ? '手机已连接' : paired ? '已配对' : '尚未绑定手机'}</strong></p>${qrLive ? `<div class="rm-direct-qr"><img src="${esc(d.qrDataURL)}" alt="直连配对二维码"><span>用手机「我的电脑」扫码，核对并确认连接。<br>有效至 ${esc(new Date(Number(d.expiresAt)).toLocaleTimeString())}</span></div>` : `<p class="rm-recovery-note">${paired ? '这台电脑保留一个直连手机配对。' : '用手机扫描配对二维码，核对并确认授权。'}</p>`}${paired ? `<button class="rm-link bad" data-act="rmDirectRevoke" ${RM.connectionAction ? 'disabled' : ''}>撤销手机配对</button>` : !qrLive ? `<button class="btn primary sm" data-act="rmDirectQR" ${RM.connectionAction ? 'disabled' : ''}>生成配对二维码</button>` : ''}`;
   }
   if (mode === 'bot') return `<p class="rm-recovery-note">在手机「我的电脑」导入同一份 Bot 绑定信息。电脑列表由该 Bot 的授权范围决定。</p><button class="rm-help-link" data-act="rmBotTutorial">查看手机绑定说明</button>`;
-  const linked = active === 'hub' && c.loggedIn, connected = linked && hub.state === 'connected', paired = linked && hub.pairing?.paired;
+  const linked = active === 'hub' && c.loggedIn, connected = linked && hub.state === 'connected', paired = linked && hub.pairing?.paired === true;
+  const unpaired = linked && hub.pairing?.paired === false;
   const qrLive = connected && S.pairQR && S.pairExpires > Date.now();
-  return `<p class="rm-binding-state"><span class="rm-dot ${paired ? 'ok' : ''}"></span><strong>${paired ? '手机已绑定' : '尚未绑定手机'}</strong></p><div class="rm-qr ${qrLive ? 'live' : ''}" id="pairQR" ${paired && !qrLive ? 'hidden' : ''}>${qrLive ? `<img src="${esc(S.pairQR)}" alt="手机绑定二维码"><span class="rm-timer" id="rmTimer"></span>` : !connected ? '<span>连接中转站后可扫码绑定</span>' : paired ? '' : `<button class="btn primary sm" data-act="rmShowQR">${icon('scan')}显示绑定二维码</button>`}</div><p class="rm-recovery-note">${paired ? '手机已获授权，可使用这台电脑上的 Agent。更换手机前请先解除绑定。' : '手机打开「编程 → 我的电脑」，扫码并确认授权。二维码仅使用一次。'}</p>${paired ? `<button class="rm-link bad" id="rmPairRevoke" data-act="pairRevoke" ${connected && !RM.connectionAction ? '' : 'disabled'}>解除手机绑定</button>` : ''}`;
+  return `<p class="rm-binding-state"><span class="rm-dot ${paired ? 'ok' : ''}"></span><strong>${paired ? '手机已绑定' : unpaired ? '需要扫码绑定手机' : '手机绑定待确认'}</strong></p><div class="rm-qr ${qrLive ? 'live' : ''}" id="pairQR" ${paired && !qrLive ? 'hidden' : ''}>${rmHubPhoneQRMarkup(st)}</div><p class="rm-recovery-note">${paired ? '手机已获授权，可使用这台电脑上的 Agent。更换手机前请先解除绑定。' : unpaired ? `${connected ? '' : rmNeedsEnrollment(hub) ? '先完成电脑登记并等待连接成功。' : '先完成电脑连接。'}中转站尚未确认手机绑定；如果这部手机以前连接过，请重新扫码。手机打开「编程 → 我的电脑」，扫码并确认授权。` : '连接中转站后核对手机绑定状态；需要绑定时，请在手机「编程 → 我的电脑」扫码。'}</p>${paired ? `<button class="rm-link bad" id="rmPairRevoke" data-act="pairRevoke" ${connected && !RM.connectionAction ? '' : 'disabled'}>解除手机绑定</button>` : ''}`;
 }
 
 function renderRemoteAdvanced(st) {

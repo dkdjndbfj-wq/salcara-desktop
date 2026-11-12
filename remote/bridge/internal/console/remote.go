@@ -76,7 +76,9 @@ func (s *Server) handleRemoteDiscover(w http.ResponseWriter, r *http.Request) {
 	s.remoteModeMu.Lock()
 	modeSequence := s.remoteModeSeq
 	s.remoteModeMu.Unlock()
-	ctx, cancel := ctxTimeout(r, 10*time.Second)
+	// Discovery includes the public ping, signed identity exchange and policy
+	// lookup. Keep their bounded network budgets usable on a cold connection.
+	ctx, cancel := ctxTimeout(r, 25*time.Second)
 	defer cancel()
 	// Only an explicit connect operation may use the freshly supplied claim.
 	discoveryClaim := ""

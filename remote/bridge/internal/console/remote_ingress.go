@@ -49,7 +49,7 @@ func (s *Server) handleRemoteIngress(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 409, "原连接尚未确认服务身份，请先检查原连接")
 		return
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), 8*time.Second)
+	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
 	defer cancel()
 	var manifest hubingress.Manifest
 	if s.d.Hub != nil {

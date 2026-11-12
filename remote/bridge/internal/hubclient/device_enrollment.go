@@ -62,12 +62,12 @@ func CheckDeviceEnrollment(info Discovery, account config.LocalAccount) error {
 	return err
 }
 
-func enrollmentHTTP(info Discovery, method, path string, body any) (*http.Request, *http.Client, error) {
+func enrollmentHTTP(ctx context.Context, info Discovery, method, path string, body any) (*http.Request, *http.Client, error) {
 	raw, err := json.Marshal(body)
 	if err != nil {
 		return nil, nil, err
 	}
-	req, err := http.NewRequest(method, info.HubURL+"/v1"+path, bytes.NewReader(raw))
+	req, err := http.NewRequestWithContext(ctx, method, info.HubURL+"/v1"+path, bytes.NewReader(raw))
 	if err != nil {
 		return nil, nil, enrollmentError(400, "invalid_request")
 	}
@@ -77,7 +77,7 @@ func enrollmentHTTP(info Discovery, method, path string, body any) (*http.Reques
 	if info.Identity != nil {
 		req = hubingress.BindIdentity(req, info.Identity.HubInstanceID, info.Identity.IdentityPublicKey, info.HubURL+"/v1")
 	}
-	return req, &http.Client{Transport: hubingress.New(nil, ""), Timeout: 8 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}, nil
+	return req, &http.Client{Transport: hubingress.New(nil, ""), Timeout: hubAuthenticatedRequestTimeout, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}, nil
 }
 
 // AcquireDeviceEnrollmentGrant keeps the API key on its exact HTTPS issuer
@@ -96,11 +96,11 @@ func AcquireDeviceEnrollmentGrant(ctx context.Context, info Discovery, account c
 	hash := sha256.Sum256([]byte(secret))
 	expected := enrollment.Challenge{Purpose: enrollment.ChallengePurpose, Version: 1, Issuer: issuer.ID, HubInstanceID: info.Identity.HubInstanceID, Audience: info.DeviceEnrollment.Audience, APIBase: base, PolicyRevision: info.DeviceEnrollment.PolicyRevision, DeviceID: deviceID, DeviceSecretHash: hex.EncodeToString(hash[:]), RequestID: requestID}
 	request := map[string]any{"version": 1, "issuer": issuer.ID, "apiBase": base, "deviceId": deviceID, "deviceSecretHash": expected.DeviceSecretHash, "requestId": requestID}
-	req, client, err := enrollmentHTTP(info, http.MethodPost, "/device/enrollment/challenge", request)
+	req, client, err := enrollmentHTTP(ctx, info, http.MethodPost, "/device/enrollment/challenge", request)
 	if err != nil {
 		return "", err
 	}
-	challengeEnvelope, err := readEnrollmentEnvelope(ctx, client, req)
+	challengeEnvelope, err := readEnrollmentEnvelope(client, req)
 	if err != nil {
 		return "", err
 	}
@@ -121,7 +121,7 @@ func AcquireDeviceEnrollmentGrant(ctx context.Context, info Discovery, account c
 		return "", err
 	}
 	body, _ := json.Marshal(map[string]any{"version": 1, "challenge": challengeEnvelope, "credential": map[string]string{"type": "api_key", "value": account.Key}})
-	req, err = http.NewRequest(http.MethodPost, issuer.EnrollmentURL, bytes.NewReader(body))
+	req, err = http.NewRequestWithContext(ctx, http.MethodPost, issuer.EnrollmentURL, bytes.NewReader(body))
 	if err != nil {
 		return "", enrollmentError(400, "invalid_request")
 	}
@@ -129,7 +129,7 @@ func AcquireDeviceEnrollmentGrant(ctx context.Context, info Discovery, account c
 	req.Header.Set("Accept", "application/json")
 	// Direct transport deliberately has no Hub routing or authentication state.
 	client = &http.Client{Timeout: 8 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-	grantEnvelope, err := readEnrollmentEnvelope(ctx, client, req)
+	grantEnvelope, err := readEnrollmentEnvelope(client, req)
 	if err != nil {
 		return "", err
 	}
@@ -158,8 +158,8 @@ func AcquireDeviceEnrollmentGrant(ctx context.Context, info Discovery, account c
 	return header, nil
 }
 
-func readEnrollmentEnvelope(ctx context.Context, client *http.Client, req *http.Request) (enrollment.Envelope, error) {
-	resp, err := client.Do(req.WithContext(ctx))
+func readEnrollmentEnvelope(client *http.Client, req *http.Request) (enrollment.Envelope, error) {
+	resp, err := client.Do(req)
 	if err != nil {
 		return enrollment.Envelope{}, enrollmentError(503, "api_verifier_unavailable")
 	}
@@ -181,10 +181,13 @@ func readEnrollmentEnvelope(ctx context.Context, client *http.Client, req *http.
 // RegisterRemoteDevice sends a single mutation. A transport error leaves the
 // outcome unknown; callers must check these same credentials before any retry.
 func RegisterRemoteDevice(ctx context.Context, info Discovery, device protocol.Device, secret, grant string) error {
+	if ctx.Err() != nil {
+		return enrollmentError(409, "enrollment_not_sent")
+	}
 	if device.DeviceID == "" || secret == "" || len(grant) > enrollment.MaxHeaderBytes {
 		return enrollmentError(400, "invalid_request")
 	}
-	req, client, err := enrollmentHTTP(info, http.MethodPost, "/device/register", device)
+	req, client, err := enrollmentHTTP(ctx, info, http.MethodPost, "/device/register", device)
 	if err != nil {
 		return err
 	}
@@ -193,8 +196,11 @@ func RegisterRemoteDevice(ctx context.Context, info Discovery, device protocol.D
 	if grant != "" {
 		req.Header.Set("X-Salcara-Enrollment-Grant", grant)
 	}
-	resp, err := client.Do(req.WithContext(ctx))
+	resp, err := client.Do(req)
 	if err != nil {
+		if hubingress.RequestWasNotSent(err) {
+			return enrollmentError(409, "enrollment_not_sent")
+		}
 		return enrollmentError(409, "enrollment_result_unknown")
 	}
 	defer resp.Body.Close()

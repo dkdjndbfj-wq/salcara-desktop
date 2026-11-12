@@ -55,6 +55,13 @@ func (c *Client) tryPhoneRevoke(ctx context.Context, item config.PendingPhoneRev
 // Keep each pass short and rotate unreachable entries to the tail. One offline
 // station must not starve another station's cleanup, or block pairing/commands.
 func (c *Client) retryPhoneRevokes(ctx context.Context) {
+	c.retryPhoneRevokesBudget(ctx, 3*time.Second, time.Second)
+}
+
+// Background cleanup must allow identity verification on a normal WAN. Keep
+// the synchronous UI pass short; both passes share the same durable queue and
+// nonblocking lock, and only exact old binding generations can be retried.
+func (c *Client) retryPhoneRevokesBudget(ctx context.Context, passBudget, requestBudget time.Duration) {
 	if !c.revokeCleanupMu.TryLock() {
 		return
 	}
@@ -64,7 +71,7 @@ func (c *Client) retryPhoneRevokes(ctx context.Context) {
 	if err := c.o.Store.RetryPhoneRevocationPersistence(); err != nil {
 		c.log.Printf("hub: phone revocation persistence is still pending")
 	}
-	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, passBudget)
 	defer cancel()
 	items := c.o.Store.Get().PendingPhoneRevokes
 	if len(items) > 8 {
@@ -74,7 +81,7 @@ func (c *Client) retryPhoneRevokes(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
-		rctx, rcancel := context.WithTimeout(ctx, time.Second)
+		rctx, rcancel := context.WithTimeout(ctx, requestBudget)
 		resolved := c.tryPhoneRevoke(rctx, item)
 		rcancel()
 		// Do not remove a newer entry that was appended during the request.
@@ -99,7 +106,7 @@ func (c *Client) retryPhoneRevokes(ctx context.Context) {
 func (c *Client) phoneRevokeLoop(ctx context.Context) {
 	delay := time.Minute
 	for ctx.Err() == nil {
-		c.retryPhoneRevokes(ctx)
+		c.retryPhoneRevokesBudget(ctx, hubConnectionProbeTimeout, hubAuthenticatedRequestTimeout)
 		var timer *time.Timer
 		var tick <-chan time.Time
 		if len(c.o.Store.Get().PendingPhoneRevokes) > 0 || c.o.Store.PhoneRevocationPending() {

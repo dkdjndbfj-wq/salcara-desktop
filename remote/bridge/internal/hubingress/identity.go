@@ -49,6 +49,8 @@ func (t *Transport) ResolveIdentity(ctx context.Context, apiURL string) (Manifes
 	if endpoint == "" {
 		return Manifest{}, errors.New("ingress_invalid_endpoint")
 	}
+	ctx, cancel := context.WithTimeout(ctx, identityResolutionTimeout)
+	defer cancel()
 	var wire Manifest
 	if err := t.readJSON(ctx, endpoint+"/ingress/manifest", &wire); err != nil {
 		return Manifest{}, err
@@ -248,11 +250,18 @@ func (t *Transport) pinnedCandidates(ctx context.Context, canonical string, pin 
 			// manifest. Rotate failed batches so they cannot starve its tail.
 			address := unique[(offset+attempted)%len(unique)]
 			attempted++
-			probeCtx, cancel := context.WithTimeout(ctx, time.Second)
+			probeCtx, cancel := context.WithTimeout(ctx, identityProbeTimeout)
 			var wire Manifest
 			err := t.readJSON(probeCtx, address+"/ingress/manifest", &wire)
 			cancel()
 			if err != nil {
+				if ctx.Err() != nil {
+					// This address only received the flight's remaining budget.
+					// Resume here next time instead of repeatedly starving it at
+					// the tail of the same rotation with a partial probe window.
+					attempted--
+					break
+				}
 				continue
 			}
 			m, err := verifiedManifest(wire, pin.id, pin.key, address, time.Now())
@@ -273,6 +282,9 @@ func (t *Transport) pinnedCandidates(ctx context.Context, canonical string, pin 
 		e.identityChanged = identityChanged && refreshed.HubInstanceID == ""
 		if refreshed.HubInstanceID != "" && ctx.Err() == nil {
 			e.refreshOffset = 0
+			if e.manifest.HubInstanceID != refreshed.HubInstanceID || e.manifest.IdentityPublicKey != refreshed.IdentityPublicKey || !manifestContains(refreshed, e.proofNext) {
+				e.proofNext = ""
+			}
 			e.manifest, e.refreshAt = refreshed, time.Now().Add(time.Hour)
 			if expires := time.UnixMilli(refreshed.ExpiresAt); expires.Before(e.refreshAt) {
 				e.refreshAt = expires
@@ -306,6 +318,9 @@ func pinnedSnapshot(e *entry, pin identityBinding) (Manifest, []Endpoint) {
 	if err != nil {
 		return Manifest{}, nil
 	}
+	if !manifestContains(stored, e.proofNext) {
+		e.proofNext = ""
+	}
 	list := append([]Endpoint(nil), stored.Endpoints...)
 	sort.SliceStable(list, func(i, j int) bool {
 		left, right := now.Before(e.failed[list[i].URL]), now.Before(e.failed[list[j].URL])
@@ -320,6 +335,15 @@ func pinnedSnapshot(e *entry, pin identityBinding) (Manifest, []Endpoint) {
 		}
 		return list[i].Priority < list[j].Priority
 	})
+	// A reconnect may outlive all short failure marks. Retain proof progress
+	// independently so slow early members cannot starve the rest of the list.
+	// Only the already verified manifest's members are eligible for rotation.
+	for index, candidate := range list {
+		if candidate.URL == e.proofNext {
+			list = append(list[index:], list[:index]...)
+			break
+		}
+	}
 	return stored, list
 }
 
@@ -336,7 +360,7 @@ func (t *Transport) ResolvePinnedIdentity(ctx context.Context, canonical, id, ke
 	if canonical == "" || pin.endpoint == "" || !validHex(id, 16) || err != nil || len(publicKey) != ed25519.PublicKeySize {
 		return Manifest{}, "", errors.New("ingress_invalid_identity_binding")
 	}
-	ctx, cancel := context.WithTimeout(ctx, 6*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, identityResolutionTimeout)
 	defer cancel()
 	e := t.acquireState(canonical)
 	if e == nil {
@@ -344,13 +368,15 @@ func (t *Transport) ResolvePinnedIdentity(ctx context.Context, canonical, id, ke
 	}
 	defer t.releaseState(e)
 	m, candidates := t.pinnedCandidates(ctx, canonical, pin, e)
-	for _, candidate := range candidates {
+	for index, candidate := range candidates {
 		if ctx.Err() != nil {
 			break
 		}
-		if t.verifyPinned(ctx, m, candidate.URL) != nil {
-			t.failed(e, candidate.URL)
+		if t.verifyPinnedCandidate(ctx, m, e, candidates, index) != nil {
 			continue
+		}
+		if ctx.Err() != nil {
+			break
 		}
 		t.succeeded(e, candidate.URL)
 		return m, candidate.URL, nil
@@ -367,7 +393,7 @@ func (t *Transport) VerifyPinnedEndpoint(ctx context.Context, canonical, id, key
 	if canonical == "" || endpoint == "" || !validHex(id, 16) || err != nil || len(publicKey) != ed25519.PublicKeySize {
 		return Manifest{}, errors.New("ingress_invalid_identity_binding")
 	}
-	ctx, cancel := context.WithTimeout(ctx, 6*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, identityResolutionTimeout)
 	defer cancel()
 	e := t.acquireState(canonical)
 	if e == nil {
@@ -394,7 +420,7 @@ func (t *Transport) VerifyPinnedEndpoint(ctx context.Context, canonical, id, key
 		hint, hintErr := verifiedManifestEnvelope(e.manifest, id, key, "", time.Now(), true)
 		e.mu.Unlock()
 
-		probeCtx, probeCancel := context.WithTimeout(ctx, time.Second)
+		probeCtx, probeCancel := context.WithTimeout(ctx, identityProbeTimeout)
 		var wire Manifest
 		err := t.readJSON(probeCtx, endpoint+"/ingress/manifest", &wire)
 		probeCancel()
@@ -417,6 +443,7 @@ func (t *Transport) VerifyPinnedEndpoint(ctx context.Context, canonical, id, key
 		e.mu.Lock()
 		if err == nil {
 			e.manifest, e.lastEndpoint, e.refreshPin = m, endpoint, id+":"+key
+			e.proofNext = ""
 			e.identityChanged, e.refreshOffset = false, 0
 			e.refreshAt = time.Now().Add(time.Hour)
 			if expires := time.UnixMilli(m.ExpiresAt); expires.Before(e.refreshAt) {
@@ -450,9 +477,34 @@ func pinnedUnavailable(e *entry, pin identityBinding) error {
 }
 
 func (t *Transport) verifyPinned(ctx context.Context, m Manifest, endpoint string) error {
-	probeCtx, cancel := context.WithTimeout(ctx, time.Second)
+	probeCtx, cancel := context.WithTimeout(ctx, identityProbeTimeout)
 	defer cancel()
 	return t.verify(probeCtx, m, endpoint)
+}
+
+func (t *Transport) verifyPinnedCandidate(ctx context.Context, m Manifest, e *entry, candidates []Endpoint, index int) error {
+	endpoint := candidates[index].URL
+	err := t.verifyPinned(ctx, m, endpoint)
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if err != nil {
+		e.failed[endpoint] = time.Now().Add(30 * time.Second)
+	}
+	// An in-flight result from an older manifest cannot rewrite newer progress.
+	// Concurrent older probes also cannot move an already advanced cursor back.
+	if e.manifest.SignedPayload != m.SignedPayload || e.proofNext != "" && e.proofNext != endpoint {
+		return err
+	}
+	if err == nil {
+		e.proofNext = ""
+	} else if ctx.Err() != nil {
+		// The final candidate had only the flight's residual budget. Give it
+		// the first full probe window next time, even after a long reconnect.
+		e.proofNext = endpoint
+	} else {
+		e.proofNext = candidates[(index+1)%len(candidates)].URL
+	}
+	return err
 }
 
 func (t *Transport) succeeded(e *entry, endpoint string) {
@@ -470,28 +522,31 @@ func (t *Transport) roundTripPinned(req *http.Request, pin identityBinding) (*ht
 		if req.Body != nil {
 			req.Body.Close()
 		}
-		return nil, errors.New("ingress_invalid_identity_binding")
+		return nil, &requestNotSentError{cause: errors.New("ingress_invalid_identity_binding")}
 	}
 	e := t.acquireState(canonical)
 	if e == nil {
 		if req.Body != nil {
 			req.Body.Close()
 		}
-		return nil, errors.New("ingress_busy")
+		return nil, &requestNotSentError{cause: errors.New("ingress_busy")}
 	}
 	defer t.releaseState(e)
-	ctx, cancel := context.WithTimeout(req.Context(), 6*time.Second)
+	ctx, cancel := context.WithTimeout(req.Context(), identityResolutionTimeout)
 	defer cancel()
 	m, candidates := t.pinnedCandidates(ctx, canonical, pin, e)
-	for _, endpoint := range candidates {
+	sent := false
+	for index, endpoint := range candidates {
 		// This includes the canonical URL: TLS alone cannot preserve an older
 		// device identity after that hostname's Hub registry has been reset.
 		if ctx.Err() != nil {
 			break
 		}
-		if t.verifyPinned(ctx, m, endpoint.URL) != nil {
-			t.failed(e, endpoint.URL)
+		if t.verifyPinnedCandidate(ctx, m, e, candidates, index) != nil {
 			continue
+		}
+		if ctx.Err() != nil || req.Context().Err() != nil {
+			break
 		}
 		next := req.Clone(req.Context())
 		target, _ := url.Parse(endpoint.URL)
@@ -501,6 +556,7 @@ func (t *Transport) roundTripPinned(req *http.Request, pin identityBinding) (*ht
 		if req.Method != http.MethodGet && req.Method != http.MethodHead {
 			next.GetBody = nil
 		}
+		sent = true
 		resp, err := t.base.RoundTrip(next)
 		failed := err != nil || resp != nil && (resp.StatusCode == 502 || resp.StatusCode == 503 || resp.StatusCode == 504)
 		if failed {
@@ -514,10 +570,17 @@ func (t *Transport) roundTripPinned(req *http.Request, pin identityBinding) (*ht
 			}
 			continue
 		}
+		if err != nil {
+			err = &requestDispatchedError{cause: err}
+		}
 		return resp, err
 	}
 	if req.Body != nil {
 		req.Body.Close()
 	}
-	return nil, pinnedUnavailable(e, pin)
+	err = pinnedUnavailable(e, pin)
+	if !sent {
+		return nil, &requestNotSentError{cause: err}
+	}
+	return nil, &requestDispatchedError{cause: err}
 }

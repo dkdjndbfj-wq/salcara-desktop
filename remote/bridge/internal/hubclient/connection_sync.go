@@ -123,7 +123,8 @@ func (c *Client) syncPhoneConnection(ctx context.Context, base config.Config, st
 	if !exists || saved.DeviceSecret != station.DeviceSecret || !phoneMatches(current, base.PhoneBindingID, base.PhoneHash) || config.RemoteIdentity(current) != config.RemoteIdentity(base) {
 		return "", errors.New("电脑连接已变化，请重试")
 	}
-	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	// The outer 17s synchronization pass still bounds phoneMu ownership.
+	ctx, cancel := context.WithTimeout(ctx, hubAuthenticatedRequestTimeout)
 	defer cancel()
 	// Never forward the saved device secret through a redirect, even if a
 	// caller supplied an HTTP client with permissive defaults.

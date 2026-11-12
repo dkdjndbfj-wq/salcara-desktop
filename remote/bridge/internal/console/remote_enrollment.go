@@ -29,6 +29,31 @@ func enrollmentSourceProof(account config.LocalAccount, secret string) string {
 	return hex.EncodeToString(mac.Sum(nil))
 }
 
+// Only a fresh attempt whose transport proved non-delivery may be reopened.
+// Caller cancellation is intentionally irrelevant to this exact-state cleanup;
+// source/connection changes and earlier uncertain submissions still fence it.
+func clearUnsentEnrollmentAttempt(c *config.Config, before config.Config, accountID string, sourceRevision *string, attempt config.RemoteEnrollmentAttempt) error {
+	account, ok := c.LocalAccount(accountID)
+	if attempt.Submitted || !ok || attempt.AccountID != accountID || attempt.SourceProof == "" ||
+		checkLocalSourceRevision(*c, account, sourceRevision) != nil ||
+		c.RemoteConnectionEpoch != before.RemoteConnectionEpoch || c.GatewayRuntimeKey != before.GatewayRuntimeKey || config.RemoteIdentity(*c) != config.RemoteIdentity(before) ||
+		enrollmentSourceProof(account, attempt.Connection.DeviceSecret) != attempt.SourceProof {
+		return errLocalSourceChanged
+	}
+	for i := range c.RemoteEnrollmentAttempts {
+		pending := &c.RemoteEnrollmentAttempts[i]
+		left, right := pending.Connection, attempt.Connection
+		if pending.RequestID != attempt.RequestID || pending.AccountID != accountID || pending.SourceProof != attempt.SourceProof ||
+			left.HubURL != right.HubURL || left.DeviceID != right.DeviceID || left.DeviceSecret != right.DeviceSecret ||
+			left.HubInstanceID != right.HubInstanceID || left.IdentityPublicKey != right.IdentityPublicKey || left.IngressURL != right.IngressURL {
+			continue
+		}
+		pending.Submitted = false
+		return nil
+	}
+	return errLocalSourceChanged
+}
+
 func (s *Server) handleRemoteAccountDiscover(w http.ResponseWriter, r *http.Request, in remoteDiscoverInput) {
 	if !s.remoteEnrollmentMu.TryLock() {
 		writeRemoteDiscoveryError(w, 409, "enrollment_in_progress", errors.New("正在检查电脑登记，请等待当前检查结束"), hubclient.Discovery{})
@@ -60,15 +85,18 @@ func (s *Server) handleRemoteAccountDiscover(w http.ResponseWriter, r *http.Requ
 	s.remoteModeMu.Unlock()
 	ctx, cancel := context.WithTimeout(r.Context(), 35*time.Second)
 	defer cancel()
+	sourceValid := func(c config.Config) error {
+		current, ok := c.LocalAccount(in.AccountID)
+		if !ok || checkLocalSourceRevision(c, current, in.ExpectedSourceRevision) != nil || c.RemoteConnectionEpoch != before.RemoteConnectionEpoch || c.GatewayRuntimeKey != before.GatewayRuntimeKey || config.RemoteIdentity(c) != config.RemoteIdentity(before) {
+			return errLocalSourceChanged
+		}
+		return nil
+	}
 	valid := func(c config.Config) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		current, ok := c.LocalAccount(in.AccountID)
-		if !ok || checkLocalSourceRevision(c, current, in.ExpectedSourceRevision) != nil || c.RemoteConnectionEpoch != before.RemoteConnectionEpoch || c.GatewayRuntimeKey != before.GatewayRuntimeKey {
-			return errLocalSourceChanged
-		}
-		return nil
+		return sourceValid(c)
 	}
 	current := func() error { return valid(s.d.Store.Get()) }
 	fail := func(err error, info hubclient.Discovery) {
@@ -79,7 +107,7 @@ func (s *Server) handleRemoteAccountDiscover(w http.ResponseWriter, r *http.Requ
 		}
 		if errors.Is(err, hubclient.ErrHubIdentityChanged) {
 			status, code = 409, "hub_identity_changed"
-		} else if errors.Is(err, errLocalSourceChanged) || ctx.Err() != nil {
+		} else if errors.Is(err, errLocalSourceChanged) || sourceValid(s.d.Store.Get()) != nil {
 			status, code = 409, "source_changed"
 		}
 		writeRemoteDiscoveryError(w, status, code, err, info)
@@ -244,7 +272,20 @@ func (s *Server) handleRemoteAccountDiscover(w http.ResponseWriter, r *http.Requ
 					if err == nil {
 						err = hubclient.RegisterRemoteDevice(ctx, info, device, attempt.Connection.DeviceSecret, grant)
 						var remote *hubclient.RemoteHTTPError
-						if !retryAuthorized && errors.As(err, &remote) && remote.StatusCode >= 400 && remote.StatusCode < 500 && remote.Code != "enrollment_result_unknown" {
+						if retryAuthorized && hubclient.RemoteErrorCode(err) == "enrollment_not_sent" {
+							// This attempt also represents an earlier uncertain write.
+							// Non-delivery of the latest retry cannot clear that fact.
+							err = &hubclient.RemoteHTTPError{StatusCode: 409, Code: "enrollment_result_unknown"}
+						} else if !retryAuthorized && hubclient.RemoteErrorCode(err) == "enrollment_not_sent" {
+							// The transport proved no device mutation crossed its
+							// boundary. Caller expiry must not strand a fresh attempt;
+							// exact identity/source CAS still fences newer state.
+							if clearErr := s.d.Store.Update(func(c *config.Config) error {
+								return clearUnsentEnrollmentAttempt(c, before, in.AccountID, in.ExpectedSourceRevision, attempt)
+							}); clearErr != nil {
+								err = clearErr
+							}
+						} else if !retryAuthorized && errors.As(err, &remote) && remote.StatusCode >= 400 && remote.StatusCode < 500 && remote.Code != "enrollment_result_unknown" {
 							// A definitive refusal permits another explicit check with
 							// this same device. Unknown writes stay submitted.
 							_ = s.d.Store.Update(func(c *config.Config) error {

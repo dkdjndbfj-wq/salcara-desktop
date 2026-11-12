@@ -168,7 +168,7 @@ func (c *Client) verifyStationSwitch(ctx context.Context, target config.RemoteCo
 	if config.NormalizeHubURL(target.HubURL) == "" || target.DeviceID == "" || target.DeviceSecret == "" {
 		return config.Config{}, errors.New("目标中转站连接记录不完整，请重新绑定")
 	}
-	probeCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
+	probeCtx, cancel := context.WithTimeout(ctx, hubConnectionProbeTimeout)
 	defer cancel()
 	discovery, err := c.DiscoverForConnection(probeCtx, c.o.Store.Get(), target)
 	if err != nil {
@@ -231,9 +231,40 @@ func (c *Client) switchStation(ctx context.Context, in stationSwitchCommand) (ma
 	return c.switchStationMode(ctx, in, false)
 }
 
+type stationSwitchGuardKey struct{}
+
+func (c *Client) validateStationSwitchAdmission(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	c.expireUpdateLocked()
+	if c.updatePrepared {
+		return errors.New("程序正在更新，请稍后重试")
+	}
+	if err := c.validateCommandGuard(ctx, "remote.station.switch"); err != nil {
+		return err
+	}
+	cfg := c.o.Store.Get()
+	if err := validateRemoteSettingsEpoch(ctx, "remote.station.switch", cfg); err != nil {
+		return err
+	}
+	if guard, ok := ctx.Value(stationSwitchGuardKey{}).(func(config.Config) bool); ok && !guard(cfg) {
+		return errors.New("备用控制授权或连接已变化，请刷新后重试")
+	}
+	if env, ok := executionSourceFromContext(ctx); ok {
+		return c.validateExecutionSourceFor(env, cfg)
+	}
+	return nil
+}
+
 func (c *Client) switchStationMode(ctx context.Context, in stationSwitchCommand, transfer bool) (map[string]any, error) {
 	if c.o.Store == nil {
 		return nil, errors.New("程序还在启动，请稍后再试")
+	}
+	c.taskConfigMu.Lock()
+	defer c.taskConfigMu.Unlock()
+	if err := c.validateStationSwitchAdmission(ctx); err != nil {
+		return nil, err
 	}
 	current := c.o.Store.Get()
 	if !current.HubRemoteEnabled() || current.EffectiveRemoteMode() == "bot" {
@@ -322,58 +353,71 @@ func (c *Client) switchStationMode(ctx context.Context, in stationSwitchCommand,
 	if err := c.checkNativeStationIdle(ctx); err != nil {
 		return nil, err
 	}
-	next, err := c.verifyStationSwitch(ctx, target)
-	if err != nil {
-		return nil, err
-	}
-	// The target probe can take several seconds. Re-check immediately before
-	// the atomic write so a turn or recovery event that started during that
-	// probe cannot be stranded on A.
-	if !transfer && c.stationSwitchBusy() {
-		return nil, errors.New("当前站点还有未同步的会话进度，请稍后再切换中转站")
-	}
-	if err := c.checkNativeStationIdle(ctx); err != nil {
-		return nil, err
-	}
+	var next config.Config
 	selectedID := ""
 	selectedSnapshot := config.LocalAccount{}
-	if in.Agent != "" {
-		if in.AccountID != "" {
-			var found bool
-			selectedID, found = AccountForHandle(next, in.AccountID)
-			if !found {
-				return nil, errors.New("目标中转站上的 API 不在这台电脑，请刷新后重选")
-			}
-			selected, _ := next.LocalAccount(selectedID)
-			selectedSnapshot = selected
-			if !next.RemoteHubAllowsAccount(in.TargetHubURL, selected) {
-				return nil, errors.New("这个 API 尚未加入目标中转站，请在电脑端 API 设置中开启")
-			}
-			if next.RemoteExecutionArmed && !in.SourceOnly && (next.RemoteStationObservation == nil || !config.StationAllowsAccount(next.RemoteStationObservation.Station, selected)) {
-				return nil, errors.New("目标中转站不支持这个 API 或账号，请重新选择")
-			}
-			if strings.TrimSpace(in.Model) != "" {
-				if next.RemoteExecutionArmed {
-					// Handover must not spend/query B through A. The target station
-					// will authorize a real catalogue request after the commit.
-					if !config.ModelAllowed(selected, strings.TrimSpace(in.Model)) {
-						return nil, errors.New("目标账号不允许该模型")
-					}
-				} else if isOfficialModelAccount(selected) {
-					if err := validateOfficialModel(selected, in.Model); err != nil {
-						return nil, err
-					}
-				} else {
-					models, modelErr := c.verifiedAPIModels(ctx, selected, false)
-					if modelErr != nil {
-						return nil, modelErr
-					}
-					if !containsKey(models, strings.TrimSpace(in.Model)) {
-						return nil, errors.New("目标 API 不支持该模型，请刷新后重选")
+	// Keep queue/flush admission closed, but let source controls execute while
+	// validating the target and its catalogue. Reacquire even on cancellation.
+	err := func() error {
+		c.taskConfigMu.Unlock()
+		defer c.taskConfigMu.Lock()
+		var err error
+		next, err = c.verifyStationSwitch(ctx, target)
+		if err != nil {
+			return err
+		}
+		if in.Agent != "" {
+			if in.AccountID != "" {
+				var found bool
+				selectedID, found = AccountForHandle(next, in.AccountID)
+				if !found {
+					return errors.New("目标中转站上的 API 不在这台电脑，请刷新后重选")
+				}
+				selected, _ := next.LocalAccount(selectedID)
+				selectedSnapshot = selected
+				if !next.RemoteHubAllowsAccount(in.TargetHubURL, selected) {
+					return errors.New("这个 API 尚未加入目标中转站，请在电脑端 API 设置中开启")
+				}
+				if next.RemoteExecutionArmed && !in.SourceOnly && (next.RemoteStationObservation == nil || !config.StationAllowsAccount(next.RemoteStationObservation.Station, selected)) {
+					return errors.New("目标中转站不支持这个 API 或账号，请重新选择")
+				}
+				if strings.TrimSpace(in.Model) != "" {
+					if next.RemoteExecutionArmed {
+						// Handover must not spend/query B through A. The target station
+						// will authorize a real catalogue request after the commit.
+						if !config.ModelAllowed(selected, strings.TrimSpace(in.Model)) {
+							return errors.New("目标账号不允许该模型")
+						}
+					} else if isOfficialModelAccount(selected) {
+						if err := validateOfficialModel(selected, in.Model); err != nil {
+							return err
+						}
+					} else {
+						models, modelErr := c.verifiedAPIModels(ctx, selected, false)
+						if modelErr != nil {
+							return modelErr
+						}
+						if !containsKey(models, strings.TrimSpace(in.Model)) {
+							return errors.New("目标 API 不支持该模型，请刷新后重选")
+						}
 					}
 				}
 			}
 		}
+		return nil
+	}()
+	if err != nil {
+		return nil, err
+	}
+	if err := c.validateStationSwitchAdmission(ctx); err != nil {
+		return nil, err
+	}
+	latest := c.o.Store.Get()
+	if config.RemoteIdentity(latest) != config.RemoteIdentity(current) || latest.RemoteConnectionEpoch != current.RemoteConnectionEpoch {
+		return nil, errors.New("连接已变化，请刷新后重试")
+	}
+	if !transfer && c.stationSwitchBusy() {
+		return nil, errors.New("当前站点还有未同步的会话进度，请稍后再切换中转站")
 	}
 	// Probes/catalogue reads do not hold vendor state locks. A worker can
 	// become active without publishing its first progress event, so checking
@@ -390,25 +434,34 @@ func (c *Client) switchStationMode(ctx context.Context, in stationSwitchCommand,
 	identity := config.RemoteIdentity(current)
 	expectedBinding, expectedPhone := current.PhoneBindingID, current.PhoneHash
 	if err := c.commitStationSwitchMode(func(cfg *config.Config) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if guard, ok := ctx.Value(stationSwitchGuardKey{}).(func(config.Config) bool); ok && !guard(*cfg) {
+			return errors.New("备用控制授权或连接已变化，请刷新后重试")
+		}
 		if env, ok := executionSourceFromContext(ctx); ok {
 			if err := c.validateExecutionSourceFor(env, *cfg); err != nil {
 				return err
 			}
 		}
-		if config.RemoteIdentity(*cfg) != identity || cfg.RemoteConnectionEpoch != current.RemoteConnectionEpoch {
+		if config.RemoteIdentity(*cfg) != identity || cfg.RemoteConnectionEpoch != current.RemoteConnectionEpoch || cfg.ComputerID != current.ComputerID {
 			return errors.New("连接已变化，请刷新后重试")
 		}
-		if expectedBinding != "" && (cfg.PhoneBindingID != expectedBinding || cfg.PhoneHash != expectedPhone) {
+		if cfg.PhoneBindingID != expectedBinding || cfg.PhoneHash != expectedPhone {
 			return errors.New("手机绑定已更换，请重新扫码")
 		}
 		station, exists := cfg.SavedRemoteConnection(in.TargetHubURL, in.TargetDeviceID)
-		if !exists || station.DeviceSecret != target.DeviceSecret || station.HubInstanceID != target.HubInstanceID || station.IdentityPublicKey != target.IdentityPublicKey || station.IngressURL != target.IngressURL {
+		if !exists || station.DeviceSecret != target.DeviceSecret || station.BotGroupID != target.BotGroupID || station.HubInstanceID != target.HubInstanceID || station.IdentityPublicKey != target.IdentityPublicKey || station.IngressURL != target.IngressURL {
 			return errors.New("目标中转站连接记录已变化，请刷新")
 		}
 		if selectedID != "" {
 			latest, found := cfg.LocalAccount(selectedID)
 			if !found || catalogAccountFingerprint(latest) != catalogAccountFingerprint(selectedSnapshot) {
 				return errors.New("API 已更换，请刷新后重选")
+			}
+			if !cfg.RemoteHubAllowsAccount(in.TargetHubURL, latest) {
+				return errors.New("这个 API 尚未加入目标中转站，请在电脑端 API 设置中开启")
 			}
 		}
 		if in.SourceOnly && !stationSourceMatches(*cfg, family, in.AccountID) {

@@ -120,9 +120,15 @@ func (c *Client) Dispatch(ctx context.Context, cmd map[string]any) (result any, 
 		}
 		return c.syncPhoneConnections(ctx)
 	}
+	taskLocked := false
 	if typ == cooperationPrepareCommand || sessionManagementCommand(typ) || typ == "agents.api.set" || typ == "remote.station.switch" || typ == "remote.station.receipt" || typ == "session.start" || typ == "session.send" || typ == "session.continue" || typ == "session.steer" || typ == "session.interrupt" || typ == "desktop.session.send" || typ == "approval.respond" || typ == "desktop.approval.respond" || typ == "desktop.navigate" || typ == "attachment.put" || typ == "models.list" || typ == "features.list" || typ == "session.context" || typ == "session.compact" {
 		c.taskConfigMu.Lock()
-		defer c.taskConfigMu.Unlock()
+		taskLocked = true
+		defer func() {
+			if taskLocked {
+				c.taskConfigMu.Unlock()
+			}
+		}()
 		// Waiting for another task or API change does not extend this command's
 		// deadline. Reject it before binding authority or touching a worker.
 		if err := ctx.Err(); err != nil {
@@ -231,6 +237,10 @@ func (c *Client) Dispatch(ctx context.Context, cmd map[string]any) (result any, 
 		if err != nil {
 			return nil, err
 		}
+		// Handover owns its two lock phases and repeats admission checks. Its
+		// target network probe must not delay stop/approval on the source.
+		c.taskConfigMu.Unlock()
+		taskLocked = false
 		return c.switchStation(ctx, stationSwitchCommand{
 			TargetHubURL: str(cmd, "targetHubUrl"), TargetDeviceID: str(cmd, "targetDeviceId"), TargetComputerID: str(cmd, "targetComputerId"),
 			Agent: str(cmd, "agent"), AccountID: str(cmd, "accountId"), Model: model, SessionKey: str(cmd, "sessionKey"), OperationID: str(cmd, "operationId"),

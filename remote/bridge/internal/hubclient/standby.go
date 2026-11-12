@@ -34,7 +34,7 @@ func (c *Client) standbyLoop(ctx context.Context) {
 						return
 					}
 					defer func() { <-gate }()
-					poll, cancel := context.WithTimeout(ctx, 4*time.Second)
+					poll, cancel := context.WithTimeout(ctx, hubConnectionProbeTimeout)
 					defer cancel()
 					_ = c.pollStandby(poll, cfg, station)
 				}(station)
@@ -129,10 +129,15 @@ func (c *Client) executeStandby(base, station config.Config, env protocol.Comman
 		// Alternate polling must enforce the same contract as active SSE.
 	} else {
 		ctx = withExecutionSource(ctx, env)
+		ctx = context.WithValue(ctx, stationSwitchGuardKey{}, func(latest config.Config) bool {
+			return standbyEnvelopeCurrent(base, station, latest, env)
+		})
+	}
+	c.taskConfigMu.Unlock()
+	if err == nil {
 		result, err = c.switchStationMode(ctx, in, true)
 	}
 	committed := err == nil
-	c.taskConfigMu.Unlock()
 	reply := protocol.Reply{DeviceID: station.DeviceID, CommandID: env.CommandID, OK: err == nil, Result: result}
 	if err != nil {
 		reply.Error = err.Error()

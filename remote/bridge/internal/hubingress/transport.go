@@ -68,7 +68,8 @@ type entry struct {
 	lastEndpoint    string
 	identityChanged bool
 	refreshOffset   int
-	users           int // guarded by Transport.mu; prevents eviction during routing/refresh
+	proofNext       string // next signed member to prove; survives failure cooldowns
+	users           int    // guarded by Transport.mu; prevents eviction during routing/refresh
 }
 type Transport struct {
 	base    http.RoundTripper
@@ -78,11 +79,19 @@ type Transport struct {
 	entries map[string]*entry
 }
 
+// Identity checks are anonymous and precede credential delivery. Allow ordinary
+// multi-second WAN latency while bounding the entire discovery/recovery flight.
+// These limits do not extend the caller's deadline or the actual data request.
+const (
+	identityProbeTimeout      = 5 * time.Second
+	identityResolutionTimeout = 15 * time.Second
+)
+
 func New(base http.RoundTripper, dir string) *Transport {
 	if base == nil {
 		base = http.DefaultTransport
 	}
-	return &Transport{base: base, dir: dir, entries: map[string]*entry{}, client: &http.Client{Transport: base, Timeout: 3 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}}
+	return &Transport{base: base, dir: dir, entries: map[string]*entry{}, client: &http.Client{Transport: base, Timeout: identityProbeTimeout, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}}
 }
 func validHex(s string, bytes int) bool {
 	return len(s) == bytes*2 && strings.Trim(s, "0123456789abcdef") == ""
@@ -320,7 +329,7 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 		if req.Body != nil {
 			req.Body.Close()
 		}
-		return nil, err
+		return nil, &requestNotSentError{cause: err}
 	}
 	if pin, bound := req.Context().Value(identityKey{}).(identityBinding); bound {
 		return t.roundTripPinned(req, pin)
