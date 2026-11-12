@@ -40,12 +40,22 @@ function connectionFixture(mode = 'station') {
   const f = fixture();
   f.context.S.route = 'login';
   f.context.S.routeRevision = 1;
-  f.context.S.state = { config: { deviceId: 'test-device', loggedIn: false, effectiveHubUrl: 'https://old.test/salcara-hub', remoteConnections: [] }, hub: { state: 'not_logged_in' } };
+  f.context.S.state = { config: { deviceId: 'test-device', loggedIn: false, effectiveHubUrl: 'https://old.test/salcara-hub', remoteAgentSettingsScope: 'scope-original', remoteConnections: [] }, hub: { state: 'not_logged_in' } };
   vm.runInContext(`RM.remoteMode = ${JSON.stringify(mode)}`, f.context);
   f.node('rmStation').value = 'https://one.test';
   f.node('rmHub').value = '';
   f.node('rmEnrollmentClaim').value = 'a'.repeat(64);
   return f;
+}
+
+function registeredConnection(f, hubUrl = 'https://one.test/salcara-hub') {
+  const registration = { deviceId: f.context.S.state.config.deviceId, hubUrl };
+  f.context.loadState = async () => {
+    Object.assign(f.context.S.state.config, { ...registration, loggedIn: true, effectiveRemoteMode: 'hub', effectiveHubUrl: hubUrl, remoteAgentSettingsScope: 'scope-registered' });
+    f.context.S.state.hub = { ...registration, state: 'connecting' };
+    return f.context.S.state;
+  };
+  return { ok: true, registered: true, stage: 'waiting_online', registration };
 }
 
 function apiConnectionFixture() {
@@ -239,7 +249,7 @@ test('an opened remote API section reads only original agent configuration and r
   f.emit('toggle', section);
   const read = f.pending.find(call => call.path === '/api/remote/agents');
   assert.ok(read);
-  read.resolve({ agents: [{ id: 'codex', available: true, api: { source: 'phone', accountId: 'remote-api', model: 'm' } }], apis: [{ id: 'remote-api', name: 'Remote', models: ['m'] }, { id: 'denied', name: 'Denied', remoteEligibility: { supported: false, reason: 'external_api_not_allowed' } }] });
+  read.resolve({ settingsScope: 'scope-original', agents: [{ id: 'codex', available: true, api: { source: 'phone', accountId: 'remote-api', model: 'm' } }], apis: [{ id: 'remote-api', name: 'Remote', models: ['m'] }, { id: 'denied', name: 'Denied', remoteEligibility: { supported: false, reason: 'external_api_not_allowed' } }] });
   await new Promise(setImmediate);
   const html = f.node('rmAgents').innerHTML;
   for (const id of ['codex', 'claude', 'deepseek-harness', 'hermes']) {
@@ -261,6 +271,21 @@ test('late remote API section read cannot replace a newer page catalog or visibl
   await read;
   assert.equal(f.node('rmAgents').innerHTML, 'newer page');
   assert.equal(vm.runInContext('RM.agents.agents[0].id', f.context), 'newer');
+});
+
+test('remote API controls stay unavailable when either side has no settings scope', async () => {
+  for (const missing of ['state', 'catalog']) {
+    const f = switchFixture();
+    if (missing === 'state') delete f.context.S.state.config.remoteAgentSettingsScope;
+    const reading = f.context.rmLoadAgents();
+    f.pending[0].resolve({ settingsScope: missing === 'catalog' ? undefined : 'scope-original', agents: [], apis: [] });
+    await reading;
+    assert.match(f.node('rmAgents').innerHTML, /设置范围未确认/);
+    assert.doesNotMatch(f.node('rmAgents').innerHTML, /data-act="rmSaveApi"/);
+    await f.context.ACTIONS.rmSaveApi({ dataset: { agent: 'codex' } });
+    assert.equal(f.calls.length, 1);
+    assert.equal(f.notices.length, 0);
+  }
 });
 
 test('active Hub pairing actions still work while browsing Bot or direct without switching connection', async () => {
@@ -338,7 +363,7 @@ test('remote Agent API reads cannot carry the former effective Hub policy into a
 async function agentApiFixture() {
   const f = switchFixture();
   vm.runInContext('RM.agentSettingsOpen = true', f.context);
-  const catalog = { agents: [{ id: 'codex', available: true, api: { source: 'phone', accountId: 'allowed', model: 'old' } }], apis: [{ id: 'allowed', name: 'Allowed', models: ['old', 'new'] }] };
+  const catalog = { settingsScope: 'scope-original', agents: [{ id: 'codex', available: true, api: { source: 'phone', accountId: 'allowed', model: 'old' } }], apis: [{ id: 'allowed', name: 'Allowed', models: ['old', 'new'] }] };
   const reading = f.context.rmLoadAgents(); f.pending[0].resolve(catalog); await reading;
   f.node('rmAgentApi-codex').value = 'allowed'; f.node('rmAgentApi-codex').dataset = { rmApi: 'codex' };
   f.node('rmAgentModel-codex').value = 'new'; f.node('rmAgentModel-codex').dataset = { rmModel: 'codex' };
@@ -354,7 +379,7 @@ test('remote API save uses the connection lease, freezes values and preserves sa
   await f.save();
   f.choose('hub', 'https://second.test/hub'); await f.apply();
   assert.equal(f.calls.length, 2); // original GET, one API save; no mode mutation
-  assert.deepEqual(JSON.parse(JSON.stringify(f.calls[1].body)), { agent: 'codex', accountId: 'allowed', model: 'new' });
+  assert.deepEqual(JSON.parse(JSON.stringify(f.calls[1].body)), { agent: 'codex', accountId: 'allowed', model: 'new', expectedSettingsScope: 'scope-original' });
   f.pending[1].resolve(f.ack()); await saving;
   assert.equal(box.innerHTML, markup);
   assert.equal(f.node('rmAgentModel-codex').value, 'new');
@@ -372,20 +397,21 @@ test('acknowledged remote API save updates only its summary and follow-computer 
   f.node('rmAgentApi-codex').value = ''; f.emit('change', f.node('rmAgentApi-codex'));
   const following = f.save();
   assert.equal(f.calls[2].body.model, '');
-  f.pending[2].resolve({ agents: [{ id: 'codex', api: { source: 'tool' } }], apis: [] }); await following;
+  f.pending[2].resolve({ settingsScope: 'scope-original', agents: [{ id: 'codex', api: { source: 'tool' } }], apis: [] }); await following;
   assert.equal(f.node('rmAgentSummary-codex').textContent, '跟随电脑设置');
 });
 
 test('changed active identity removes old Agent inputs immediately and blocks saving during replacement read', async () => {
   const f = await agentApiFixture();
   f.context.S.state.config.effectiveHubUrl = 'https://second.test/hub';
+  f.context.S.state.config.remoteAgentSettingsScope = 'scope-replaced';
   f.context.S.state.hub.hubUrl = 'https://shared.test/hub'; // stale status cannot bypass form invalidation
   f.context.rmUpdateRemoteStatus();
   assert.doesNotMatch(f.node('rmAgents').innerHTML, /data-act="rmSaveApi"/);
   assert.match(f.node('rmAgents').innerHTML, /正在读取当前连接/);
   await f.save();
   assert.equal(f.calls.length, 2); assert.equal(f.calls[1].path, '/api/remote/agents');
-  f.pending[1].resolve({ agents: [], apis: [] }); await new Promise(setImmediate);
+  f.pending[1].resolve({ settingsScope: 'scope-replaced', agents: [], apis: [] }); await new Promise(setImmediate);
   assert.equal(vm.runInContext('RM.agentForm.ready', f.context), true);
 });
 
@@ -393,8 +419,9 @@ test('a late API save cannot repaint or notify the replacement Hub form', async 
   for (const fail of [false, true]) {
     const f = await agentApiFixture(), saving = f.save();
     f.context.S.state.config.effectiveHubUrl = 'https://second.test/hub';
+    f.context.S.state.config.remoteAgentSettingsScope = 'scope-replaced';
     f.context.rmUpdateRemoteStatus();
-    f.pending[2].resolve({ agents: [], apis: [] }); await new Promise(setImmediate);
+    f.pending[2].resolve({ settingsScope: 'scope-replaced', agents: [], apis: [] }); await new Promise(setImmediate);
     const replacement = f.node('rmAgents').innerHTML;
     if (fail) f.pending[1].reject(Object.assign(new Error('old hub denial'), { status: 409 }));
     else f.pending[1].resolve(f.ack());
@@ -424,10 +451,24 @@ test('remote API failure or missing acknowledgement preserves input and exposes 
   for (const rejected of [false, true]) {
     const f = await agentApiFixture(), saving = f.save();
     if (rejected) f.pending[1].reject(Object.assign(new Error('pending approval blocks change'), { status: 409 }));
-    else f.pending[1].resolve({ ok: true });
+    else f.pending[1].resolve({ settingsScope: 'scope-original', ok: true });
     await saving;
     assert.match(f.node('rmAgentResult-codex').innerHTML, rejected ? /pending approval/ : /服务器未确认/);
     assert.equal(f.node('rmAgentModel-codex').value, 'new'); assert.equal(f.notices.length, 0);
+  }
+});
+
+test('remote API save rejects missing or different acknowledgement scope without changing the draft', async () => {
+  for (const settingsScope of [undefined, 'scope-other']) {
+    const f = await agentApiFixture(), saving = f.save();
+    f.pending[1].resolve({ ...f.ack(), settingsScope });
+    await saving;
+    assert.match(f.node('rmAgentResult-codex').innerHTML, /设置范围已变化或保存结果未确认/);
+    assert.equal(vm.runInContext('RM.agentForm.ready', f.context), false);
+    assert.equal(f.node('rmAgentModel-codex').value, 'new');
+    assert.equal(f.notices.length, 0);
+    await f.save();
+    assert.equal(f.calls.length, 2, 'an unconfirmed scope cannot be saved again without rereading');
   }
 });
 
@@ -457,7 +498,7 @@ test('API enrollment freezes local identity and revision through probe and regis
   assert.deepEqual(JSON.parse(JSON.stringify(f.calls[1].body)), { connect: true, ...JSON.parse(JSON.stringify(f.calls[0].body)) });
   assert.equal(JSON.stringify(f.calls).includes(f.account.key), false);
   assert.equal(f.calls[1].body.enrollmentClaim, undefined);
-  f.pending[1].resolve({ ok: true, registered: true, stage: 'waiting_online' });
+  f.pending[1].resolve(registeredConnection(f, 'https://api-a.test/salcara-hub'));
   await connecting;
   assert.match(f.notices.at(-1).message, /登记已确认.*等待连接上线/);
   assert.equal(f.calls.some(call => /session|history/.test(call.path)), false);
@@ -575,7 +616,7 @@ test('an unknown registration offers explicit checks and only the retry button s
   assert.equal(f.calls[3].body.retryEnrollment, true);
   assert.equal(f.calls[3].body.accountId, f.account.id);
   assert.equal(f.calls[3].body.expectedSourceRevision, f.account.sourceRevision);
-  f.pending[3].resolve({ ok: true, registered: true, stage: 'waiting_online' });
+  f.pending[3].resolve(registeredConnection(f, 'https://api-a.test/salcara-hub'));
   await retry;
   assert.equal(f.calls.length, 4);
   assert.equal(vm.runInContext('RM.pendingEnrollment', f.context), null);
@@ -601,9 +642,10 @@ test('same-Hub Bot groups remain separate and activation sends the selected grou
     { mode: 'bot', groupId: 'group-b', hubUrl: cfg.effectiveHubUrl, name: 'same name' },
   ] });
   f.context.S.state.hub.state = 'connected';
-  const markup = f.context.renderRemoteBotPanel(cfg);
+  const markup = f.context.rmSavedBotsMarkup(cfg);
+  assert.ok(f.context.renderRemoteConnectionLayout(f.node('view'), f.context.S.state).includes(markup), 'saved Bot states remain in the shared connection list');
   assert.equal(f.context.rmSavedConnections(cfg, 'bot').length, 2);
-  assert.equal((markup.match(/>已连接<\/span>/g) || []).length, 1);
+  assert.equal((markup.match(/已连接<\/span>/g) || []).length, 1);
   assert.doesNotMatch(markup, /data-group="group-a"/);
   assert.match(markup, /data-group="group-b" >启用 Bot/);
   const action = f.context.ACTIONS.rmActivateMode({ dataset: { mode: 'bot', hub: cfg.effectiveHubUrl, group: 'group-b' } });
@@ -688,6 +730,7 @@ test('saved API selection fills its full address locally and clears another stat
 
 test('explicit reenrollment rotates only remote binding without loading histories', async () => {
   const f = connectionFixture();
+  Object.assign(f.context.S.state.config, { loggedIn: true, effectiveRemoteMode: 'hub' });
   f.node('rmRecoveryClaim').value = 'c'.repeat(64);
   const recovering = f.context.ACTIONS.rmReenroll({ isConnected: true });
   await new Promise(setImmediate);
@@ -702,11 +745,11 @@ test('explicit reenrollment rotates only remote binding without loading historie
 const tick = () => new Promise(resolve => setImmediate(resolve));
 
 test('remote API picker explains separate API and reverse proxy restrictions', async () => {
-  const f = fixture();
-  f.context.S.route = 'login';
+  const f = connectionFixture();
   f.context.AGENT_INFO = { codex: { name: 'Codex', badge: 'C' }, claude: { name: 'Claude', badge: 'A' } };
   const loading = f.context.rmLoadAgents();
   f.pending[0].resolve({
+    settingsScope: 'scope-original',
     agents: [{ id: 'codex', available: true, api: { source: 'phone', name: 'Proxy', accountId: 'proxy' } }],
     apis: [
       { id: 'external', name: 'External', remoteEligibility: { supported: false, reason: 'external_api_not_allowed' } },
@@ -747,7 +790,9 @@ test('live connection and recovery updates preserve drafts and restore QR after 
   const draft = f.node('rmEnrollmentClaim').value;
   f.context.rmUpdateRemoteStatus({ deviceId: 'test-device', state: 'connecting', error: 'offline', queued: 4, recovery: { state: 'ready' } });
   assert.match(f.node('rmHubConnectionMeta').textContent, /连接中断，自动重连中/);
-  assert.match(f.node('pairQR').innerHTML, /连接恢复后/);
+  assert.match(f.node('pairQR').innerHTML, /电脑连接成功后可扫码/);
+  assert.match(f.node('pairQR').innerHTML, /data-act="rmShowQR" disabled/);
+  assert.doesNotMatch(f.node('pairQR').innerHTML, /<img/);
   f.context.rmUpdateRemoteStatus({ deviceId: 'test-device', state: 'connected', queued: 0, recovery: { state: 'ready' } });
   assert.match(f.node('rmHubConnectionMeta').textContent, /已连接/);
   assert.match(f.node('pairQR').innerHTML, /data:image\/png/);
@@ -1077,11 +1122,32 @@ test('double connect is serialized and sends the frozen enrollment only once', a
   assert.equal(commit.body.connect, true);
   await f.context.ACTIONS.rmConnect({});
   assert.equal(f.calls.length, 2);
-  commit.resolve({ ok: true, registered: true, stage: 'waiting_online' });
+  commit.resolve(registeredConnection(f));
   await connecting;
   assert.equal(f.node('rmEnrollmentClaim').value, '');
   assert.match(f.notices.at(-1).message, /登记已确认.*等待连接上线/);
   assert.doesNotMatch(f.notices.at(-1).message, /^已连接/);
+});
+
+test('missing or mismatched registration receipts cannot clear the current claim or QR', async () => {
+  for (const mismatch of ['missing', 'device', 'hub']) {
+    const f = connectionFixture();
+    f.context.S.pairQR = 'data:previous-qr';
+    f.context.S.pairExpires = Date.now() + 60000;
+    const connecting = f.context.ACTIONS.rmConnect({});
+    f.pending[0].resolve({ ok: true });
+    await tick();
+    const result = registeredConnection(f);
+    if (mismatch === 'missing') delete result.registration;
+    else result.registration = { ...result.registration, [mismatch === 'device' ? 'deviceId' : 'hubUrl']: mismatch === 'device' ? 'other-device' : 'https://other.test/hub' };
+    f.pending[1].resolve(result);
+    await connecting;
+    assert.equal(f.node('rmEnrollmentClaim').value, 'a'.repeat(64));
+    assert.equal(f.context.S.pairQR, 'data:previous-qr');
+    assert.equal(vm.runInContext('RM.confirmedRegistration', f.context), undefined);
+    assert.match(f.notices.at(-1).message, /刷新状态核对当前连接/);
+    assert.equal(f.routed.length, 0);
+  }
 });
 
 test('accepted connection never clears newer input or navigates a replacement page', async () => {
@@ -1100,7 +1166,7 @@ test('accepted connection never clears newer input or navigates a replacement pa
   assert.equal(reads, 1, 'accepted changes still reconcile current state');
   assert.equal(f.node('rmEnrollmentClaim').value, 'b'.repeat(64));
   assert.equal(f.routed.length, 0);
-  assert.equal(f.notices.at(-1).kind, 'ok');
+  assert.equal(f.notices.length, 0, 'a replaced page must not receive the previous connection success');
 });
 
 test('accepted connection followed by refresh failure remains saved and never retries', async () => {
@@ -1260,11 +1326,11 @@ test('leaving a confirmation cancels direct revoke before dispatch', async () =>
 test('Bot registration status belongs to the active station and waits for its connection', () => {
   const f = connectionFixture('bot');
   const config = { loggedIn: true, effectiveHubUrl: 'https://current.test/salcara-hub', remoteModes: { bot: { groupId: 'current' } }, remoteConnections: [{ hubUrl: 'https://saved.test/salcara-hub', botGroupId: 'old' }] };
-  assert.match(f.context.renderRemoteBotPanel(config), /已保存，未启用/);
+  assert.match(f.context.rmSavedBotsMarkup(config), /已保存，未启用/);
   config.remoteConnections.push({ hubUrl: config.effectiveHubUrl, botGroupId: 'current' });
-  assert.match(f.context.renderRemoteBotPanel(config), /正在连接/);
+  assert.match(f.context.rmSavedBotsMarkup(config), /正在连接/);
   f.context.S.state.hub.state = 'connected';
-  assert.match(f.context.renderRemoteBotPanel(config), /已连接/);
+  assert.match(f.context.rmSavedBotsMarkup(config), /已连接/);
 });
 
 test('saved station and typed connection use the same mutation lease', async () => {
@@ -1376,8 +1442,8 @@ test('effective mode overrides saved credentials and stale connected status in e
   const config = f.context.S.state.config;
   Object.assign(config, { effectiveRemoteMode: 'direct', loggedIn: true, effectiveHubUrl: 'https://saved.test/salcara-hub', remoteConnections: [{ mode: 'bot', hubUrl: 'https://saved.test/salcara-hub', name: 'saved-bot' }] });
   f.context.S.state.hub.state = 'connected';
-  assert.match(f.context.renderRemoteBotPanel(config), /已保存，未启用/);
-  assert.doesNotMatch(f.context.renderRemoteBotPanel(config), />已连接</);
+  assert.match(f.context.rmSavedBotsMarkup(config), /已保存，未启用/);
+  assert.doesNotMatch(f.context.rmSavedBotsMarkup(config), /已连接<\/span>/);
   vm.runInContext('RM.direct = { paired: true, enabled: true, running: true, connected: true, qrDataURL: "data:stale", expiresAt: Date.now() + 60000 }', f.context);
   config.effectiveRemoteMode = 'hub';
   assert.match(f.context.renderRemoteDirectPanel(false), /已配对，未启用/);

@@ -40,7 +40,7 @@ test('all connection modes have a right-side switch, one form and one stop actio
   for (const mode of ['station', 'bot', 'direct']) {
     const f = fixture(mode, { effectiveRemoteMode: 'hub', loggedIn: true }, { state: 'connected' });
     const html = f.html();
-    for (const label of ['连接方式', '连接状态', '已绑定手机', '高级设置']) assert.match(html, new RegExp(`>${label}<`));
+    for (const label of ['添加 / 切换连接方式', '连接状态', '已绑定手机', '高级设置']) assert.match(html, new RegExp(`>${label}<`));
     assert.equal((html.match(/data-mode="none"/g) || []).length, 1);
     assert.equal(html.includes('id="rmStation"'), mode === 'station');
     assert.equal(html.includes('id="rmBotBinding"'), mode === 'bot');
@@ -65,7 +65,7 @@ test('switch choices distinguish every saved Hub and Bot group while keeping eff
     const html = f.html(), select = /<select[^>]+id="rmSwitchTarget"[^>]*>([\s\S]*?)<\/select>/.exec(html)[1];
     assert.equal((select.match(/<option /g) || []).length, mode === 'station' ? 2 : mode === 'bot' ? 3 : 1);
     assert.match(html, /当前启用：Bot/);
-    assert.match(f.context.rmModeStatusMarkup(config), /Bot · alpha — https:\/\/shared.test\/hub/);
+    assert.match(f.context.rmModeStatusMarkup(config), /Bot · 组 alpha — shared.test/);
     assert.match(html, /<option value="hub"/); assert.match(html, /<option value="bot"/); assert.match(html, /<option value="direct"/);
   }
   const f = fixture('bot', config), targets = f.context.rmSwitchTargets(config);
@@ -109,23 +109,30 @@ test('phone binding and status always describe effective connection while anothe
 });
 
 test('remote Agent API and permission navigation remain reachable without adding upfront session reads', () => {
-  const html = fixture('station').html();
-  assert.match(html, /<details[^>]+id="rmAgentSettings"\s*>/);
-  assert.match(html, /id="rmAgents"/);
-  assert.match(html, /应用于当前启用连接，不随待切换目标改变/);
-  assert.match(html, /href="#settings"/); assert.match(html, /href="#accounts"/);
-  assert.doesNotMatch(fixture('direct').html(), /id="rmAgents"/);
+  for (const mode of ['station', 'bot', 'direct']) {
+    const f = fixture(mode, { effectiveRemoteMode: 'hub', effectiveHubUrl: 'https://active.test' });
+    const html = f.html();
+    assert.match(html, /<details[^>]+id="rmAgentSettings"\s*>/);
+    assert.match(html, /id="rmAgents"/);
+    assert.match(html, /当前连接：中转站 — active.test/);
+    assert.match(html, /API 来源与模型须通过当前站点授权。切换待选目标不会应用设置/);
+    assert.match(html, /href="#settings"/); assert.match(html, /href="#accounts"/);
+  }
+  const direct = fixture('direct', { effectiveRemoteMode: 'direct', remoteModes: { direct: { paired: true } } });
+  assert.match(direct.html(), /直连 API 单独保存；站点来源授权不影响直连/);
 });
 
 test('saved device configuration does not prove registration or allow a QR', () => {
   const f = fixture('station', { deviceId: 'd', effectiveRemoteMode: 'hub', loggedIn: true, effectiveHubUrl: 'https://hub.test' }, { state: 'connecting' });
   const html = f.html();
-  assert.doesNotMatch(html, /服务器已确认电脑登记|data-act="rmShowQR"/);
+  assert.doesNotMatch(html, /服务器已确认电脑登记/);
+  assert.match(html, /data-act="rmShowQR" disabled/);
+  assert.equal(visibleControls(html).actions.some(action => action.action === 'rmShowQR'), false);
   assert.match(html, /等待登记确认/);
   assert.match(html, /id="rmEnrollmentFallback" hidden/);
   f.context.S.state.hub.state = 'connected';
   assert.match(f.html(), /服务器已确认电脑登记/);
-  assert.match(f.html(), /data-act="rmShowQR"/);
+  assert.equal(visibleControls(f.html()).actions.some(action => action.action === 'rmShowQR'), true);
 });
 
 test('station without a saved API explains the actual next step without adding another action', () => {
@@ -142,23 +149,31 @@ test('station without a saved API explains the actual next step without adding a
   assert.deepEqual(visibleControls(saved).actions.filter(action => action.primary).map(action => action.action), ['rmConnect']);
 });
 
-test('an acknowledged registration is scoped to its exact computer and Hub', () => {
-  const f = fixture('station', { deviceId: 'd', effectiveRemoteMode: 'hub', loggedIn: true, effectiveHubUrl: 'https://hub.test' }, { state: 'connecting' });
-  vm.runInContext(`RM.confirmedRegistration = { deviceId: 'd', hubUrl: 'https://hub.test' }`, f.context);
+test('an acknowledged registration is scoped to its exact computer, Hub, settings scope and connection revision', () => {
+  const f = fixture('station', { deviceId: 'd', effectiveRemoteMode: 'hub', loggedIn: true, effectiveHubUrl: 'https://hub.test', remoteAgentSettingsScope: 'scope-original' }, { state: 'connecting' });
+  vm.runInContext(`RM.confirmedRegistration = { deviceId: 'd', hubUrl: 'https://hub.test', settingsScope: 'scope-original', revision: RM.connectionRevision }`, f.context);
   assert.match(f.html(), /服务器已确认电脑登记/);
   assert.match(f.html(), /服务器已确认授权/);
-  assert.doesNotMatch(f.html(), /data-act="rmShowQR"/);
+  assert.equal(visibleControls(f.html()).actions.some(action => action.action === 'rmShowQR'), false);
   f.context.S.state.config.deviceId = 'other';
   assert.doesNotMatch(f.html(), /服务器已确认电脑登记/);
   f.context.S.state.config.deviceId = 'd';
   f.context.S.state.config.effectiveHubUrl = 'https://other.test';
+  assert.doesNotMatch(f.html(), /服务器已确认电脑登记/);
+  f.context.S.state.config.effectiveHubUrl = 'https://hub.test';
+  f.context.S.state.config.remoteAgentSettingsScope = 'scope-replaced';
+  assert.doesNotMatch(f.html(), /服务器已确认电脑登记/);
+  f.context.S.state.config.remoteAgentSettingsScope = 'scope-original';
+  vm.runInContext('RM.connectionRevision++', f.context);
   assert.doesNotMatch(f.html(), /服务器已确认电脑登记/);
 });
 
 test('an old connected snapshot cannot authorize a QR for another computer or Hub', () => {
   for (const hub of [{ state: 'connected', deviceId: 'other' }, { state: 'connected', hubUrl: 'https://other.test' }]) {
     const f = fixture('station', { deviceId: 'd', loggedIn: true, effectiveRemoteMode: 'hub', effectiveHubUrl: 'https://hub.test' }, hub);
-    assert.doesNotMatch(f.html(), /data-act="rmShowQR"|服务器已确认电脑登记/);
+    assert.doesNotMatch(f.html(), /服务器已确认电脑登记/);
+    assert.match(f.html(), /data-act="rmShowQR" disabled/);
+    assert.equal(visibleControls(f.html()).actions.some(action => action.action === 'rmShowQR'), false);
   }
 });
 

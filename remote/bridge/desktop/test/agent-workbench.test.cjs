@@ -244,12 +244,12 @@ test('status refresh updates lamp/chip without replacing the selected API or ori
   ui.assertNoLaunch();
 });
 
-test('shell navigation uses Agent and API key names, shows usage, and keeps conversations inside settings', () => {
+test('shell navigation uses Agent and API key names and keeps conversations independently reachable', () => {
   const html = fs.readFileSync(path.join(web, 'index.html'), 'utf8');
   for (const [route, label] of [['overview', 'Agent'], ['accounts', 'API 密钥'], ['setup', '环境'], ['login', '手机远程'], ['usage', '用量'], ['settings', '设置']]) {
     assert.match(html, new RegExp(`data-route="${route}"[^\\n]*<b>${label}</b>`));
   }
-  assert.doesNotMatch(html, /data-route="sessions"/);
+  assert.match(html, /href="#sessions" data-route="sessions"[^\n]*<b>对话<\/b>/);
   assert.match(appSource, /class="card set-link" href="#sessions"/);
   assert.match(appSource, /sessions: \(v\) => RENDER_sessions\(v\)/);
 });
