@@ -25,28 +25,33 @@ type hermesAgent struct {
 	connectMu sync.Mutex
 	sink      Sink
 	closed    bool
+	questions bool // negotiated by runtime.describe through the installed client
 	conn      hermesGateway
 	sessions  map[string]*hermesSession
 	dial      func(context.Context, func(string, json.RawMessage)) (hermesGateway, error)
 }
 type hermesSession struct {
 	control                               sync.Mutex
-	Info                                  protocol.SessionInfo           `json:"info"`
-	NativeID                              string                         `json:"nativeId"`
-	Source                                [32]byte                       `json:"sourceFingerprint"`
-	APIIdentity                           [32]byte                       `json:"apiIdentity,omitempty"`
-	FrozenRoot                            string                         `json:"frozenRoot,omitempty"`
-	Inputs                                map[string]string              `json:"inputs,omitempty"`
-	Admissions                            map[string]string              `json:"admissions,omitempty"`
-	Receipts                              map[string]hermesPersistedTurn `json:"receipts,omitempty"`
-	ReplyIDs                              map[string]string              `json:"replyIds,omitempty"`
-	InputOrder                            []string                       `json:"inputOrder,omitempty"`
-	AdmissionOrder                        []string                       `json:"admissionOrder,omitempty"`
-	ReceiptOrder                          []string                       `json:"receiptOrder,omitempty"`
-	ReplyOrder                            []string                       `json:"replyOrder,omitempty"`
-	Epoch                                 int64                          `json:"authorityEpoch"`
-	Generation                            int64                          `json:"generation"`
-	Events                                []protocol.Event               `json:"events"`
+	Info                                  protocol.SessionInfo             `json:"info"`
+	NativeID                              string                           `json:"nativeId"`
+	Source                                [32]byte                         `json:"sourceFingerprint"`
+	APIIdentity                           [32]byte                         `json:"apiIdentity,omitempty"`
+	FrozenRoot                            string                           `json:"frozenRoot,omitempty"`
+	Policy                                string                           `json:"policy,omitempty"`
+	Inputs                                map[string]string                `json:"inputs,omitempty"`
+	Admissions                            map[string]string                `json:"admissions,omitempty"`
+	Receipts                              map[string]hermesPersistedTurn   `json:"receipts,omitempty"`
+	ReplyIDs                              map[string]string                `json:"replyIds,omitempty"`
+	InputOrder                            []string                         `json:"inputOrder,omitempty"`
+	AdmissionOrder                        []string                         `json:"admissionOrder,omitempty"`
+	ReceiptOrder                          []string                         `json:"receiptOrder,omitempty"`
+	ReplyOrder                            []string                         `json:"replyOrder,omitempty"`
+	Approvals                             map[string]hermesApprovalAttempt `json:"approvalAttempts,omitempty"`
+	ApprovalOrder                         []string                         `json:"approvalOrder,omitempty"`
+	PromptDeadlines                       map[string]int64                 `json:"promptDeadlines,omitempty"`
+	Epoch                                 int64                            `json:"authorityEpoch"`
+	Generation                            int64                            `json:"generation"`
+	Events                                []protocol.Event                 `json:"events"`
 	replay                                string
 	sequence                              int64
 	busy, uncertain, recovering, overflow bool
@@ -90,6 +95,13 @@ func newHermesAgent(settings func() Settings, stateDir string) *hermesAgent {
 	return a
 }
 func initHermesSession(s *hermesSession) {
+	if s.Approvals == nil {
+		s.Approvals = map[string]hermesApprovalAttempt{}
+	}
+	if s.PromptDeadlines == nil {
+		s.PromptDeadlines = map[string]int64{}
+	}
+	normalizeHermesOrder(s.Approvals, &s.ApprovalOrder)
 	if s.Inputs == nil {
 		s.Inputs = map[string]string{}
 	}
@@ -112,11 +124,17 @@ func initHermesSession(s *hermesSession) {
 	if len(s.Events) > 400 {
 		s.Events = append([]protocol.Event(nil), s.Events[len(s.Events)-400:]...)
 	}
+	for i := range s.Events {
+		s.Events[i] = protocol.NormalizeTimelineEvent(s.Events[i])
+	}
 }
 func (*hermesAgent) ID() string   { return hermesID }
 func (*hermesAgent) Name() string { return "Hermes Agent" }
 func (a *hermesAgent) Descriptor() protocol.AgentDescriptor {
-	return protocol.AgentDescriptor{ID: a.ID(), Tool: a.ID(), Name: a.Name(), APIFamily: a.ID(), ControlSurface: "cli", Capabilities: protocol.AgentCapabilities{List: true, Read: true, Send: true, Interrupt: true, PreciseInterrupt: true, Approval: true, StartModelOverride: true}}
+	a.mu.Lock()
+	questions := a.questions
+	a.mu.Unlock()
+	return protocol.AgentDescriptor{ID: a.ID(), Tool: a.ID(), Name: a.Name(), APIFamily: a.ID(), ControlSurface: "cli", Capabilities: protocol.AgentCapabilities{List: true, Read: true, Send: true, Interrupt: true, PreciseInterrupt: true, Approval: true, Questions: questions, StartModelOverride: true}}
 }
 func (a *hermesAgent) BindEventSink(sink Sink) { a.mu.Lock(); a.sink = sink; a.mu.Unlock() }
 func (a *hermesAgent) Detect(ctx context.Context) protocol.Tool {
@@ -162,6 +180,15 @@ func (a *hermesAgent) ActiveRemoteTurns() bool {
 	return false
 }
 
+// Legacy indexes did not retain yolo. Unknown policy must not inherit a grant
+// after the computer revokes phone full access.
+func (a *hermesAgent) SessionRequiresFullAccessConsent(id string) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	s := a.sessions[id]
+	return s != nil && (s.Policy == "" || s.Policy == "auto_all")
+}
+
 func hermesAPIIdentity(api ExtensionSettings, model string) [32]byte {
 	if api.SourceFingerprint == "" {
 		return [32]byte{}
@@ -179,7 +206,7 @@ func hermesFrozenSourceError(api ExtensionSettings, s *hermesSession, model stri
 		return errors.New("Hermes 当前 API 未就绪；原会话仍可查看和停止，配置 API 后请新建会话")
 	}
 	if s.APIIdentity != ([32]byte{}) && hermesAPIIdentity(api, s.Info.Model) != s.APIIdentity {
-		return errors.New("Hermes 原会话使用的 API 已变化；历史仍可查看、任务仍可停止，请新建会话继续")
+		return errors.New("Hermes 原会话使用的 API 已变化。旧记录保留，原任务仍可查看和停止；可切回原配置核对，若原启动凭据已更新则需新建会话")
 	}
 	root, _, err := config.APIBase(api.Root)
 	if err != nil {
@@ -253,10 +280,14 @@ func (a *hermesAgent) runtime(ctx context.Context) (hermesGateway, error) {
 	a.conn = next
 	a.mu.Unlock()
 	close(ready)
+	if pipe, ok := next.(*hermesPipe); ok {
+		go func() { <-pipe.done; a.notify(next, "gateway.disconnected", nil) }()
+	}
 	initCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
 	defer cancel()
 	var hello struct {
-		Protocol string `json:"protocol"`
+		Protocol  string `json:"protocol"`
+		Questions bool   `json:"questions"`
 	}
 	if err = next.Call(initCtx, "salcara.initialize", map[string]any{}, &hello); err != nil || hello.Protocol != "salcara-hermes-gateway-v1" {
 		a.mu.Lock()
@@ -267,6 +298,9 @@ func (a *hermesAgent) runtime(ctx context.Context) (hermesGateway, error) {
 		next.detach()
 		return nil, errors.New("Hermes Gateway 会话协议不兼容或未就绪，请更新 Hermes")
 	}
+	a.mu.Lock()
+	a.questions = hello.Questions
+	a.mu.Unlock()
 	return next, nil
 }
 func (a *hermesAgent) Open(ctx context.Context, id string) (protocol.SessionInfo, []protocol.Event, error) {
@@ -297,7 +331,7 @@ func (a *hermesAgent) Open(ctx context.Context, id string) (protocol.SessionInfo
 				events = append(events, event)
 			}
 		}
-		events = append(events, protocol.Event{Tool: hermesID, SessionKey: s.Info.SessionKey, Type: "notice", ID: "hermes-cached-history", Level: "warning", Text: "Hermes 运行器暂不可用，当前显示上次保存的记录，可能缺少最新消息。请在电脑检查 Hermes 并刷新；任务状态未确认，暂不能继续发送。"})
+		events = append(events, protocol.Event{Tool: hermesID, SessionKey: s.Info.SessionKey, Type: "notice", ID: "hermes-cached-history", Level: "warn", Text: "Hermes 运行器暂不可用，当前显示上次保存的记录，可能缺少最新消息。请在电脑检查 Hermes 并刷新；任务状态未确认，暂不能继续发送。"})
 		return s.Info, events, nil
 	}
 	if err = a.resume(ctx, id, s, conn, ""); err != nil {
@@ -309,7 +343,7 @@ func (a *hermesAgent) Open(ctx context.Context, id string) (protocol.SessionInfo
 	events := append([]protocol.Event(nil), s.Events...)
 	info := s.Info
 	if sourceErr := hermesFrozenSourceError(api, s, ""); sourceErr != nil {
-		events = append(events, protocol.Event{Tool: hermesID, SessionKey: s.Info.SessionKey, Type: "notice", ID: "hermes-frozen-source", Level: "warning", Text: sourceErr.Error()})
+		events = append(events, protocol.Event{Tool: hermesID, SessionKey: s.Info.SessionKey, Type: "notice", ID: "hermes-frozen-source", Level: "warn", NoticeKind: "session_source_frozen", ErrorCode: "session_source_frozen", Text: sourceErr.Error()})
 		if !s.busy {
 			info.Controllable = false
 		}
@@ -369,7 +403,7 @@ func (a *hermesAgent) StartWithOptions(ctx context.Context, cwd, prompt, approva
 		return "", errors.New("无法生成会话标识")
 	}
 	var snapshot hermesSnapshot
-	err = conn.Call(ctx, "session.create", map[string]any{"request_id": id, "source": "cli", "cwd": cwd, "model": model, "provider": "custom", "base_url": strings.TrimRight(root, "/") + "/v1", "api_key": api.Key, "yolo": approval == "auto_all"}, &snapshot)
+	err = hermesGuardedCall(ctx, conn, "session.create", map[string]any{"request_id": id, "source": "cli", "cwd": cwd, "model": model, "provider": "custom", "base_url": strings.TrimRight(root, "/") + "/v1", "api_key": api.Key, "yolo": approval == "auto_all"}, &snapshot, opts.ValidatePermission)
 	if err != nil {
 		return "", hermesError(err)
 	}
@@ -383,6 +417,7 @@ func (a *hermesAgent) StartWithOptions(ctx context.Context, cwd, prompt, approva
 	}
 	s := &hermesSession{Info: protocol.SessionInfo{SessionKey: hermesID + ":" + id, Tool: hermesID, Client: "salcara", ControlSurface: "cli", Cwd: cwd, Model: model, Title: truncHead(prompt, 100), Controllable: true, Status: "idle", UpdatedAt: time.Now().UnixMilli()}, NativeID: snapshot.NativeID, Source: extensionSource(api, model), APIIdentity: hermesAPIIdentity(api, model), FrozenRoot: root}
 	initHermesSession(s)
+	s.Policy = approval
 	a.mu.Lock()
 	if a.closed {
 		a.mu.Unlock()
@@ -397,7 +432,7 @@ func (a *hermesAgent) StartWithOptions(ctx context.Context, cwd, prompt, approva
 	}
 	opts.Model = ""
 	if err = a.SendWithOptions(ctx, id, prompt, opts); err != nil {
-		return "", err
+		return id, err // Native identity exists; a new UUID could duplicate it.
 	}
 	return id, nil
 }
@@ -453,10 +488,13 @@ func (a *hermesAgent) SendWithOptions(ctx context.Context, id, text string, opts
 			Session string `json:"session_id"`
 		} `json:"ref"`
 	}
-	err = conn.Call(ctx, "prompt.submit", map[string]string{"session_id": s.NativeID, "input_id": input, "text": text}, &receipt)
+	err = hermesGuardedCall(ctx, conn, "prompt.submit", map[string]string{"session_id": s.NativeID, "input_id": input, "text": text}, &receipt, opts.ValidatePermission)
 	if err != nil {
-		a.markUnknown(id, s)
-		return hermesError(err)
+		err = hermesError(err)
+		if protocol.ExecutionErrorCode(err) == "command_delivery_uncertain" {
+			a.markUnknown(id, s)
+		}
+		return err
 	}
 	if !ValidTurnID(receipt.Admission) || receipt.Ref.Session != s.NativeID || !containsHermes([]string{"queued", "started", "terminal"}, receipt.Status) {
 		a.markUnknown(id, s)
@@ -523,6 +561,10 @@ func hermesError(err error) error {
 	if err == nil {
 		return nil
 	}
+	var unsent *hermesNotSentError
+	if errors.As(err, &unsent) {
+		return unsent
+	}
 	var rpc *rpcError
 	if errors.As(err, &rpc) && rpc.Message != "command_delivery_uncertain" {
 		return fmt.Errorf("Hermes Gateway 拒绝请求：%s", truncHead(rpc.Message, 100))
@@ -573,7 +615,23 @@ func (a *hermesAgent) persistLocked(id string, s *hermesSession) error {
 	}
 	return os.Rename(tmp, path)
 }
+
+func (a *hermesAgent) persistHermesApprovalLocked(id string, s *hermesSession) error {
+	if a.stateDir == "" {
+		return errors.New("Hermes 审批存储不可用")
+	}
+	if err := a.persistLocked(id, s); err != nil {
+		return err
+	}
+	f, err := os.OpenFile(filepath.Join(a.stateDir, id+".json"), os.O_RDWR, 0)
+	if err != nil {
+		return err
+	}
+	return errors.Join(f.Sync(), f.Close())
+}
 func (a *hermesAgent) emit(id string, e protocol.Event) {
+	e.Tool = hermesID
+	e = protocol.NormalizeTimelineEvent(e)
 	a.mu.Lock()
 	s := a.sessions[id]
 	if s == nil || a.closed {

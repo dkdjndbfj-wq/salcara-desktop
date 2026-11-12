@@ -48,6 +48,22 @@ func TestCheckCwdWindowsCaseSensitiveSiblings(t *testing.T) {
 	if out, err := exec.Command("fsutil.exe", "file", "setCaseSensitiveInfo", base, "enable").CombinedOutput(); err != nil {
 		t.Skipf("case-sensitive fixture unavailable: %s", out)
 	}
+	// fsutil can report Access Denied in its output while returning exit 0.
+	// Prove the filesystem fixture actually has distinct case-sensitive names
+	// before testing CheckCwd; never use the product's answer to decide to skip.
+	probe, err := os.OpenFile(filepath.Join(base, "CaseProbe"), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	probe.Close()
+	probe, err = os.OpenFile(filepath.Join(base, "caseprobe"), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if os.IsExist(err) {
+		t.Skip("case-sensitive fixture unavailable: fsutil did not enable distinct-case file names")
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	probe.Close()
 	upper, lower := filepath.Join(base, "Project"), filepath.Join(base, "project")
 	if err := os.Mkdir(upper, 0o700); err != nil {
 		t.Fatal(err)

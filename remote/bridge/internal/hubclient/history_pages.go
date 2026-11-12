@@ -196,6 +196,7 @@ func dispatchHistoryPageWithAttachments(ctx context.Context, m agents.Manager, c
 		decorateEventMediaWith(attachments, &event)
 		event.SessionKey = key
 		event.Tool = agent.ID()
+		event = protocol.NormalizeTimelineEvent(event)
 		if event.Session != nil {
 			copy := *event.Session
 			copy = agents.ProjectSessionInfo(copy, agent.ID(), d.Capabilities)

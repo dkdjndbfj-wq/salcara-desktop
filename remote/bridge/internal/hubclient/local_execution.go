@@ -2,6 +2,7 @@ package hubclient
 
 import (
 	"context"
+	"errors"
 
 	"salcara/bridge/internal/agents"
 	"salcara/bridge/internal/config"
@@ -10,13 +11,34 @@ import (
 type localExecutionKey struct{}
 type directExecutionKey struct{}
 type directExecutionValidatorKey struct{}
+type remoteSettingsEpochKey struct{}
+
+// WithRemoteSettingsEpoch freezes the authenticated console's status/API form
+// scope before Dispatch can wait. It grants no execution or pairing authority.
+func WithRemoteSettingsEpoch(ctx context.Context, epoch string) context.Context {
+	return context.WithValue(ctx, remoteSettingsEpochKey{}, epoch)
+}
+
+func validateRemoteSettingsEpoch(ctx context.Context, typ string, cfg config.Config) error {
+	epoch, present := ctx.Value(remoteSettingsEpochKey{}).(string)
+	if !present {
+		return nil
+	}
+	if !isLocalExecution(ctx) || (typ != "agents.status" && typ != "agents.api.set") || epoch == "" || epoch != cfg.RemoteConnectionEpoch {
+		return errors.New("连接方式或中转站已变化，请刷新设置后重试")
+	}
+	return nil
+}
+
 type directExecutionValidator struct {
 	identity string
 	validate func() error
 }
 
-// Only the authenticated Direct relay can attach this immutable pairing lease.
-// It outlives one HTTP request, but fails after revoke, rebind, or relay close.
+// The authenticated Direct relay attaches this immutable pairing lease. The
+// authenticated loopback console may also attach a narrow, separately frozen
+// pairing/connection-epoch validator for Direct status/API configuration only.
+// No submitted command can create it; revoke/rebind/connection change retires it.
 func WithDirectExecutionValidator(ctx context.Context, identity string, validate func() error) context.Context {
 	return context.WithValue(WithDirectExecution(ctx), directExecutionValidatorKey{}, directExecutionValidator{identity, validate})
 }
@@ -32,8 +54,8 @@ func WithLocalExecution(ctx context.Context) context.Context {
 	return context.WithValue(ctx, localExecutionKey{}, true)
 }
 
-// WithDirectExecution is used only by the authenticated, TLS-pinned direct
-// phone relay. It keeps execution local to this Bridge (there is no Hub
+// WithDirectExecution is used by the authenticated, TLS-pinned direct phone
+// relay and the console's validated Direct configuration route. It keeps execution local to this Bridge (there is no Hub
 // request or source grant), while retaining the normal Dispatch validation,
 // adapter capability checks, account selection and cancellation boundaries.
 // The direct relay itself is responsible for the separate phone pairing and

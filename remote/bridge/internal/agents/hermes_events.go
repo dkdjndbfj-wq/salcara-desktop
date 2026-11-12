@@ -10,12 +10,15 @@ import (
 )
 
 type hermesPrompt struct {
-	ID          string   `json:"prompt_id"`
-	Kind        string   `json:"kind"`
-	Generation  int64    `json:"execution_generation"`
-	Command     string   `json:"command"`
-	Description string   `json:"description"`
-	Choices     []string `json:"choices"`
+	ID             string   `json:"prompt_id"`
+	Kind           string   `json:"kind"`
+	Generation     int64    `json:"execution_generation"`
+	Command        string   `json:"command"`
+	Description    string   `json:"description"`
+	Choices        []string `json:"choices"`
+	Question       string   `json:"question"`
+	MultiSelect    bool     `json:"multi_select"`
+	TimeoutSeconds float64  `json:"timeout_s"`
 }
 type hermesSnapshot struct {
 	NativeID   string         `json:"stored_session_id"`
@@ -56,22 +59,30 @@ type hermesNativeEvent struct {
 	Payload     json.RawMessage `json:"payload"`
 }
 
-func (a *hermesAgent) resume(ctx context.Context, id string, s *hermesSession, conn hermesGateway, key string) error {
+func (a *hermesAgent) resume(ctx context.Context, id string, s *hermesSession, conn hermesGateway, key string, control ...bool) error {
 	a.mu.Lock()
 	s.recovering = true
 	s.buffered = nil
 	s.overflow = false
 	a.mu.Unlock()
 	params := map[string]any{"session_id": s.NativeID}
+	controlRead := len(control) > 0 && control[0]
+	if controlRead {
+		params["omit_messages"] = true
+	}
 	if key != "" {
 		params["api_key"] = key
 	}
 	var snapshot hermesSnapshot
-	err := conn.Call(ctx, "session.resume", params, &snapshot)
+	method := "session.resume"
+	if _, pipe := conn.(*hermesPipe); pipe && len(control) > 0 && control[0] {
+		method = "salcara.control.resume"
+	}
+	err := conn.Call(ctx, method, params, &snapshot)
 	if err != nil {
 		err = newHermesReadFailure(err)
 	}
-	if err == nil && snapshot.NativeID == s.NativeID && snapshot.SessionID == s.NativeID {
+	if err == nil && !controlRead && snapshot.NativeID == s.NativeID && snapshot.SessionID == s.NativeID {
 		a.hydrateHermesReceipts(ctx, s, conn, snapshot)
 	}
 	a.mu.Lock()
@@ -87,7 +98,7 @@ func (a *hermesAgent) resume(ctx context.Context, id string, s *hermesSession, c
 				hermesReceiptFromEvent(s, event)
 			}
 		}
-		a.applySnapshotLocked(id, s, snapshot)
+		a.applySnapshotLocked(id, s, snapshot, controlRead)
 	} else {
 		s.uncertain = true
 		s.Info.Status = "unknown"
@@ -101,11 +112,12 @@ func (a *hermesAgent) resume(ctx context.Context, id string, s *hermesSession, c
 	}
 	return err
 }
-func (a *hermesAgent) applySnapshotLocked(id string, s *hermesSession, snapshot hermesSnapshot) {
+func (a *hermesAgent) applySnapshotLocked(id string, s *hermesSession, snapshot hermesSnapshot, controlOnly ...bool) {
 	oldEvents := s.Events
 	active := map[string]bool{}
 	s.Epoch, s.Generation, s.replay, s.sequence = snapshot.Epoch, snapshot.Generation, snapshot.Replay, snapshot.Sequence
 	s.busy, s.uncertain = snapshot.Running, false
+	s.Info.Controllable = true // A verified native snapshot ends cached read-only mode.
 	s.prompts = map[string]hermesPrompt{}
 	s.streams = map[string]string{}
 	s.completed = map[string]bool{}
@@ -133,6 +145,16 @@ func (a *hermesAgent) applySnapshotLocked(id string, s *hermesSession, snapshot 
 	}
 	s.Events = nil
 	messages := snapshot.Messages
+	if len(controlOnly) > 0 && controlOnly[0] {
+		// A control read deliberately omits the transcript. Preserve the cached
+		// messages; refresh only native status/prompt ownership before stopping.
+		for _, event := range oldEvents {
+			if event.Type != "approval.request" {
+				s.Events = append(s.Events, event)
+			}
+		}
+		messages = nil
+	}
 	if len(messages) > 400 {
 		messages = messages[len(messages)-400:]
 	}
@@ -191,15 +213,21 @@ func (a *hermesAgent) applySnapshotLocked(id string, s *hermesSession, snapshot 
 			}
 		}
 	}
+	activePrompts := map[string]bool{}
 	for _, p := range snapshot.Prompts {
-		if p.Kind == "approval" && ValidTurnID(p.ID) && p.Generation == s.Generation {
-			s.prompts[p.ID] = p
-			s.Info.Status = "waiting_approval"
-			s.Info.ActiveTurnID = hermesTurnID(s.Epoch, s.Generation)
-			s.Events = append(s.Events, hermesApprovalEvent(id, p))
-		} else {
-			s.uncertain = true
-			s.Info.Status = "waiting_approval"
+		activePrompts[p.ID] = true
+		s.Events = append(s.Events, a.hermesPromptProjectionLocked(id, s, p))
+	}
+	for prompt, attempt := range s.Approvals {
+		if attempt.Status == "pending" && !activePrompts[prompt] {
+			attempt.Status = "settled_unknown"
+			s.Approvals[prompt] = attempt
+			s.Events = append(s.Events, protocol.Event{Type: "approval.resolved", Tool: hermesID, SessionKey: s.Info.SessionKey, ApprovalID: hermesID + ":" + id + ":" + prompt, Decision: "unknown", By: "unknown", OperationID: attempt.OperationID})
+		}
+	}
+	for prompt := range s.PromptDeadlines {
+		if !activePrompts[prompt] {
+			delete(s.PromptDeadlines, prompt)
 		}
 	}
 	if !s.busy && s.Generation > 0 {
@@ -416,7 +444,7 @@ func (a *hermesAgent) event(conn hermesGateway, id string, s *hermesSession, eve
 		}
 		status := "running"
 		if event.Type == "tool.complete" {
-			status = "completed"
+			status = "done"
 			if p.Error {
 				status = "failed"
 			}
@@ -426,25 +454,29 @@ func (a *hermesAgent) event(conn hermesGateway, id string, s *hermesSession, eve
 			output = string(p.Result)
 		}
 		out = append(out, protocol.Event{Type: "tool", ID: p.ToolID, Title: p.Name, Kind: "other", Detail: truncHead(string(p.Args), 4000), Output: truncHead(output, 10000), OutputFinal: event.Type == "tool.complete", Status: status, TurnID: turn})
-	case "approval.request":
+	case "approval.request", "clarify.request":
 		var prompt hermesPrompt
-		if json.Unmarshal(event.Payload, &prompt) == nil && ValidTurnID(prompt.ID) && prompt.Generation == s.Generation {
-			s.prompts[prompt.ID] = prompt
-			s.Info.Status = "waiting_approval"
-			s.busy = true
-			s.Info.ActiveTurnID = turn
-			out = append(out, hermesApprovalEvent(id, prompt))
+		if json.Unmarshal(event.Payload, &prompt) == nil {
+			out = append(out, a.hermesPromptProjectionLocked(id, s, prompt))
 		}
-	case "approval.settled":
+	case "approval.settled", "clarify.settled":
 		delete(s.prompts, p.PromptID)
-		out = append(out, protocol.Event{Type: "approval.resolved", ApprovalID: hermesID + ":" + id + ":" + p.PromptID})
+		delete(s.PromptDeadlines, p.PromptID)
+		if attempt, exists := s.Approvals[p.PromptID]; exists && attempt.Status == "pending" {
+			attempt.Status = "settled_unknown"
+			s.Approvals[p.PromptID] = attempt
+		}
+		settled := protocol.Event{Type: "approval.resolved", ApprovalID: hermesID + ":" + id + ":" + p.PromptID, Decision: "unknown", By: "unknown"}
+		if attempt, exists := s.Approvals[p.PromptID]; exists {
+			settled.OperationID = attempt.OperationID
+			if attempt.Status == "confirmed" {
+				settled.Decision, settled.By = attempt.Decision, attempt.By
+			}
+		}
+		out = append(out, settled)
 		if len(s.prompts) == 0 && s.busy {
 			s.Info.Status = "running"
 		}
-	case "clarify.request":
-		s.uncertain = true
-		s.Info.Status = "waiting_approval"
-		out = append(out, protocol.Event{Type: "notice", Level: "warning", Text: "Hermes 需要补充回答，请在电脑打开原会话处理"})
 	case "session.info":
 		var state struct {
 			Generation int64 `json:"execution_generation"`

@@ -120,11 +120,14 @@ func (c *Client) setDirectAPI(ctx context.Context, cmd map[string]any) (any, err
 	if err := validateDirectBinding(ctx, c.o.Store.Get()); err != nil {
 		return nil, err
 	}
+	if c.o.Store.Get().RemoteConnectionEpoch != snapshot.RemoteConnectionEpoch {
+		return nil, errors.New("连接方式已变化，请刷新后重选 API")
+	}
 	err = c.o.Store.Update(func(cfg *config.Config) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if !cfg.DirectRelayEnabled || cfg.DirectPhoneID != snapshot.DirectPhoneID || cfg.DirectPhoneHash != snapshot.DirectPhoneHash ||
+		if cfg.RemoteConnectionEpoch != snapshot.RemoteConnectionEpoch || cfg.DeviceID != snapshot.DeviceID || !cfg.DirectRelayEnabled || cfg.DirectPhoneID != snapshot.DirectPhoneID || cfg.DirectPhoneHash != snapshot.DirectPhoneHash ||
 			cfg.GatewayRuntimeKey == "" || cfg.GatewayRuntimeKey != snapshot.GatewayRuntimeKey {
 			return errors.New("直连授权已变化，请重新连接电脑")
 		}

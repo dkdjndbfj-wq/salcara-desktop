@@ -292,6 +292,13 @@ func (a *deepSeekAgent) KnownSessionModel(id string) string {
 	return ""
 }
 
+func (a *deepSeekAgent) SessionRequiresFullAccessConsent(id string) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	s := a.sessions[id]
+	return s != nil && (s.Policy == "" || s.Policy == "auto_all")
+}
+
 func (a *deepSeekAgent) send(ctx context.Context, id, text string, opts TurnOptions) error {
 	if err := ctx.Err(); err != nil {
 		return err

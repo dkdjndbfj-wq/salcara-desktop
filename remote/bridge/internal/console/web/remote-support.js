@@ -2,7 +2,7 @@
 (() => {
   const cache = new Map(), pending = new Map(), attempted = new Set(), queue = [], stationUncertain = new Set();
   let active = 0, expiryTimer = 0, officialPicker = null, stationBusy = '';
-  let stationAccountRows = null, stationAccountRequest = 0;
+  let stationAccountRows = null, stationAccountRequest = 0, stationAccountState = 'idle';
   const unknown = () => ({ apiRemote: 'unknown', accountRemote: 'unknown' });
   function base(raw) {
     try {
@@ -81,21 +81,44 @@
       const current = mode === (row.mode === 'bot' || row.botGroupId ? 'bot' : 'hub') && base(row.hubUrl) === base(S.state?.config?.effectiveHubUrl);
       const badges = ['apiRemote', 'accountRemote'].map(kind => marker(kind, state(row.support, kind), attrs, waiting)).join('');
       const scope = accountStationScope(row);
-      const scopeText = stationAccountRows ? `电脑允许 ${scope.count} / ${scope.total} 个 API` : '正在读取 API 范围';
+      const scopeText = stationAccountRows ? `电脑允许 ${scope.count} / ${scope.total} 个 API` : stationAccountState === 'error' ? 'API 范围暂不可读' : '正在读取 API 范围';
       const scopeTitle = stationAccountRows ? `${scope.names.join('、')}${scope.legacy ? `${scope.names.length ? '；' : ''}含旧版未限定站点的 API` : ''}` : '从本机 API 设置读取';
-      return `<div class="remote-station-row"><div class="remote-station-name-wrap"><div class="remote-station-name" title="${esc(row.hubUrl)}">${esc(row.name || row.hubUrl)}<span class="remote-station-current ${current ? '' : 'is-inactive'}">${current ? '当前启用' : '已保存，未启用'}</span></div><small class="remote-station-api-scope" title="${esc(scopeTitle)}">${esc(scopeText)}</small></div><div class="account-remote-support">${badges}</div><button class="btn sm ghost" data-act="remoteStationProbe" data-hub="${esc(row.hubUrl)}" ${stationBusy ? 'disabled' : ''}>${waiting ? '处理中' : '检测'}</button>${!official || ready ? `<button class="btn sm" data-act="remoteStationSelect" data-hub="${esc(row.hubUrl)}" ${stationBusy || !official && current ? 'disabled' : ''}>${official ? '选择' : current ? '已启用' : '启用中转站'}</button>` : '<span class="remote-station-unavailable">暂不支持</span>'}</div>`;
+      return `<div class="remote-station-row"><div class="remote-station-name-wrap"><div class="remote-station-name" title="${esc(row.hubUrl)}">${esc(row.name || row.hubUrl)}<span class="remote-station-current ${current ? '' : 'is-inactive'}">${current ? '当前启用' : '已保存，未启用'}</span></div><small class="remote-station-api-scope" title="${esc(scopeTitle)}">${esc(scopeText)}</small></div><div class="account-remote-support">${badges}</div><button class="btn sm ghost" data-act="remoteStationProbe" data-hub="${esc(row.hubUrl)}" ${stationBusy ? 'disabled' : ''}>${waiting ? '处理中' : '检测'}</button>${!official || ready ? `<button class="btn sm" data-act="remoteStationSelect" data-hub="${esc(row.hubUrl)}" ${stationBusy || !official && current ? 'disabled' : ''}>${official ? '选择' : current ? '已启用' : '启用中转站'}</button>` : '<span class="remote-station-unavailable">暂不支持</span>'}${!official && typeof rmConnectionManageMarkup === 'function' ? rmConnectionManageMarkup(row) : ''}</div>`;
     }).join('');
   }
-  globalThis.remoteSavedStationsHTML = config => {
+  function scopeStatus() {
+    const node = $('#remoteSupportScopeStatus');
+    if (node) node.innerHTML = stationAccountState === 'error' ? '未能读取本机 API 范围。<button class="rm-link" data-act="remoteScopeRetry">重新读取</button>' : '';
+  }
+  async function loadStationScope() {
     stationAccountRows = null;
+    stationAccountState = 'loading';
     const request = ++stationAccountRequest;
-    Promise.resolve().then(() => api('/api/local/accounts')).then(local => {
-      const root = $('#savedRemoteStations');
-      if (request !== stationAccountRequest || S.route !== 'login' || !root) return;
+    // Start after the returned markup is mounted; retain this exact owner.
+    await Promise.resolve();
+    const root = $('#savedRemoteStations'), revision = S.routeRevision;
+    const current = () => request === stationAccountRequest && S.route === 'login' && S.routeRevision === revision && root && root === $('#savedRemoteStations');
+    if (!current()) return;
+    root.innerHTML = stationRowsHTML(stations('hub'), false); scopeStatus();
+    try {
+      const local = await api('/api/local/accounts');
+      if (!current()) return;
+      if (!Array.isArray(local.accounts)) throw new Error('API 范围响应不完整');
       stationAccountRows = Array.isArray(local.accounts) ? local.accounts : [];
+      stationAccountState = 'ready';
+    } catch (_) {
+      if (!current()) return;
+      stationAccountState = 'error';
+    }
+    if (current()) {
       root.innerHTML = stationRowsHTML(stations('hub'), false);
-    }).catch(() => undefined);
-    return `<section class="rm-sec"><div class="rm-sec-head"><h3>已保存站点</h3><span class="rm-sub">API 远程 · 账号远程</span></div><div id="savedRemoteStations" class="remote-stations">${stationRowsHTML(config.remoteConnections || [], false)}</div><div id="remoteSupportError" class="rm-error" aria-live="polite"></div></section>`;
+      scopeStatus();
+    }
+  }
+  ACTIONS.remoteScopeRetry = () => { if (S.route === 'login' && stationAccountState !== 'loading' && $('#savedRemoteStations')) return loadStationScope(); };
+  globalThis.remoteSavedStationsHTML = config => {
+    void loadStationScope();
+    return `<section class="rm-saved-station-settings"><div class="rm-sec-head"><h3>中转站</h3><span class="rm-sub">API 远程 · 账号远程</span></div><div id="savedRemoteStations" class="remote-stations">${stationRowsHTML(config.remoteConnections || [], false)}</div><div id="remoteSupportScopeStatus" class="rm-error" role="status"></div><div id="remoteSupportError" class="rm-error" aria-live="polite"></div></section>`;
   };
   function nextExpiry() {
     clearTimeout(expiryTimer);
@@ -118,7 +141,8 @@
       const officialNode = document.getElementById('officialRemote-' + account.id);
       if (S.route === 'accounts' && officialNode && officialNode.dataset.source === account.sourceRevision && officialReady(account)) officialNode.innerHTML = officialMarks(account);
     }
-    if (S.route === 'login' && $('#savedRemoteStations')) $('#savedRemoteStations').innerHTML = stationRowsHTML(stations('hub'), false);
+    if (S.route === 'login' && $('#savedRemoteStations') && !document.activeElement?.closest?.('#savedRemoteStations')) $('#savedRemoteStations').innerHTML = stationRowsHTML(stations('hub'), false);
+    scopeStatus();
     renderPicker(officialPicker);
     nextExpiry();
   }
@@ -190,6 +214,7 @@
     if (!currentSurface(owner) || revision !== S.localAccountsRevision) return;
     S.local = local;
     stationAccountRows = Array.isArray(local.accounts) ? local.accounts : [];
+    stationAccountState = 'ready';
     if (S.state?.config) S.state.config.remoteConnections = local.remoteStations || [];
     if (S.route === 'accounts') renderLocalCards();
     sync();

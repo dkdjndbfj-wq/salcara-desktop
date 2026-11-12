@@ -12,7 +12,7 @@ function wbClaudeDesktopCard(tool) {
   const binding = bindingFor(tool), savedAccount = accountFor(binding.accountId);
   const account = savedAccount && wbAccountAllowed(savedAccount, 'claude-desktop') ? savedAccount : null;
   const status = !tool.available ? '<span class="chip">未安装</span>' : account && binding.pending ? '<span class="chip warn">待应用</span>' : '';
-  const menu = cdMore(`<button class="btn sm ghost" data-act="cdRestore">${icon('refresh')}恢复原配置</button>${account ? `<button class="btn sm ghost" data-act="localEdit" data-id="${esc(account.id)}">${icon('edit')}编辑密钥</button>` : ''}
+  const menu = cdMore(`${account ? '<button class="btn sm ghost" data-act="wbConfigure" data-target="claude-desktop">API / 模型设置</button>' : ''}<button class="btn sm ghost" data-act="cdRestore">${icon('refresh')}恢复原配置</button>${account ? `<button class="btn sm ghost" data-act="localEdit" data-id="${esc(account.id)}">${icon('edit')}编辑密钥</button>` : ''}
     <p class="wb-note">沿用同一个第三方聊天库，不新建实例。</p>`);
   const controls = tool.available ? wbCardControls(tool,
     `<span class="wb-key-wrap"><span class="wb-key-face" data-face="${account && typeof keyCardFace === 'function' ? keyCardFace(account.id) : 'none'}"></span><select class="input wb-key" id="cdKey" aria-label="Claude Desktop 使用的 API 密钥" data-cd-key>
@@ -45,7 +45,7 @@ function cdModal(account, status, error, draft) {
 
 async function cdOpen(button) {
   const id = bindingFor({ id: 'claude-desktop' }).accountId;
-  if (id) await wbOpenAccount('claude-desktop', id, button);
+  if (id) await wbOpenAccount('claude-desktop', id, button, { quickLaunch: true });
 }
 
 Object.assign(ACTIONS, {

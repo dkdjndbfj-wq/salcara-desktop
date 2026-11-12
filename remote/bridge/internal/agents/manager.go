@@ -280,6 +280,7 @@ func (m *manager) publishAgentEvent(a Agent, registeredID string, e protocol.Eve
 	// in-process handoff, which is intentionally excluded from JSON.
 	copy := cloneProtocolEvent(e)
 	copy.Tool, copy.SessionKey = registeredID, key
+	copy = protocol.NormalizeTimelineEvent(copy)
 	if copy.Session != nil {
 		*copy.Session = ProjectSessionInfo(*copy.Session, registeredID, d.Capabilities)
 		m.applyWorkspaceMode(copy.Session)

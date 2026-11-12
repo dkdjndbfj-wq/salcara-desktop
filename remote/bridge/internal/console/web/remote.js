@@ -145,7 +145,13 @@ function rmShowEnrollmentFallback(owner, error, hasAPI) {
   if (fallback) fallback.hidden = false;
 }
 async function rmRefreshAcceptedConnection() {
-  try { return await loadState(); }
+  try {
+    const state = await loadState();
+    // Saved connection metadata is authoritative here; do not resurrect a
+    // removed target from an older accounts-page snapshot after a mutation.
+    if (S.local && Array.isArray(state?.config?.remoteConnections)) S.local.remoteStations = state.config.remoteConnections;
+    return state;
+  }
   catch (_) { return null; } // A refresh failure cannot undo an accepted mutation.
 }
 function rmConnectionError(owner, node, error) {
@@ -246,18 +252,20 @@ function rmSelectInitialMode(config) {
   const active = rmEffectiveMode(config);
   RM.remoteMode = active === 'hub' || active === 'none' ? 'station' : active;
 }
-function rmConnectionTarget(mode, hubUrl = '', groupId = '') {
+function rmConnectionTarget(mode, hubUrl = '', groupId = '', name = '') {
   const hub = mode === 'hub' || mode === 'bot' ? rmNormalizeHub(hubUrl) : '';
   const group = mode === 'bot' ? String(groupId || '') : '';
   return { mode, hubUrl: hub, groupId: group, key: JSON.stringify([mode, hub, group]),
-    label: mode === 'bot' ? `Bot · ${group || '未指定组'} — ${hub}` : mode === 'hub' ? `Hub · ${hub}` : RM_MODE_NAMES[mode] };
+    label: mode === 'bot' ? `${name || 'Bot'} · 组 ${group || '未指定'} — ${host(hub)}` : mode === 'hub' ? `${name || '中转站'} — ${host(hub)}` : RM_MODE_NAMES[mode] };
 }
 function rmActiveTarget(config = S.state?.config) {
-  return rmConnectionTarget(rmEffectiveMode(config), config?.effectiveHubUrl || config?.hubUrl, config?.remoteModes?.bot?.groupId);
+  const mode = rmEffectiveMode(config), url = config?.effectiveHubUrl || config?.hubUrl, group = config?.remoteModes?.bot?.groupId;
+  const row = rmSavedConnections(config, mode).find(row => rmNormalizeHub(row.hubUrl) === rmNormalizeHub(url) && (mode !== 'bot' || String(row.groupId || row.botGroupId || '') === String(group || '')));
+  return rmConnectionTarget(mode, url, group, row?.name);
 }
 function rmSwitchTargets(config = S.state?.config) {
-  return [...rmSavedConnections(config, 'hub').map(row => rmConnectionTarget('hub', row.hubUrl)),
-    ...rmSavedConnections(config, 'bot').filter(row => row.groupId || row.botGroupId).map(row => rmConnectionTarget('bot', row.hubUrl, row.groupId || row.botGroupId)),
+  return [...rmSavedConnections(config, 'hub').map(row => rmConnectionTarget('hub', row.hubUrl, '', row.name)),
+    ...rmSavedConnections(config, 'bot').filter(row => row.groupId || row.botGroupId).map(row => rmConnectionTarget('bot', row.hubUrl, row.groupId || row.botGroupId, row.name)),
     rmConnectionTarget('direct')];
 }
 function rmSwitchState(config = S.state?.config) {
@@ -269,7 +277,14 @@ function rmSwitchState(config = S.state?.config) {
     const initial = targets.find(row => row.key === active.key) || targets[0];
     RM.switchDraft = RM.switchDrafts[mode] || { mode, key: initial?.key || '', label: initial?.label || '', error: '' };
   }
-  const draft = RM.switchDraft, target = targets.find(row => row.key === draft.key);
+  const draft = RM.switchDraft;
+  // Only an untouched empty choice may follow the first saved connection.
+  // Explicit selections, including removed targets, stay owned by the user.
+  if (!draft.key && !draft.touched && targets.length) {
+    const initial = targets.find(row => row.key === active.key) || targets[0];
+    draft.key = initial.key; draft.label = initial.label;
+  }
+  const target = targets.find(row => row.key === draft.key);
   const current = !!target && target.key === active.key;
   const action = RM.connectionAction, busy = !!action && (action.submitted || action.current());
   const pending = busy && !!action.switchDraft;
@@ -284,6 +299,11 @@ function rmSwitchState(config = S.state?.config) {
 // and a failed switch remain owned by the user's draft, not by server polling.
 function rmUpdateSwitchStatus() {
   const state = rmSwitchState();
+  const picker = document.getElementById('rmSwitchTarget');
+  if (picker && !picker.value && !state.draft.touched && state.target) {
+    picker.innerHTML = state.targets.map(row => `<option value="${esc(row.key)}" ${row.key === state.draft.key ? 'selected' : ''}>${esc(row.label)}</option>`).join('');
+    picker.value = state.draft.key; picker.disabled = false;
+  }
   const note = document.getElementById('rmSwitchNote');
   if (note) note.textContent = state.note;
   const button = document.getElementById('rmSwitchApply');
@@ -356,17 +376,20 @@ function rmRecoveryMarkup(hub = {}) {
 function rmUpdateRemoteStatus(hub = S.state?.hub) {
   if (S.route !== 'login') return;
   rmSyncAgentForm();
-  if (!hub || hub.deviceId && hub.deviceId !== S.state?.config?.deviceId) return;
-  if (hub.hubUrl && rmNormalizeHub(hub.hubUrl) !== rmNormalizeHub(S.state?.config?.effectiveHubUrl || S.state?.config?.hubUrl)) return;
+  if (rmEffectiveMode() !== 'direct' && (!hub || hub.deviceId && hub.deviceId !== S.state?.config?.deviceId)) return;
+  if (rmEffectiveMode() !== 'direct' && hub.hubUrl && rmNormalizeHub(hub.hubUrl) !== rmNormalizeHub(S.state?.config?.effectiveHubUrl || S.state?.config?.hubUrl)) return;
+  hub ||= {};
   rmUpdateModeStatus();
+  const scope = document.getElementById('rmAgentScope');
+  if (scope) scope.textContent = rmAgentScopeMarkup();
   if (typeof syncRemoteSupport === 'function') syncRemoteSupport();
   const recovery = document.getElementById('rmRecovery');
   if (recovery?.isConnected !== false && recovery) recovery.innerHTML = rmRecoveryMarkup(hub);
   const binding = document.getElementById('rmPhoneBinding');
   if (binding?.isConnected !== false && binding) binding.innerHTML = rmPhoneBindingMarkup();
-  if (RM.remoteMode === 'bot') {
+  {
     const saved = document.getElementById('rmSavedBots');
-    if (saved) saved.innerHTML = rmSavedBotsMarkup(S.state?.config || {});
+    if (saved && !document.activeElement?.closest?.('#rmSavedBots')) saved.innerHTML = rmSavedBotsMarkup(S.state?.config || {});
   }
   const active = ['hub', 'bot'].includes(rmEffectiveMode());
   const connected = active && hub.state === 'connected';
@@ -374,8 +397,8 @@ function rmUpdateRemoteStatus(hub = S.state?.hub) {
   if (meta) meta.textContent = `${active ? rmConnectionLabel(hub) : '已保存，未启用'} · ${host(S.state?.config?.relayRoot || S.state?.config?.effectiveHubUrl)}`;
   const dot = document.getElementById('rmHubConnectionDot');
   if (dot) dot.className = `rm-dot ${!active ? '' : connected ? 'ok' : hub.error ? 'bad' : 'wait'}`;
-  const error = document.getElementById('rmHubConnectionError');
-  if (error) error.innerHTML = active && !connected && hub.error ? `<div class="rm-error">${esc(hub.error)}</div>` : '';
+  // rmConnectionStepsMarkup owns the error for every mode. Do not overwrite a
+  // direct error with an unrelated (often inactive) Hub status here.
   const section = document.getElementById('rmPairSection');
   if (section?.classList) section.classList.toggle('off', rmEffectiveMode() === 'hub' && !connected);
   const revoke = document.getElementById('rmPairRevoke');
@@ -429,7 +452,7 @@ function renderRemoteLoginPage(view, st) {
   if (typeof renderApprovalsBox === 'function') renderApprovalsBox();
   rmTickQR();
   if (typeof selfhostAttach === 'function') selfhostAttach(view, pageEpoch);
-  if (RM.remoteMode === 'station' && RM.agentSettingsOpen) rmLoadAgents(pageEpoch);
+  if (RM.agentSettingsOpen) rmLoadAgents(pageEpoch);
   if (RM.remoteMode === 'station') rmLoadLive(pageEpoch);
   if (RM.remoteMode === 'direct' || rmEffectiveMode() === 'direct') rmLoadDirect(pageEpoch);
   if (typeof syncRemoteSupport === 'function') syncRemoteSupport();
@@ -499,8 +522,100 @@ async function rmLoadDirect(pageEpoch = RM.loginEpoch) {
   return RM.direct;
 }
 
+function rmConnectionEditorCurrent(editor) {
+  return !!editor?.node && RM.connectionEditor === editor && S.route === 'login' && S.routeRevision === editor.routeRevision
+    && editor.node === document.getElementById('rmConnectionEditTitle') && editor.node?.isConnected !== false;
+}
+function rmManagedConnection(mode, hubUrl, groupId) {
+  return rmSavedConnections(S.state?.config, mode).find(row => rmNormalizeHub(row.hubUrl) === rmNormalizeHub(hubUrl)
+    && (mode !== 'bot' || String(row.groupId || row.botGroupId || '') === String(groupId || '')));
+}
+
 Object.assign(ACTIONS, {
+  rmConnectionEdit: button => {
+    if (S.route !== 'login' || RM.connectionAction || S.state?.config?.remoteConnectionManagement !== true) return;
+    const { mode, hub, group = '', operation } = button.dataset;
+    if (!['hub', 'bot'].includes(mode) || !['rename', 'remove'].includes(operation)) return;
+    const row = rmManagedConnection(mode, hub, group);
+    if (!row?.revision) return;
+    if (operation === 'remove' && rmConnectionTarget(mode, hub, group).key === rmActiveTarget().key) { toast('请先停用或切换当前连接，再移除本机保存', 'bad'); return; }
+    const editor = { action: operation, mode, hubUrl: row.hubUrl, groupId: group, expectedRevision: row.revision, routeRevision: S.routeRevision, uncertain: false };
+    RM.connectionEditor = editor;
+    $('#modalRoot').innerHTML = `<div class="modal-back" data-act="closeModal"><div class="modal" data-stop role="dialog" aria-modal="true" aria-labelledby="rmConnectionEditTitle"><div class="modal-head"><h3 id="rmConnectionEditTitle">${operation === 'rename' ? '重命名连接' : '移除本机保存'}</h3><button class="icon-btn" data-act="closeModal" aria-label="关闭">${icon('close')}</button></div><div class="modal-body stack"><p class="muted small">${esc(row.name || host(row.hubUrl))}${group ? ` · 组 ${esc(group)}` : ''}</p>${operation === 'rename' ? `<label class="field"><span>连接名称</span><input class="input" id="rmConnectionName" maxlength="80" value="${esc(row.name || '')}" autocomplete="off"></label>` : '<p>仅从这台电脑移除保存的连接。此操作不会撤销服务器上的手机授权；需要撤销时，请在原站点或 Bot 管理端处理。API、对话和直连配对保留。</p>'}<div id="rmConnectionEditError" class="rm-error" role="status"></div></div><div class="modal-foot"><button class="btn ghost" data-act="closeModal">取消</button><button class="btn ${operation === 'remove' ? 'danger' : 'primary'}" data-act="rmConnectionManageSave">${operation === 'rename' ? '保存名称' : '移除本机保存'}</button></div></div></div>`;
+    editor.node = document.getElementById('rmConnectionEditTitle');
+    document.getElementById('rmConnectionName')?.focus();
+  },
+  rmConnectionManageSave: async button => {
+    const editor = RM.connectionEditor;
+    if (!rmConnectionEditorCurrent(editor) || editor.uncertain) return;
+    const fields = editor.action === 'rename' ? ['rmConnectionName'] : [];
+    const owner = rmBeginConnectionAction(button, RM.remoteMode, fields, () => rmConnectionEditorCurrent(editor));
+    if (!owner) return;
+    const output = document.getElementById('rmConnectionEditError');
+    const body = { action: editor.action, mode: editor.mode, hubUrl: editor.hubUrl, groupId: editor.groupId, expectedRevision: editor.expectedRevision };
+    if (editor.action === 'rename') body.name = owner.fields[0].value.trim();
+    try { await busy(button, async () => {
+      try {
+        if (!owner.current()) return;
+        if (body.action === 'rename' && (!body.name || body.name.length > 80)) throw Object.assign(new Error('请填写 1–80 字的连接名称'), { status: 400 });
+        if (rmManagedConnection(body.mode, body.hubUrl, body.groupId)?.revision !== body.expectedRevision) throw Object.assign(new Error('连接已变化，请关闭后重新选择'), { status: 409 });
+        if (body.action === 'remove' && rmConnectionTarget(body.mode, body.hubUrl, body.groupId).key === rmActiveTarget().key) throw Object.assign(new Error('请先停用或切换当前连接'), { status: 409 });
+        owner.submitted = true;
+        const result = await api('/api/remote/connections/manage', body);
+        if (result?.ok !== true || result.action !== body.action || result.mode !== body.mode || rmNormalizeHub(result.hubUrl) !== rmNormalizeHub(body.hubUrl) || String(result.groupId || '') !== body.groupId) throw new Error('连接修改结果未确认，请刷新后核对');
+        await rmRefreshAcceptedConnection();
+        if (owner.current()) { $('#modalRoot').innerHTML = ''; RM.connectionEditor = null; toast(body.action === 'rename' ? '连接名称已保存' : '已移除本机保存', 'ok'); await route(); }
+      } catch (error) {
+        if (owner.submitted) await rmRefreshAcceptedConnection();
+        editor.uncertain = owner.submitted && (!Number.isInteger(error.status) || error.status >= 500 || error.status === 408);
+        rmConnectionError(owner, output, error);
+        if (owner.current() && editor.uncertain && output) output.innerHTML += '<button class="rm-link" data-act="rmConnectionEditRefresh">刷新连接并重新选择</button>';
+      }
+    }); } finally {
+      rmFinishConnectionAction(owner);
+      if (rmConnectionEditorCurrent(editor) && editor.uncertain) button.disabled = true;
+    }
+  },
+  rmConnectionEditRefresh: async () => {
+    const editor = RM.connectionEditor;
+    if (!rmConnectionEditorCurrent(editor) || RM.connectionAction) return;
+    try {
+      await loadState();
+      if (rmConnectionEditorCurrent(editor)) { $('#modalRoot').innerHTML = ''; RM.connectionEditor = null; await route(); }
+    } catch (error) { if (rmConnectionEditorCurrent(editor)) document.getElementById('rmConnectionEditError').textContent = error.message || '暂时无法刷新，请重试'; }
+  },
   rmRecoverySessions: () => { location.hash = '#sessions'; },
+  rmShowRecovery: async (button) => {
+    const section = button.dataset.section;
+    if (section === 'bot' && !rmSavedConnections(S.state?.config, 'bot').length) {
+      await ACTIONS.rmMode({ dataset: { mode: 'bot' } });
+      document.getElementById('rmBotBinding')?.focus();
+      return;
+    }
+    const advanced = document.getElementById('rmAdvanced');
+    const detail = document.getElementById(section === 'bot' ? 'rmBotRecovery' : 'rmEnrollmentRecovery');
+    if (advanced) advanced.open = true;
+    if (detail) { detail.open = true; detail.scrollIntoView?.({ block: 'nearest', behavior: 'smooth' }); }
+    if (section === 'enrollment') document.getElementById('rmRecoveryClaim')?.focus();
+  },
+  rmReloadAgents: async () => {
+    if (RM.connectionAction) return;
+    const epoch = RM.loginEpoch;
+    try { await loadState(); } catch (_) { /* The catalogue still reports a useful read error below. */ }
+    if (S.route !== 'login' || epoch !== RM.loginEpoch) return;
+    RM.agentForm = null; await rmLoadAgents(epoch);
+  },
+  rmCopyDiagnostics: () => {
+    const state = S.state || {}, config = state.config || {}, mode = rmEffectiveMode(config), hub = rmScopedHubStatus(state), direct = RM.direct || {};
+    const recovery = hub.recovery || {};
+    const lines = ['Salcara Bridge 连接诊断', `时间：${new Date().toLocaleString()}`, `版本：${state.version || '未知'}`,
+      `连接方式：${RM_MODE_NAMES[mode]}`, `连接状态：${mode === 'direct' ? direct.connected ? '手机已连接' : direct.running ? '直连已就绪' : '直连未就绪' : mode === 'none' ? '未启用' : rmConnectionLabel(hub)}`,
+      `手机配对：${mode === 'direct' ? direct.paired || config.remoteModes?.direct?.paired ? '已配对' : '未配对' : mode === 'bot' ? '由 Bot 组管理' : hub.pairing?.paired ? '已绑定' : '未绑定'}`,
+      `错误类别：${mode === 'direct' ? direct.error ? 'direct_unavailable' : '无' : hub.errorCode || '无'}`,
+      `消息恢复：${mode === 'direct' ? '电脑与手机直连' : recovery.state || '未检查'}`, `待同步消息：${mode === 'direct' ? '不适用' : Math.max(0, Number(hub.queued) || 0)}`,
+      '此摘要不含密钥、电脑标识、连接地址、目录或对话内容。'];
+    return copyText(lines.join('\n'), '连接诊断摘要');
+  },
   rmRecoveryRefresh: async (button) => {
     const pageEpoch = RM.loginEpoch, revision = RM.connectionRevision;
     await busy(button, async () => {
@@ -574,10 +689,10 @@ function rmAPIStationReason(option) {
   }[option.remoteEligibility.reason] || '';
 }
 
-function rmAgentIdentity() { return JSON.stringify([rmActiveTarget().key, S.state?.config?.deviceId || '', rmNormalizeHub(S.state?.config?.effectiveHubUrl || S.state?.config?.hubUrl)]); }
+function rmAgentIdentity() { return JSON.stringify([rmActiveTarget().key, S.state?.config?.deviceId || '', rmNormalizeHub(S.state?.config?.effectiveHubUrl || S.state?.config?.hubUrl), S.state?.config?.remoteAgentSettingsScope || '']); }
 function rmAgentFormCurrent(form) {
   return !!form && RM.agentForm === form && form.box === document.getElementById('rmAgents') && form.box.isConnected !== false
-    && S.route === 'login' && RM.remoteMode === 'station' && form.pageEpoch === RM.loginEpoch
+    && S.route === 'login' && form.pageEpoch === RM.loginEpoch
     && form.routeRevision === S.routeRevision && form.identity === rmAgentIdentity();
 }
 function rmSyncAgentForm() {
@@ -587,9 +702,9 @@ function rmSyncAgentForm() {
   // pending. The save handler independently checks this mount's identity.
   RM.agentForm = null;
   if (form.box.isConnected !== false) form.box.innerHTML = '<p class="rm-recovery-note">连接已改变，请展开读取当前连接的 Agent API。</p>';
-  if (RM.remoteMode === 'station' && RM.agentSettingsOpen) void rmLoadAgents();
+  if (RM.agentSettingsOpen) void rmLoadAgents();
 }
-async function rmLoadAgents(pageEpoch = RM.loginEpoch) {
+async function rmLoadAgents(pageEpoch = RM.loginEpoch, scopeRetried = false) {
   const box = document.getElementById('rmAgents');
   if (!box) return;
   if (rmAgentFormCurrent(RM.agentForm)) {
@@ -604,8 +719,18 @@ async function rmLoadAgents(pageEpoch = RM.loginEpoch) {
     form.promise = api('/api/remote/agents');
     const agents = await form.promise;
     if (!current()) return;
+    if (typeof agents.settingsScope !== 'string' || !agents.settingsScope || !S.state?.config?.remoteAgentSettingsScope) throw new Error('设置范围未确认，请刷新连接状态或更新电脑端后重试');
+    if (agents.settingsScope !== S.state.config.remoteAgentSettingsScope) {
+      await loadState();
+      const mounted = RM.agentForm === form && form.box === document.getElementById('rmAgents') && S.route === 'login' && pageEpoch === RM.loginEpoch;
+      if (!mounted) return;
+      RM.agentForm = null;
+      if (!scopeRetried) return await rmLoadAgents(pageEpoch, true);
+      box.innerHTML = '<div class="rm-error" role="status">连接或手机配对仍在变化，请稍后重新读取。<button class="rm-link" data-act="rmReloadAgents">重新读取</button></div>';
+      return;
+    }
     RM.agents = form.catalog = agents;
-  } catch (e) { if (current()) box.innerHTML = `<div class="rm-error" style="margin:12px">${esc(e.message)}</div>`; return; }
+  } catch (e) { if (current()) box.innerHTML = `<div class="rm-error" role="status" style="margin:12px">${esc(e.message)} <button class="rm-link" data-act="rmReloadAgents">重新读取</button></div>`; return; }
   finally { form.promise = null; }
   if (!current()) return;
   const apis = RM.agents.apis || [];
@@ -640,7 +765,8 @@ document.addEventListener('change', (e) => {
 
 Object.assign(ACTIONS, {
   rmReenroll: async (button) => {
-    const owner = rmBeginConnectionAction(button, 'station', ['rmRecoveryClaim']);
+    if (rmEffectiveMode() !== 'hub') return;
+    const owner = rmBeginConnectionAction(button, RM.remoteMode, ['rmRecoveryClaim']);
     if (!owner) return;
     const cfg = S.state?.config, identity = JSON.stringify([cfg?.deviceId, cfg?.effectiveHubUrl]);
     const enrollmentClaim = owner.fields[0].value.trim();
@@ -700,7 +826,7 @@ Object.assign(ACTIONS, {
           if (switching) {
             rmUpdateRemoteStatus();
             if (mode === 'direct') void rmLoadDirect(owner.pageEpoch);
-            if (RM.remoteMode === 'station' && RM.agentSettingsOpen) void rmLoadAgents(owner.pageEpoch);
+            if (RM.agentSettingsOpen) void rmLoadAgents(owner.pageEpoch);
           }
           else await route();
         }
@@ -770,7 +896,7 @@ Object.assign(ACTIONS, {
     const hubUrl = b.dataset.hub || '', groupId = b.dataset.group || '';
     const saved = () => rmSavedConnections(S.state?.config, 'bot').some(row => rmNormalizeHub(row.hubUrl) === rmNormalizeHub(hubUrl) && String(row.groupId || row.botGroupId || '') === groupId);
     if (!groupId || !saved()) return;
-    const owner = rmBeginConnectionAction(b, 'bot', [field]);
+    const owner = rmBeginConnectionAction(b, RM.remoteMode, [field]);
     if (!owner) return;
     const controlsCurrent = owner.current;
     owner.current = () => controlsCurrent() && saved();
@@ -923,7 +1049,7 @@ Object.assign(ACTIONS, {
   rmSaveApi: async (b) => {
     const id = b.dataset.agent;
     const form = RM.agentForm;
-    if (!AGENT_INFO[id] || !form?.ready || !rmAgentFormCurrent(form)) { rmSyncAgentForm(); return; }
+    if (!AGENT_INFO[id] || !form?.ready || !rmAgentFormCurrent(form) || !form.catalog?.settingsScope || form.catalog.settingsScope !== S.state?.config?.remoteAgentSettingsScope) { rmSyncAgentForm(); return; }
     const fields = ['rmAgentApi-' + id, 'rmAgentModel-' + id];
     if (fields.some(field => !document.getElementById(field) || form.box.contains && !form.box.contains(document.getElementById(field)))) return;
     const owner = rmBeginConnectionAction(b, RM.remoteMode, fields, () => rmAgentFormCurrent(form));
@@ -937,7 +1063,11 @@ Object.assign(ACTIONS, {
         const chosen = (form.catalog.apis || []).find(row => row.id === accountId);
         if (accountId && (!chosen || rmAPIStationReason(chosen))) throw Object.assign(new Error('所选 API 不再可用或未获当前站点授权，请重新选择'), { status: 409 });
         owner.submitted = true;
-        const result = await api('/api/remote/agents/api', { agent: id, accountId, model });
+        const result = await api('/api/remote/agents/api', { agent: id, accountId, model, expectedSettingsScope: form.catalog.settingsScope });
+        if (result?.settingsScope !== form.catalog.settingsScope) {
+          form.ready = false;
+          throw new Error('设置范围已变化或保存结果未确认，请重新读取后核对');
+        }
         const saved = result?.agents?.find(row => row.id === id)?.api;
         if (!saved || (accountId ? saved.source !== 'phone' || saved.accountId !== accountId || model && saved.model !== model : saved.source === 'phone')) throw new Error('服务器未确认 API 设置，请重新读取后核对');
         if (!owner.current()) return;
@@ -945,7 +1075,11 @@ Object.assign(ACTIONS, {
         const summary = document.getElementById('rmAgentSummary-' + id);
         if (summary) summary.textContent = accountId ? `远程任务：${saved.name || chosen.name || '所选 API'}${saved.model ? ' · ' + saved.model : ''}` : '跟随电脑设置';
         toast(accountId ? '已保存：手机发起的任务将使用这个 API' : '已改为跟随电脑设置', 'ok');
-      } catch (e) { rmConnectionError(owner, out, e); }
+      } catch (e) {
+        if (owner.submitted && (e.status === 409 || !Number.isInteger(e.status) || e.status >= 500 || e.status === 408)) form.ready = false;
+        rmConnectionError(owner, out, e);
+        if (owner.current() && !form.ready && out) out.innerHTML += '<button class="rm-link" data-act="rmReloadAgents">重新读取</button>';
+      }
     }); } finally { rmFinishConnectionAction(owner); }
   },
   rmProj: async (b) => {
@@ -1049,7 +1183,7 @@ function renderSessionList() {
     const shown = q || RM.expanded[g.k] ? g.items : g.items.slice(0, 8);
     return `<div class="cx-proj">${icon('folder')}<span>${esc(g.name)}</span></div>${shown.map((s) => {
       const lead = pending.has(s.sessionKey) ? '<span class="rm-dot" style="background:var(--rm-warn)"></span>' : !s.historyStale && s.status === 'running' ? '<span class="rm-dot wait" style="background:var(--rm-blue)"></span>' : '';
-      return `<div class="cx-row ${s.sessionKey === S.openKey && !RM.newThread ? 'sel' : ''}" data-act="openSess" data-k="${esc(s.sessionKey)}" title="${esc(s.title || '')}"><span class="lead">${lead}</span><span class="t">${esc(s.title || '无标题对话')}</span><span class="time">${pending.has(s.sessionKey) ? '待批准' : s.historyStale ? '待刷新' : s.status === 'running' ? '运行中' : esc(relTime(s.updatedAt))}</span></div>`;
+      return `<button type="button" class="cx-row ${s.sessionKey === S.openKey && !RM.newThread ? 'sel' : ''}" data-act="openSess" data-k="${esc(s.sessionKey)}" aria-pressed="${s.sessionKey === S.openKey && !RM.newThread}" title="${esc(s.title || '')}"><span class="lead">${lead}</span><span class="t">${esc(s.title || '无标题对话')}</span><span class="time">${pending.has(s.sessionKey) ? '待批准' : s.historyStale ? '待刷新' : s.status === 'running' ? '运行中' : esc(relTime(s.updatedAt))}</span></button>`;
     }).join('')}${!q && g.items.length > 8 ? `<button class="cx-more" data-act="cxMore" data-k="${esc(g.k)}">${RM.expanded[g.k] ? '收起' : `显示全部 ${g.items.length} 个`}</button>` : ''}`;
   }).join('') + renderArchivedSessions(q) + error;
   patchSessionMarkup(el, markup, RM.tool);
@@ -1532,7 +1666,7 @@ document.addEventListener('change', (e) => {
   }
   if (e.target.id === 'rmSwitchTarget' && S.route === 'login') {
     const state = rmSwitchState(), target = state.targets.find(row => row.key === e.target.value);
-    RM.switchDraft = { mode: state.mode, key: e.target.value || '', label: target?.label || '', error: '' };
+    RM.switchDraft = { mode: state.mode, key: e.target.value || '', label: target?.label || '', error: '', touched: true };
     ++RM.connectionRevision;
     rmUpdateSwitchStatus();
   }
@@ -1558,7 +1692,7 @@ document.addEventListener('change', (e) => {
   }
 });
 document.addEventListener('toggle', (e) => {
-  if (e.target.id !== 'rmAgentSettings' || S.route !== 'login' || RM.remoteMode !== 'station' || e.target !== document.getElementById('rmAgentSettings')) return;
+  if (e.target.id !== 'rmAgentSettings' || S.route !== 'login' || e.target !== document.getElementById('rmAgentSettings')) return;
   if (RM.agentSettingsOpen === e.target.open) return;
   RM.agentSettingsOpen = e.target.open;
   ++RM.connectionRevision;

@@ -55,3 +55,39 @@ func TestPersistentSideQuestionWindowsHistoryACL(t *testing.T) {
 		}
 	}
 }
+
+func TestProtectSideConversationAlreadyOwnedWithoutWriteOwner(t *testing.T) {
+	dir := t.TempDir()
+	user, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Modify permits normal history access but deliberately omits WRITE_OWNER.
+	// The current owner retains the right to protect its own DACL.
+	sd, err := windows.SecurityDescriptorFromString("D:P(A;OICI;0x1201bf;;;" + user.User.Sid.String() + ")(A;OICI;FA;;;SY)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dacl, _, err := sd.DACL()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := windows.SetNamedSecurityInfo(dir, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil, dacl, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := protectSideConversationDirectory(dir); err != nil {
+		t.Fatal("same owner must not require WRITE_OWNER", err)
+	}
+	verified, err := windows.GetNamedSecurityInfo(dir, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner, _, err := verified.Owner()
+	if err != nil || owner == nil || !owner.Equals(user.User.Sid) {
+		t.Fatal("current owner was not retained", err)
+	}
+	dacl, _, err = verified.DACL()
+	if err != nil || dacl == nil || dacl.AceCount != 2 {
+		t.Fatal("protected history DACL changed", err)
+	}
+}

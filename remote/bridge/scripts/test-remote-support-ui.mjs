@@ -21,7 +21,7 @@ function fixture() {
   const local = { accounts: [account, official], remoteStations: [station] };
   function node(id, extra = {}) { const item = { innerHTML: '', textContent: '', dataset: {}, isConnected: true, ...extra }; nodes.set(id, item); return item; }
   const context = vm.createContext({
-    S: { route: 'accounts', local, state: { config: { remoteConnections: [] } } }, ACTIONS: {}, OFFICIAL_PANEL: { epoch: 0 },
+    S: { route: 'accounts', local, state: { config: { remoteConnections: [station] } } }, ACTIONS: {}, OFFICIAL_PANEL: { epoch: 0 },
     RM: { remoteMode: 'station', connectionRevision: 0, loginEpoch: 0 },
     loadState: async () => context.S.state, rmUpdateRemoteStatus() {},
     URL, Date: Clock, icon: () => '', esc: value => String(value).replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('"', '&quot;'),
@@ -59,6 +59,26 @@ function fixture() {
     advance: ms => { state.now += ms; for (const [id, timer] of [...timers]) if (timer.at <= state.now) { timers.delete(id); timer.fn(); } },
   };
 }
+
+test('saved-station API scope read failure becomes an error with a working local retry', async () => {
+  const f = fixture(); f.context.S.route = 'login';
+  const root = f.node('#savedRemoteStations'), status = f.node('#remoteSupportScopeStatus');
+  f.state.intercept = path => { if (path === '/api/local/accounts') throw Error('fixture unavailable'); };
+  f.context.remoteSavedStationsHTML({ remoteConnections: [f.station] }); await settle();
+  assert.match(root.innerHTML, /API 范围暂不可读/); assert.doesNotMatch(root.innerHTML, /正在读取 API 范围/); assert.match(status.innerHTML, /remoteScopeRetry/);
+  f.state.intercept = null; await f.context.ACTIONS.remoteScopeRetry();
+  assert.match(root.innerHTML, /电脑允许/); assert.equal(status.innerHTML, '');
+  assert.equal(f.calls.some(call => call.path === '/api/remote/discover'), false);
+});
+
+test('a late saved-scope response cannot paint a replacement page with the same element id', async () => {
+  const f = fixture(), pending = gate(); f.context.S.route = 'login';
+  f.node('#savedRemoteStations'); f.node('#remoteSupportScopeStatus');
+  f.state.intercept = path => path === '/api/local/accounts' ? pending.promise : undefined;
+  f.context.remoteSavedStationsHTML({ remoteConnections: [f.station] }); await settle();
+  const replacement = f.node('#savedRemoteStations', { innerHTML: 'new owner' });
+  pending.resolve(f.local); await settle(); assert.equal(replacement.innerHTML, 'new owner');
+});
 
 test('API cards render two independent concise states without starting a probe', () => {
   const f = fixture();

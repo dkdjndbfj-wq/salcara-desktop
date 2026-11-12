@@ -13,6 +13,7 @@ const MaxRemoteHubBindings = 32
 // independent of model keys. Hub and Bot may share a server without sharing
 // device credentials or replacing each other's saved binding.
 type RemoteConnection struct {
+	Name              string              `json:"name,omitempty"`
 	RemoteSupport     *StationObservation `json:"remoteSupport,omitempty"`
 	HubURL            string              `json:"hubUrl"`
 	DeviceID          string              `json:"deviceId"`

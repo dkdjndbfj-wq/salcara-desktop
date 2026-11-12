@@ -127,6 +127,33 @@ func TestRemoteConnectionEpochTracksEffectiveTransportWithoutIdentityChange(t *t
 	}
 }
 
+func TestRemoteConnectionEpochRetiresDirectPairingThroughABA(t *testing.T) {
+	store := remoteEpochStore(t)
+	if err := store.Update(func(c *Config) error {
+		c.ActivateRemoteMode("direct")
+		c.DirectPhoneID, c.DirectPhoneHash = "phone-A", "synthetic-A"
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	initial := store.Get()
+	previous := initial.RemoteConnectionEpoch
+	for _, hash := range []string{"", "synthetic-B", initial.DirectPhoneHash} {
+		if err := store.Update(func(c *Config) error {
+			c.DirectPhoneHash = hash
+			c.RemoteConnectionEpoch = initial.RemoteConnectionEpoch
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		current := store.Get()
+		if current.RemoteConnectionEpoch == previous || current.RemoteConnectionEpoch == initial.RemoteConnectionEpoch {
+			t.Fatal("old pairing settings lease revived")
+		}
+		previous = current.RemoteConnectionEpoch
+	}
+}
+
 func TestRemoteConnectionEpochPreservesUnchangedConnectionAndRejectsCallerEpoch(t *testing.T) {
 	store := remoteEpochStore(t)
 	initial := store.Get().RemoteConnectionEpoch

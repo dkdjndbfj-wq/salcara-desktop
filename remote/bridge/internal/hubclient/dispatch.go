@@ -96,6 +96,11 @@ func (c *Client) Dispatch(ctx context.Context, cmd map[string]any) (result any, 
 		return result, err
 	}
 	typ := str(cmd, "type")
+	if c.o.Store != nil {
+		if err := validateRemoteSettingsEpoch(ctx, typ, c.o.Store.Get()); err != nil {
+			return nil, err
+		}
+	}
 	if err := c.checkUpdateCommand(cmd); err != nil {
 		return nil, err
 	}
@@ -149,6 +154,9 @@ func (c *Client) Dispatch(ctx context.Context, cmd map[string]any) (result any, 
 	cfg := config.Config{}
 	if c.o.Store != nil {
 		cfg = c.o.Store.Get()
+	}
+	if err := validateRemoteSettingsEpoch(ctx, typ, cfg); err != nil {
+		return nil, err
 	}
 	if isLocalExecution(ctx) && IsDirectExecution(ctx) {
 		if err := c.validateDirectAdmission(ctx, cfg, cmd); err != nil {
@@ -329,6 +337,7 @@ func (c *Client) Dispatch(ctx context.Context, cmd map[string]any) (result any, 
 		if c.o.Store == nil {
 			return nil, errors.New("程序还在启动，请稍后再试")
 		}
+		stationEpoch := c.o.Store.Get().RemoteConnectionEpoch
 		if err := c.checkRemoteAPIChange(ctx, family, str(cmd, "sessionKey")); err != nil {
 			return nil, err
 		}
@@ -370,9 +379,18 @@ func (c *Client) Dispatch(ctx context.Context, cmd map[string]any) (result any, 
 		if err := c.requireExplicitModelCapability(agentID, model); err != nil {
 			return nil, err
 		}
+		if c.o.Store.Get().RemoteConnectionEpoch != stationEpoch {
+			return nil, errors.New("连接方式或中转站已变化，请刷新后重选 API")
+		}
 		if err := c.o.Store.Update(func(cfg *config.Config) error {
+			if err := validateRemoteSettingsEpoch(ctx, typ, *cfg); err != nil {
+				return err
+			}
 			if err := ctx.Err(); err != nil {
 				return err
+			}
+			if cfg.RemoteConnectionEpoch != stationEpoch {
+				return errors.New("连接方式或中转站已变化，请刷新后重选 API")
 			}
 			if env, ok := executionSourceFromContext(ctx); ok {
 				if err := c.validateExecutionSourceFor(env, *cfg); err != nil {
@@ -415,7 +433,13 @@ func (c *Client) Dispatch(ctx context.Context, cmd map[string]any) (result any, 
 	if typ == "agents.status" {
 		// Confirmation metadata must be available before a CLI manager starts.
 		// This does not select/apply an API, start a tool, or certify upstream health.
-		return c.agentStatus(ctx), nil
+		status := c.agentStatus(ctx)
+		if c.o.Store != nil {
+			if err := validateRemoteSettingsEpoch(ctx, typ, c.o.Store.Get()); err != nil {
+				return nil, err
+			}
+		}
+		return status, nil
 	}
 	if typ == "workspace.projects" {
 		return c.dispatchWorkspaceProjects(ctx, cmd)
@@ -1036,9 +1060,28 @@ func (c *Client) Dispatch(ctx context.Context, cmd map[string]any) (result any, 
 			}
 			answered := false
 			if _, remote := commandGuardFromContext(ctx); directApproval || remote && cfg.RemoteExecutionArmed {
-				answered = agents.RespondForSession(ctx, a, sessionKey, aid, response)
+				if _, typed := a.(agents.TypedApprovalResponder); typed {
+					response.OperationID = str(cmd, "operationId")
+					response.By = "phone"
+					if isLocalExecution(ctx) && !IsDirectExecution(ctx) {
+						response.By = "desktop"
+					}
+				}
+				answered, err = agents.RespondForSessionResult(ctx, a, sessionKey, aid, response)
+				if err != nil {
+					return nil, err
+				}
 			} else {
-				answered = agents.RespondWithAnswers(a, aid, response)
+				if _, typed := a.(agents.TypedApprovalResponder); typed {
+					response.OperationID = str(cmd, "operationId")
+					response.By = "desktop"
+					answered, err = agents.RespondForSessionResult(ctx, a, sessionKey, aid, response)
+					if err != nil {
+						return nil, err
+					}
+				} else {
+					answered = agents.RespondWithAnswers(a, aid, response)
+				}
 			}
 			if answered {
 				return map[string]any{}, nil
@@ -1053,6 +1096,19 @@ func (c *Client) Dispatch(ctx context.Context, cmd map[string]any) (result any, 
 		}
 		for _, a := range m.Agents() {
 			if requireAgentCapability(a, capability) != nil {
+				continue
+			}
+			if typed, ok := a.(interface {
+				RespondWithAnswersResult(context.Context, string, agents.ApprovalResponse) (bool, error)
+			}); ok {
+				response.OperationID, response.By = str(cmd, "operationId"), "desktop"
+				answered, err := typed.RespondWithAnswersResult(ctx, aid, response)
+				if err != nil {
+					return nil, err
+				}
+				if answered {
+					return map[string]any{}, nil
+				}
 				continue
 			}
 			if agents.RespondWithAnswers(a, aid, response) {

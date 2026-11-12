@@ -113,7 +113,7 @@ function wbCard(t) {
   }
   const b = bindingFor(t), savedAccount = accountFor(b.accountId);
   const a = wbAccountAllowed(savedAccount, t.id) ? savedAccount : null;
-  const menu = wbMore(`${a ? `<button class="btn sm ghost" data-act="localEdit" data-id="${esc(a.id)}">${icon('edit')}编辑密钥</button>` : ''}
+  const menu = wbMore(`${a ? `<button class="btn sm ghost" data-act="wbConfigure" data-target="${esc(t.id)}">${icon('gear')}API / 模型设置</button><button class="btn sm ghost" data-act="localEdit" data-id="${esc(a.id)}">${icon('edit')}编辑密钥</button>` : ''}
     ${b.appliedId ? `<button class="btn sm ghost" data-act="localRestore" data-kind="${esc(kind)}">${icon('refresh')}恢复原设置</button>` : ''}
     <p class="wb-note" id="remoteDetail-${esc(t.id)}">${esc(lamp.detail || '')}</p>`);
   const controls = t.available ? wbCardControls(t,
@@ -176,7 +176,7 @@ function wbAccountCurrent(draft) {
   return !!draft && WB.accountOpen === draft && draft.generation === WB.launchGeneration && S.route === draft.route && S.routeRevision === draft.routeRevision && (draft.node ? $(draft.title) === draft.node : $('#modalRoot')?.innerHTML === draft.anchorHTML);
 }
 function wbLaunchFeedback(draft, error) {
-  const status = draft?.operationStage || (draft?.verifying ? '正在检查账号与工具…' : draft?.loading ? '正在读取模型目录…' : draft?.verified ? '点击下方按钮后开始执行。' : '');
+  const status = draft?.operationStage || (draft?.verifying ? '正在检查账号与工具…' : draft?.loading ? '正在读取模型目录…' : draft?.verified ? draft.quickLaunch ? '正在准备启动…' : '点击下方按钮后开始执行。' : '');
   return `<div id="switchError" aria-live="polite">${status ? `<p class="wb-hint" role="status">${esc(status)}</p>` : ''}${draft?.catalogError ? `<p class="wb-hint">${esc(draft.catalogError)} · 可重新加载，或沿用原工具的模型设置。</p>` : ''}${error ? `<div class="callout warn"><div>${esc(error)}${draft?.executionUnknown ? '<br>请在原工具核对配置与任务状态；本次不会自动重试。' : !draft?.verified ? '<br><button class="btn sm" data-act="wbRecheck">重新检查</button>' : ''}</div></div>` : ''}</div>`;
 }
 function wbUpdateLaunchControls(draft) {
@@ -197,7 +197,11 @@ function wbAccountRender(draft, error) {
     toast(error || '账号已变化，请重新选择', 'bad');
     return;
   }
-  if (draft.target === 'claude-desktop') cdModal(account, draft.status, error, draft);
+  if (draft.quickLaunch && !error) {
+    const title = draft.title.slice(1);
+    $('#modalRoot').innerHTML = `<div class="modal-back" data-act="closeModal"><div class="modal wb-open" data-stop role="dialog" aria-modal="true" aria-labelledby="${title}"><div class="modal-head"><h3 id="${title}">正在打开 ${esc(TOOL_LABEL[draft.target] || draft.target)}</h3><button class="icon-btn" data-act="closeModal" aria-label="关闭">✕</button></div><div class="modal-body"><p class="wb-hint">使用 ${esc(account.name)} · ${esc(wbHost(account.baseUrl))}</p>${wbLaunchFeedback(draft)}</div><div class="modal-foot"><button class="btn ghost" data-act="closeModal">取消</button></div></div></div>`;
+  }
+  else if (draft.target === 'claude-desktop') cdModal(account, draft.status, error, draft);
   else wbOpenModal(draft.target, error, draft);
   draft.node = $(draft.title);
 }
@@ -215,7 +219,7 @@ async function wbRefreshLaunchCards() {
   renderAgentCards();
   if (route === 'accounts' && typeof renderLocalCards === 'function') renderLocalCards();
 }
-async function wbOpenAccount(target, id, button) {
+async function wbOpenAccount(target, id, button, options = {}) {
   if (button?.isConnected === false || WB.launchPending) return;
   if (!['codex-desktop', 'codex', 'claude', 'claude-desktop', 'deepseek-harness', 'hermes'].includes(target)) throw new Error('不支持此工具');
   const tool = S.local?.tools?.find(item => item.id === target), account = accountFor(id);
@@ -223,7 +227,7 @@ async function wbOpenAccount(target, id, button) {
   if (target === 'claude-desktop' && typeof cdModal !== 'function') throw new Error('Claude Desktop 配置组件尚未就绪');
   if (wbAccountCurrent(WB.accountOpen) && WB.accountOpen.target === target && WB.accountOpen.id === id && (WB.accountOpen.verifying || WB.accountOpen.verified)) return;
   const binding = tool ? bindingFor(tool) : {};
-  const draft = { target, id, route: S.route, routeRevision: S.routeRevision, generation: ++WB.launchGeneration, title: target === 'claude-desktop' ? '#cdTitle' : '#wbOpenTitle', node: null, anchorHTML: $('#modalRoot')?.innerHTML, override: target === 'claude-desktop' ? binding.override !== false : !!binding.override, status: null, loading: false, verifying: true, verified: false };
+  const draft = { target, id, route: S.route, routeRevision: S.routeRevision, generation: ++WB.launchGeneration, title: target === 'claude-desktop' ? '#cdTitle' : '#wbOpenTitle', node: null, anchorHTML: $('#modalRoot')?.innerHTML, override: target === 'claude-desktop' ? binding.override !== false : !!binding.override, status: null, loading: false, verifying: true, verified: false, quickLaunch: options.quickLaunch === true };
   WB.accountOpen = draft;
   if (tool) wbAccountRender(draft);
   const revision = S.localAccountsRevision = (S.localAccountsRevision || 0) + 1;
@@ -243,11 +247,19 @@ async function wbOpenAccount(target, id, button) {
     wbAccountRender(draft);
   } catch (error) {
     draft.verifying = false;
+    draft.quickLaunch = false;
     if (wbAccountCurrent(draft)) { if (draft.node) wbAccountRender(draft, error.message); else toast(error.message, 'bad'); }
     return;
   } finally { draft.verifying = false; }
   if (target === 'claude-desktop') await wbAccountStatus(draft);
-  else if (!modelsOf(accountFor(id)).length) await wbAccountModels(draft, true);
+  if (draft.quickLaunch && wbAccountCurrent(draft) && draft.verified) {
+    if (target === 'claude-desktop' && (!draft.status?.supported || draft.status.managed)) {
+      draft.quickLaunch = false;
+      wbAccountRender(draft, draft.status?.message || '当前 Claude Desktop 无法由 Bridge 配置，请检查工具状态');
+      return;
+    }
+    await wbAccountGo({ isConnected: true, dataset: { target, id } });
+  } else if (target !== 'claude-desktop' && !draft.quickLaunch && !modelsOf(accountFor(id)).length) await wbAccountModels(draft, true);
 }
 async function wbAccountStatus(draft) {
   try {
@@ -256,7 +268,7 @@ async function wbAccountStatus(draft) {
     draft.status = status;
     wbAccountRender(draft);
   } catch (error) {
-    if (wbAccountCurrent(draft)) { draft.status = { supported: false }; draft.verified = false; wbAccountRender(draft, error.message); }
+    if (wbAccountCurrent(draft)) { draft.status = { supported: false }; draft.verified = false; draft.quickLaunch = false; wbAccountRender(draft, error.message); }
   }
 }
 async function wbAccountModels(draft, quiet) {
@@ -324,6 +336,7 @@ async function wbAccountGo(button) {
     progress.fail(error);
     if (wbAccountCurrent(draft)) {
       draft.verified = false;
+      draft.quickLaunch = false;
       draft.executionUnknown = error.uncertain === true || error.started === true || error.applied === true;
       wbAccountRender(draft, error.message);
     }
@@ -453,6 +466,10 @@ Object.assign(ACTIONS, {
     const target = button.dataset.target, tool = S.local?.tools?.find(item => item.id === target);
     if (!tool) return;
     const id = bindingFor(tool).accountId;
+    if (id) await wbOpenAccount(target, id, button, { quickLaunch: true });
+  },
+  wbConfigure: async (button) => {
+    const target = button.dataset.target, id = bindingFor({ id: target }).accountId;
     if (id) await wbOpenAccount(target, id, button);
   },
   wbOpenGo: wbAccountGo,

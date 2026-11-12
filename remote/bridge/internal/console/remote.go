@@ -316,7 +316,11 @@ func (s *Server) handlePairRevoke(w http.ResponseWriter, r *http.Request) {
 func remoteConnectionChoices(c config.Config) []map[string]any {
 	out := []map[string]any{}
 	for _, p := range c.RemoteConnections {
-		entry := map[string]any{"hubUrl": p.HubURL, "name": strings.TrimPrefix(strings.TrimPrefix(p.HubURL, "https://"), "http://"), "support": stationRemoteSupport(p.RemoteSupport, nil, p.HubURL)}
+		name := strings.TrimSpace(p.Name)
+		if name == "" {
+			name = strings.TrimPrefix(strings.TrimPrefix(p.HubURL, "https://"), "http://")
+		}
+		entry := map[string]any{"hubUrl": p.HubURL, "name": name, "mode": "hub", "revision": remoteConnectionRevision(p), "support": stationRemoteSupport(p.RemoteSupport, nil, p.HubURL)}
 		// Group identity is display metadata only. Never expose the invite or
 		// signature used to register this computer with a Bot relay.
 		if p.BotGroupID != "" {

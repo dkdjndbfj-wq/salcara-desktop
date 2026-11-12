@@ -44,6 +44,7 @@ func (s *Server) routes(m *http.ServeMux) {
 	m.HandleFunc("POST /api/remote/bot-bind", s.handleBotBind)
 	m.HandleFunc("POST /api/remote/ingress", s.handleRemoteIngress)
 	m.HandleFunc("POST /api/remote/mode", s.handleRemoteMode)
+	m.HandleFunc("POST /api/remote/connections/manage", s.handleRemoteConnectionManage)
 	m.HandleFunc("GET /api/toolcfg", s.handleToolcfg)
 	m.HandleFunc("POST /api/toolcfg", s.handleToolcfgAction)
 	m.HandleFunc("GET /api/projects", s.handleProjects)
@@ -57,8 +58,8 @@ func (s *Server) routes(m *http.ServeMux) {
 	m.HandleFunc("POST /api/session/interrupt", s.handleSessionCmd("session.interrupt"))
 	m.HandleFunc("POST /api/session/start", s.handleSessionCmd("session.start"))
 	m.HandleFunc("POST /api/session/navigate", s.handleNavigate)
-	m.HandleFunc("GET /api/remote/agents", s.handleRemoteCmd("agents.status"))
-	m.HandleFunc("POST /api/remote/agents/api", s.handleSessionCmd("agents.api.set"))
+	m.HandleFunc("GET /api/remote/agents", s.handleRemoteAgentSettings("agents.status"))
+	m.HandleFunc("POST /api/remote/agents/api", s.handleRemoteAgentSettings("agents.api.set"))
 	m.HandleFunc("GET /api/remote/projects", s.handleRemoteCmd("projects.list"))
 	m.HandleFunc("GET /api/approvals", s.handleApprovals)
 	m.HandleFunc("POST /api/approval", s.handleApproval)
@@ -151,32 +152,34 @@ func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
 		"installedFrom": os.Getenv(macapp.EnvInstalledFrom),
 		"configDir":     s.d.Dir,
 		"config": map[string]any{
-			"relayRoot":           c.RelayRoot,
-			"hubUrl":              c.HubURL,
-			"effectiveHubUrl":     c.EffectiveHubURL(),
-			"deviceId":            c.DeviceID,
-			"deviceName":          c.DeviceName,
-			"approval":            c.Approval,
-			"allowPhoneAutoAll":   c.AllowPhoneAutoAll,
-			"autostart":           autostart.Enabled(),
-			"openConsoleOnStart":  c.OpenConsoleOnStart,
-			"codexModel":          c.CodexModel,
-			"claudeModel":         c.ClaudeModel,
-			"codexAuthMode":       c.CodexAuthMode,
-			"accountKey":          mask(c.AccountKey),
-			"codexKey":            mask(c.CodexKey),
-			"claudeKey":           mask(c.ClaudeKey),
-			"loggedIn":            c.LoggedIn(),
-			"remoteDeviceOnly":    c.RemoteDeviceOnly,
-			"activeRemoteMode":    c.ActiveRemoteMode,
-			"effectiveRemoteMode": c.EffectiveRemoteMode(),
-			"remoteModes":         remoteModeChoices(c),
-			"remoteConnections":   remoteConnectionChoices(c),
-			"projects":            c.Projects,
-			"configPath":          s.d.Store.Path(),
-			"localAccountCount":   len(c.LocalAccounts),
-			"activeCodexAccount":  c.ActiveCodexAccount,
-			"activeClaudeAccount": c.ActiveClaudeAccount,
+			"relayRoot":                  c.RelayRoot,
+			"hubUrl":                     c.HubURL,
+			"effectiveHubUrl":            c.EffectiveHubURL(),
+			"deviceId":                   c.DeviceID,
+			"deviceName":                 c.DeviceName,
+			"approval":                   c.Approval,
+			"allowPhoneAutoAll":          c.AllowPhoneAutoAll,
+			"autostart":                  autostart.Enabled(),
+			"openConsoleOnStart":         c.OpenConsoleOnStart,
+			"codexModel":                 c.CodexModel,
+			"claudeModel":                c.ClaudeModel,
+			"codexAuthMode":              c.CodexAuthMode,
+			"accountKey":                 mask(c.AccountKey),
+			"codexKey":                   mask(c.CodexKey),
+			"claudeKey":                  mask(c.ClaudeKey),
+			"loggedIn":                   c.LoggedIn(),
+			"remoteDeviceOnly":           c.RemoteDeviceOnly,
+			"activeRemoteMode":           c.ActiveRemoteMode,
+			"effectiveRemoteMode":        c.EffectiveRemoteMode(),
+			"remoteModes":                remoteModeChoices(c),
+			"remoteConnections":          remoteConnectionChoices(c),
+			"remoteConnectionManagement": true,
+			"remoteAgentSettingsScope":   remoteAgentSettingsScope(c),
+			"projects":                   c.Projects,
+			"configPath":                 s.d.Store.Path(),
+			"localAccountCount":          len(c.LocalAccounts),
+			"activeCodexAccount":         c.ActiveCodexAccount,
+			"activeClaudeAccount":        c.ActiveClaudeAccount,
 		},
 		"hub":     hub,
 		"tools":   s.tools(ctx),

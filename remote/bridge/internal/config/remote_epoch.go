@@ -9,6 +9,7 @@ func fenceRemoteConnectionEpoch(old Config, next *Config) {
 	if next.RemoteConnectionEpoch == "" ||
 		RemoteIdentity(old) != RemoteIdentity(*next) ||
 		old.EffectiveRemoteMode() != next.EffectiveRemoteMode() ||
+		old.DirectPhoneID != next.DirectPhoneID || old.DirectPhoneHash != next.DirectPhoneHash ||
 		old.GatewayRuntimeKey != next.GatewayRuntimeKey {
 		next.RemoteConnectionEpoch = RandomToken(32)
 	}

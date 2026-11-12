@@ -237,9 +237,27 @@ type EventSinkBinder interface {
 // ApprovalResponse keeps question answers separate from approval feedback. API
 // keys and other credentials are never supplied through this contract.
 type ApprovalResponse struct {
-	Decision string              `json:"decision"`
-	Message  string              `json:"message,omitempty"`
-	Answers  map[string][]string `json:"answers,omitempty"`
+	Decision    string              `json:"decision"`
+	Message     string              `json:"message,omitempty"`
+	Answers     map[string][]string `json:"answers,omitempty"`
+	OperationID string              `json:"operationId,omitempty"`
+	By          string              `json:"-"` // trusted dispatch origin, never a submitted wire field
+}
+
+// TypedApprovalResponder preserves uncertain delivery instead of reducing an
+// accepted-but-unacknowledged native approval to the legacy bool rejection.
+type TypedApprovalResponder interface {
+	RespondForSessionResult(context.Context, string, string, ApprovalResponse) (bool, error)
+}
+
+func RespondForSessionResult(ctx context.Context, agent Agent, sessionKey, approvalID string, response ApprovalResponse) (bool, error) {
+	if agent == nil || sessionKey == "" {
+		return false, nil
+	}
+	if responder, ok := agent.(TypedApprovalResponder); ok {
+		return responder.RespondForSessionResult(ctx, sessionKey, approvalID, response)
+	}
+	return RespondForSession(ctx, agent, sessionKey, approvalID, response), nil
 }
 
 // RespondWithAnswers preserves the existing Agent interface for older adapters.

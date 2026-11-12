@@ -14,12 +14,14 @@ sys.stdout = sys.stderr  # Imported Hermes diagnostics cannot corrupt JSONL.
 from hermes_cli.gateway_client import connect_gateway, GatewayRPCError
 
 METHODS = {"session.create", "session.resume", "prompt.submit", "prompt.receipt",
-           "session.interrupt", "approval.respond"}
+           "session.interrupt", "approval.respond", "clarify.respond", "salcara.control.resume"}
 READS = {"session.resume", "prompt.receipt", "salcara.initialize"}
 EVENTS = {"message.delta", "message.complete", "tool.start", "tool.complete",
           "approval.request", "approval.settled", "clarify.request", "clarify.settled",
           "session.info", "session.replay_gap", "status.update", "notification.show"}
 LIMIT = 8 * 1024 * 1024
+MAX_REQUESTS = 32
+MAX_READS = 24  # reserve slots so history reads cannot starve stop/approval
 
 
 def emit(frame):
@@ -62,41 +64,66 @@ async def events(client):
 async def serve():
     async with connect_gateway(max_size=LIMIT) as client:
         pump = asyncio.create_task(events(client))
+        pending = set()
+        reads = set()
+
+        async def request_one(rid, method, params):
+            # The stop path needs a fresh generation before interrupting. Its
+            # read uses the reserved slots too; never forward this local alias.
+            if method == "salcara.control.resume":
+                method = "session.resume"
+            try:
+                if method == "salcara.initialize":
+                    description = await client.rpc("runtime.describe")
+                    if not contract(description):
+                        raise ValueError("unsupported_gateway_contract")
+                    result = {"protocol": "salcara-hermes-gateway-v1",
+                              "questions": "clarify-batch-v1" in description.get("capabilities", [])}
+                else:
+                    result = await client.rpc(method, **params)
+                emit({"id": rid, "result": result})
+            except GatewayRPCError as exc:
+                emit({"id": rid, "error": {"code": exc.code or -32000, "message": str(exc),
+                    "data": {"reason": str(exc)}}})
+            except Exception:
+                reason = "gateway_read_failed" if method in READS else "command_delivery_uncertain"
+                emit({"id": rid, "error": {"code": -32001, "message": reason,
+                    "data": {"code": reason}}})
+
         try:
             while True:
                 line = await asyncio.to_thread(sys.stdin.buffer.readline, LIMIT + 1)
                 if not line:
+                    # Let already-completed acknowledgements drain, then detach
+                    # this viewer without waiting on an unresponsive RPC/owner.
+                    if pending:
+                        await asyncio.wait(pending, timeout=1)
                     return
                 if len(line) > LIMIT or not line.endswith(b"\n"):
                     return  # no guessed request identity for an oversized frame
                 request = json.loads(line)
                 rid, method = request.get("id"), request.get("method")
                 params = request.get("params") or {}
-                if not isinstance(rid, int) or not isinstance(params, dict):
+                if isinstance(rid, bool) or not isinstance(rid, int) or not isinstance(params, dict):
                     continue
                 if method not in METHODS and method != "salcara.initialize":
                     emit({"id": rid, "error": {"code": -32601, "message": "unsupported_method"}})
                     continue
-                try:
-                    if method == "salcara.initialize":
-                        description = await client.rpc("runtime.describe")
-                        if not contract(description):
-                            raise ValueError("unsupported_gateway_contract")
-                        result = {"protocol": "salcara-hermes-gateway-v1"}
-                    elif method in METHODS:
-                        result = await client.rpc(method, **params)
-                    else:
-                        raise ValueError("unsupported_method")
-                    emit({"id": rid, "result": result})
-                except GatewayRPCError as exc:
-                    emit({"id": rid, "error": {"code": exc.code or -32000, "message": str(exc),
-                        "data": {"reason": str(exc)}}})
-                except Exception:
-                    # No raw exception/profile/key leaves the installed client.
-                    reason = "gateway_read_failed" if method in READS else "command_delivery_uncertain"
-                    emit({"id": rid, "error": {"code": -32001, "message": reason,
-                        "data": {"code": reason}}})
+                if len(pending) >= MAX_REQUESTS or method in READS and len(reads) >= MAX_READS:
+                    # Definitive pre-dispatch refusal, never an attempted write.
+                    emit({"id": rid, "error": {"code": -32002, "message": "gateway_busy"}})
+                    continue
+                task = asyncio.create_task(request_one(rid, method, params))
+                pending.add(task)
+                task.add_done_callback(pending.discard)
+                if method in READS:
+                    reads.add(task)
+                    task.add_done_callback(reads.discard)
         finally:
+            remaining = list(pending)
+            for task in remaining:
+                task.cancel()
+            await asyncio.gather(*remaining, return_exceptions=True)
             pump.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await pump

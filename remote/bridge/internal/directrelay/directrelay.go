@@ -47,6 +47,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"salcara/bridge/internal/protocol"
 )
 
 const (
@@ -625,6 +626,9 @@ func (r *Relay) SendResponse(command Command, result any, commandErr error) bool
 	envelope := map[string]any{"type": "response", "requestId": command.requestID}
 	if commandErr != nil {
 		envelope["error"] = commandErr.Error()
+		if code := protocol.ExecutionErrorCode(commandErr); code != "" {
+			envelope["code"] = code
+		}
 	} else {
 		envelope["result"] = result
 	}

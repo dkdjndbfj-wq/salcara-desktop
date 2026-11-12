@@ -63,6 +63,41 @@ function fixture() {
 
 const safePath = '/api/local/agent-change/v1';
 const receipt = body => ({ok:true,protocol:body.protocol,operationId:body.operationId});
+test('configured Agent main buttons start all six tools in one click without models or history preflight',async()=>{
+  for(const target of ['codex-desktop','codex','claude','claude-desktop','deepseek-harness','hermes']){
+    const f=fixture();for(const account of f.backend.accounts){account.models=[];account.model='';}f.S.local=clone(f.backend);
+    const button={isConnected:true,dataset:{target}};
+    await (target==='claude-desktop'?f.ACTIONS.cdOpen(button):f.ACTIONS.wbOpen(button));
+    assert.equal(f.writes().length,1);assert.equal(f.writes()[0].url,safePath);assert.equal(f.writes()[0].body.id,'a');assert.equal(f.writes()[0].body.target,target);
+    assert.equal(f.calls.some(c=>/sessions|history|\/models/.test(c.url)),false);assert.equal(f.root.innerHTML,'');
+  }
+});
+test('direct start keeps progress concise and duplicate clicks never create a second transaction',async()=>{
+  const f=fixture(),wait=gate();f.setIntercept((url,body)=>url===safePath?wait.promise.then(()=>receipt(body)):undefined);
+  const button={isConnected:true,dataset:{target:'codex'}};
+  const pending=f.ACTIONS.wbOpen(button);await flush();
+  assert.match(f.root.innerHTML,/正在打开/);assert.equal(f.button('wbOpenGo'),undefined);assert.equal(f.button('wbApplyGo'),undefined);
+  await f.ACTIONS.wbOpen(button);assert.equal(f.writes().length,1);wait.resolve();await pending;
+});
+test('explicit API and model settings stage a selection without launching',async()=>{
+  const f=fixture();await f.ACTIONS.wbConfigure({isConnected:true,dataset:{target:'codex'}});
+  assert.equal(f.writes().length,0);assert.ok(f.button('wbApplyGo'));assert.ok(f.button('wbOpenGo'));
+});
+test('closing a direct-start freshness read cancels before dispatch without reopening',async()=>{
+  const f=fixture(),wait=gate();f.setIntercept(url=>url==='/api/local/accounts'?wait.promise:undefined);
+  const pending=f.ACTIONS.wbOpen({isConnected:true,dataset:{target:'codex'}});await flush();f.root.innerHTML='';
+  wait.resolve(clone(f.backend));await pending;assert.equal(f.writes().length,0);assert.equal(f.root.innerHTML,'');
+});
+test('direct-start uncertain receipt becomes a locked error and does not replay',async()=>{
+  const f=fixture();f.setIntercept((url,body)=>url===safePath?{...receipt(body),uncertain:true,result:{uncertain:true,submitted:true}}:undefined);
+  await f.ACTIONS.wbOpen({isConnected:true,dataset:{target:'codex'}});
+  assert.equal(f.writes().length,1);assert.equal(f.WB.accountOpen.executionUnknown,true);assert.match(f.root.innerHTML,/不会自动重试/);
+  await f.go();assert.equal(f.writes().length,1);
+});
+test('managed Claude direct-start reports the blocker without submitting',async()=>{
+  const f=fixture();f.setIntercept(url=>url==='/api/local/claude-desktop/status'?{supported:true,managed:true,message:'fixture organization policy'}:undefined);
+  await f.ACTIONS.cdOpen({isConnected:true,dataset:{}});assert.equal(f.writes().length,0);assert.match(f.root.innerHTML,/fixture organization policy/);
+});
 test('all six Agent entries stage selection without checkbox, history reads or writes',async()=>{
   for(const target of ['codex-desktop','codex','claude','claude-desktop','deepseek-harness','hermes']){
     const f=fixture();await f.open(target);f.ready();assert.match(f.root.innerHTML,/会先停止该 Agent 的当前任务，再应用所选 API。/);

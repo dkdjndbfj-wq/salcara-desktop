@@ -24,6 +24,36 @@ type hermesGateway interface {
 
 type hermesPipe struct{ *rpcConn }
 
+type hermesNotSentError struct{ cause error }
+
+func (e *hermesNotSentError) Error() string { return e.cause.Error() }
+func (e *hermesNotSentError) Unwrap() error { return e.cause }
+
+func hermesGuardedCall(ctx context.Context, conn hermesGateway, method string, params, out any, guard func() error) error {
+	check := func() error {
+		if err := ctx.Err(); err != nil {
+			return &hermesNotSentError{err}
+		}
+		if guard != nil {
+			if err := guard(); err != nil {
+				return &hermesNotSentError{err}
+			}
+		}
+		return nil
+	}
+	if pipe, ok := conn.(*hermesPipe); ok {
+		err := pipe.callGuarded(ctx, method, params, out, check)
+		if err == context.Canceled || err == context.DeadlineExceeded {
+			return &hermesNotSentError{err}
+		}
+		return err
+	}
+	if err := check(); err != nil {
+		return err
+	}
+	return conn.Call(ctx, method, params, out)
+}
+
 // A Gateway may have been started by the installed client. Never kill its
 // process tree: the shared authority owns other viewers' accepted work.
 func (p *hermesPipe) detach() {

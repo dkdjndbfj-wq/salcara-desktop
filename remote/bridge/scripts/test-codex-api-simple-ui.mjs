@@ -44,7 +44,12 @@ function harness(handler) {
       this.value = attrs.value || ''; this._html = ''; this.disabled = 'disabled' in attrs; this.hidden = 'hidden' in attrs; this.checked = 'checked' in attrs;
       this.dataset = {};
       for (const [key, value] of Object.entries(attrs)) if (key.startsWith('data-')) this.dataset[key.slice(5).replace(/-([a-z])/g, (_, char) => char.toUpperCase())] = value;
-      this.classList = { contains: (name) => (attrs.class || '').split(/\s+/).includes(name) };
+      this.classList = {
+        contains: name => (attrs.class || '').split(/\s+/).includes(name),
+        add: name => { attrs.class = [...new Set([...(attrs.class || '').split(/\s+/).filter(Boolean), name])].join(' '); },
+        remove: name => { attrs.class = (attrs.class || '').split(/\s+/).filter(value => value !== name).join(' '); },
+        toggle: (name, force) => { const enabled = force ?? !this.classList.contains(name); this.classList[enabled ? 'add' : 'remove'](name); return enabled; },
+      };
     }
     get selectedOptions() { return this.children.filter((row) => row.tagName === 'OPTION' && 'selected' in row.attrs); }
     get options() { return this.children.filter(row => row.tagName === 'OPTION'); }
@@ -204,7 +209,7 @@ async function edit(h, id = 'client-one') { await h.context.ACTIONS.codexAPIEdit
 
 function installNavigation(h) {
   const rendered = [], closes = [], homeController = new AbortController();
-  h.$('#modalRoot').insertAdjacentHTML('beforebegin', '<div id="view"></div><div id="headActions"></div><div id="pageIco"></div><div id="pageTitle"></div><div id="pageSub"></div>');
+  h.$('#modalRoot').insertAdjacentHTML('beforebegin', '<div id="panel"></div><div id="view"></div><div id="headActions"></div><div id="pageIco"></div><div id="pageTitle"></div><div id="pageSub"></div>');
   Object.assign(h.context, {
     route() {}, homeCancelLoad() {}, location: { hash: '#accounts', pathname: '/', search: '' },
     history: { replaceState(_state, _title, url) { h.context.location.hash = url.includes('#') ? '#' + url.split('#')[1] : ''; } },

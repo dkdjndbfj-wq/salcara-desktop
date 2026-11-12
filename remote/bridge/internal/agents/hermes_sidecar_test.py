@@ -76,7 +76,7 @@ class SidecarContractTest(unittest.IsolatedAsyncioTestCase):
                     {"id": 3, "method": "session.interrupt", "params": {"session_id": "native", "execution_generation": 8}},
                     {"id": 4, "method": "approval.respond", "params": {"session_id": "native", "execution_generation": 8, "prompt_id": "prompt", "choice": "once"}}]
         answers = await self.invoke(client, requests)
-        self.assertEqual(answers[0]["result"], {"protocol": "salcara-hermes-gateway-v1"})
+        self.assertEqual(answers[0]["result"], {"protocol": "salcara-hermes-gateway-v1", "questions": False})
         self.assertEqual(client.calls[2], ("session.interrupt", requests[2]["params"]))
         self.assertEqual(client.calls[3], ("approval.respond", requests[3]["params"]))
         self.assertNotIn("fixture-secret", json.dumps(answers))
@@ -93,9 +93,71 @@ class SidecarContractTest(unittest.IsolatedAsyncioTestCase):
         client = Client()
         client.failure = Refusal("session_busy")
         answers = await self.invoke(client, [{"id": 1, "method": "prompt.submit"}, {"id": 2, "method": "shell.execute"}])
-        self.assertEqual(answers[0]["error"]["message"], "session_busy")
-        self.assertEqual(answers[1]["error"]["code"], -32601)
+        by_id = {answer["id"]: answer for answer in answers}
+        self.assertEqual(by_id[1]["error"]["message"], "session_busy")
+        self.assertEqual(by_id[2]["error"]["code"], -32601)
         self.assertEqual(len(client.calls), 1)
+
+    async def test_slow_history_cannot_block_other_session_control(self):
+        released = asyncio.Event()
+        class SlowClient(Client):
+            async def rpc(self, method, **params):
+                self.calls.append((method, params))
+                if method == "session.resume":
+                    await released.wait()
+                if method == "session.interrupt":
+                    released.set()
+                return {"accepted": True}
+        client = SlowClient()
+        answers = await self.invoke(client, [
+            {"id": 1, "method": "session.resume", "params": {"session_id": "a"}},
+            {"id": 2, "method": "session.interrupt", "params": {"session_id": "b", "execution_generation": 8}}])
+        self.assertTrue(released.is_set())
+        self.assertEqual({row["id"] for row in answers}, {1, 2})
+        self.assertEqual(client.calls[1][0], "session.interrupt")
+
+    async def test_read_capacity_is_bounded_and_reserves_control_slots(self):
+        released = asyncio.Event()
+        class BusyClient(Client):
+            async def rpc(self, method, **params):
+                self.calls.append((method, params))
+                if method == "session.resume":
+                    await released.wait()
+                if method == "approval.respond":
+                    released.set()
+                return {"accepted": True}
+        client = BusyClient()
+        requests = [{"id": i, "method": "session.resume"} for i in range(40)]
+        requests.append({"id": 41, "method": "approval.respond"})
+        answers = await self.invoke(client, requests)
+        self.assertTrue(released.is_set())
+        self.assertEqual(sum(method == "session.resume" for method, _ in client.calls), sidecar.MAX_READS)
+        self.assertEqual(sum(row.get("error", {}).get("message") == "gateway_busy" for row in answers), 40-sidecar.MAX_READS)
+
+    async def test_clarify_reply_preserves_exact_generation_and_answer(self):
+        client = Client()
+        request = {"id": 1, "method": "clarify.respond", "params": {"session_id": "native", "execution_generation": 8, "prompt_id": "q", "answer": '["a,b","c"]'}}
+        answers = await self.invoke(client, [request])
+        self.assertEqual(client.calls, [("clarify.respond", request["params"])])
+        self.assertEqual(answers[0]["id"], 1)
+
+    async def test_control_resume_uses_reserved_slot_and_native_method(self):
+        released = asyncio.Event()
+        class BusyClient(Client):
+            async def rpc(self, method, **params):
+                self.calls.append((method, params))
+                if params.get("session_id") == "stop-target":
+                    released.set()
+                else:
+                    await released.wait()
+                return {"accepted": True}
+        client = BusyClient()
+        requests = [{"id": i, "method": "session.resume"} for i in range(sidecar.MAX_READS)]
+        requests.append({"id": 100, "method": "salcara.control.resume", "params": {"session_id": "stop-target"}})
+        answers = await self.invoke(client, requests)
+        self.assertTrue(released.is_set())
+        self.assertEqual(client.calls[-1], ("session.resume", {"session_id": "stop-target"}))
+        self.assertEqual(len(answers), sidecar.MAX_READS + 1)
 
     def test_capability_gate_refuses_older_or_incomplete_owners(self):
         self.assertTrue(sidecar.contract(DESCRIPTION))

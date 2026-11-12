@@ -139,7 +139,8 @@
 .cx-list { flex: 1; overflow: auto; padding: 4px 8px 16px; }
 .cx-proj { display: flex; align-items: center; gap: 7px; color: var(--rm-muted); font-size: 12.5px; font-weight: 650; padding: 14px 8px 5px; }
 .cx-proj svg { width: 14px; height: 14px; }
-.cx-row { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-radius: 10px; cursor: pointer; color: var(--rm-ink); }
+.cx-row { display: flex; align-items: center; gap: 8px; width: 100%; border: 0; background: transparent; font: inherit; text-align: left; padding: 8px 10px; border-radius: 10px; cursor: pointer; color: var(--rm-ink); }
+.cx-row:focus-visible { outline: 2px solid var(--rm-blue); outline-offset: -2px; }
 .cx-row:hover { background: var(--rm-cloud); }
 .cx-row.sel { background: var(--rm-ice); }
 .cx-row .t { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13.5px; }
@@ -258,6 +259,15 @@
 .rm-current-computer .rm-device-name { font-size: 14px; flex-wrap: wrap; }
 .rm-current-computer .rm-device-icon { width: 38px; height: 38px; border-radius: 11px; }
 .rm-current-computer .rm-field-label { margin-bottom: 3px; }
+.rm-connect-page > .rm-current-computer { margin-bottom: 14px; }
+.rm-saved-connections { margin-top: 18px; border-top: 1px solid var(--rm-line); padding-top: 14px; }
+.rm-saved-connections > summary { cursor: pointer; font-size: 13px; color: var(--rm-muted); margin-bottom: 12px; }
+.rm-saved-station-settings { margin-bottom: 12px; }
+#rmHubConnectionError > .rm-link { display: inline-block; margin: 8px 12px 0 0; }
+.rm-connection-menu { position: relative; flex: 0 0 auto; }
+.rm-connection-menu > summary { cursor: pointer; list-style: none; padding: 5px 9px; border-radius: 8px; }
+.rm-connection-menu > div { display: grid; gap: 10px; position: absolute; right: 0; top: 100%; z-index: 3; padding: 14px; min-width: 145px; border: 1px solid var(--rm-line); border-radius: 10px; background: var(--surface); box-shadow: var(--shadow); }
+.rm-connection-menu button { text-align: left; white-space: nowrap; }
 .rm-connection-heading, .rm-binding-state { display: flex; gap: 10px; align-items: center; margin: 16px 0; color: var(--rm-ink); font-size: 13px; }
 .rm-direct-address { padding: 14px; border-radius: 10px; background: var(--rm-mist); }
 .rm-direct-address b { color: var(--rm-ink); font-size: 13px; overflow-wrap: anywhere; }
