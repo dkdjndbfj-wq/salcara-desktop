@@ -157,13 +157,14 @@ async function rmRefreshAcceptedConnection() {
 function rmConnectionError(owner, node, error) {
   if (!owner.current()) return;
   const unknown = owner.submitted && error.code !== 'enrollment_not_sent' && (!Number.isInteger(error.status) || error.status >= 500 || error.status === 408 || error.code === 'enrollment_result_unknown');
+  const clockSkew = error.code === 'clock_skew' || error.code === 'enrollment_not_sent' && !!error.clockSkew;
   const reasons = { api_enrollment_unsupported: '本站暂不支持 API 自动登记，请联系站点管理员开通或提供独立中转站的授权方式。', api_credentials_invalid: 'API 凭据无效或已过期，请在 API 密钥页更新后重试。', api_enrollment_denied: '此 API 未获得电脑远程登记权限，请联系站点管理员。', api_verifier_unavailable: '本站的 API 验证服务暂不可用，请稍后重试。', source_changed: '所选 API 已更新，请重新选择后连接。', enrollment_issuer_untrusted: '本站的登记授权来源不可信，请联系站点管理员。', enrollment_grant_invalid: '本站返回的电脑登记授权未通过校验，请联系站点管理员。' };
-  const detail = error.code === 'enrollment_not_sent' ? '登记尚未发送，请检查连接后重试。' : reasons[error.code] || error.message || '操作失败，请重试';
+  const detail = clockSkew ? `${error.code === 'enrollment_not_sent' ? '登记尚未发送。' : ''}电脑与中转站时间不一致，身份校验未通过。请先同步系统日期与时间。` : error.code === 'enrollment_not_sent' ? '登记尚未发送，请检查连接后重试。' : reasons[error.code] || error.message || '操作失败，请重试';
   const message = unknown ? `操作结果暂未确认，请刷新状态核对后再操作。${detail}` : detail;
   if (owner.switchDraft && RM.switchDraft === owner.switchDraft) owner.switchDraft.error = message;
   if (error.code === 'enrollment_not_sent' && RM.pendingEnrollment?.key === owner.enrollmentKey) RM.pendingEnrollment = null;
   if (error.code === 'enrollment_result_unknown' && owner.enrollmentKey) RM.pendingEnrollment = { key: owner.enrollmentKey };
-  if (node?.isConnected !== false && node) node.innerHTML = `<div class="rm-error">${esc(message)}</div>${error.code === 'enrollment_result_unknown' && owner.enrollmentKey ? rmEnrollmentRecoveryMarkup() : ''}`;
+  if (node?.isConnected !== false && node) node.innerHTML = `<div class="rm-error">${esc(message)}</div>${clockSkew ? rmClockSkewHelpMarkup(unknown ? 'unknown' : 'connect') : error.code === 'enrollment_result_unknown' && owner.enrollmentKey ? rmEnrollmentRecoveryMarkup() : ''}`;
   else toast(message, 'bad');
 }
 
@@ -330,6 +331,7 @@ function rmUpdateModeStatus() {
 
 function rmConnectionLabel(hub) {
   if (hub?.state === 'connected') return '已连接';
+  if (hub?.errorCode === 'clock_skew') return '时间不一致，请先校时';
   if (hub?.errorCode === 'hub_identity_changed') return '中转站身份已变化，需重新登记';
   if (hub?.errorCode === 'user_disabled') return '远程用户已停用';
   if (hub?.errorCode === 'enrollment_claim_invalid') return '需要新的设备登记码';

@@ -58,6 +58,10 @@ func (s *Server) handleRemoteIngress(w http.ResponseWriter, r *http.Request) {
 		manifest, err = hubingress.New(nil, "").VerifyPinnedEndpoint(ctx, target.HubURL+"/v1", target.HubInstanceID, target.IdentityPublicKey, endpoint)
 	}
 	if err != nil {
+		if hubingress.ClockSkew(err) != nil {
+			writeRemoteDiscoveryError(w, 409, "clock_skew", err, hubclient.Discovery{})
+			return
+		}
 		if errors.Is(err, hubingress.ErrIdentityChanged) {
 			writeRemoteDiscoveryError(w, 409, "hub_identity_changed", hubclient.ErrHubIdentityChanged, hubclient.Discovery{})
 			return

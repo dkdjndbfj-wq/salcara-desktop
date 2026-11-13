@@ -90,6 +90,14 @@ func CloneStationObservation(p *StationObservation) *StationObservation {
 	return &out
 }
 
+// StationObservationIsNewer orders display observations from independent probe
+// sources. A timestamp beyond the current local clock cannot win this tie-break
+// after the user corrects that clock backwards. Identity and probe-sequence
+// fences must still be checked by the caller; this does not grant authority.
+func StationObservationIsNewer(current, incoming *StationObservation, now int64) bool {
+	return current != nil && incoming != nil && current.CheckedAt <= now && current.CheckedAt > incoming.CheckedAt
+}
+
 // NormalizeStationAPIBase compares the full API root, preserving path case.
 // Encoded/ambiguous separators and dot segments are rejected, never collapsed.
 func NormalizeStationAPIBase(raw string) (string, error) {
@@ -360,12 +368,13 @@ func (s *Store) ObserveRemoteStation(expected Config, observation *StationObserv
 		// failed refresh for an unobserved station and restore its former scope.
 		observation = &StationObservation{CheckedAt: time.Now().UnixMilli()}
 	}
+	now := time.Now().UnixMilli()
 	active := RemoteIdentity(s.cfg) == RemoteIdentity(expected)
 	known := active
 	for i := range s.cfg.RemoteConnections {
 		saved := &s.cfg.RemoteConnections[i]
 		if NormalizeHubURL(saved.HubURL) == NormalizeHubURL(expected.EffectiveHubURL()) && saved.DeviceID == expected.DeviceID && saved.DeviceSecret == expected.DeviceSecret {
-			if observation != nil && saved.RemoteSupport != nil && saved.RemoteSupport.CheckedAt > observation.CheckedAt {
+			if StationObservationIsNewer(saved.RemoteSupport, observation, now) {
 				return
 			}
 			known = true
@@ -376,7 +385,7 @@ func (s *Store) ObserveRemoteStation(expected Config, observation *StationObserv
 		return
 	}
 	old = s.cfg.Clone()
-	if observation != nil && s.cfg.RemoteStationObservation != nil && s.cfg.RemoteStationObservation.CheckedAt > observation.CheckedAt {
+	if StationObservationIsNewer(s.cfg.RemoteStationObservation, observation, now) {
 		return
 	}
 	s.cfg.RecordRemoteStationObservation(observation)

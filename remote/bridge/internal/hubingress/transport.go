@@ -67,6 +67,7 @@ type entry struct {
 	refreshPin      string
 	lastEndpoint    string
 	identityChanged bool
+	clockSkew       error // verified diagnostic only; never authorizes routing
 	refreshOffset   int
 	proofNext       string // next signed member to prove; survives failure cooldowns
 	users           int    // guarded by Transport.mu; prevents eviction during routing/refresh
@@ -109,11 +110,15 @@ func validManifest(m Manifest, canonical string, now time.Time) bool {
 // Expired signed entries may locate a new manifest, but can never authorize
 // traffic. Keep the same structural and future-time checks in both cases.
 func validManifestAt(m Manifest, canonical string, now time.Time, allowExpired bool) bool {
-	key, err := base64.StdEncoding.DecodeString(m.IdentityPublicKey)
-	if m.Version != 1 || !validHex(m.HubInstanceID, 16) || err != nil || len(key) != ed25519.PublicKeySize || canonical == "" || normalizeURL(canonical) != canonical || m.CanonicalURL != canonical || m.Revision < 1 || m.IssuedAt <= 0 || m.IssuedAt > now.Add(5*time.Second).UnixMilli() || m.ExpiresAt <= m.IssuedAt || m.ExpiresAt-m.IssuedAt != int64((24*time.Hour)/time.Millisecond) || len(m.Endpoints) < 1 || len(m.Endpoints) > 8 {
+	if !validManifestStructure(m, canonical) || m.IssuedAt > now.Add(5*time.Second).UnixMilli() {
 		return false
 	}
-	if !allowExpired && (m.IssuedAt < now.Add(-24*time.Hour).UnixMilli() || m.ExpiresAt <= now.UnixMilli()) {
+	return allowExpired || m.IssuedAt >= now.Add(-24*time.Hour).UnixMilli() && m.ExpiresAt > now.UnixMilli()
+}
+
+func validManifestStructure(m Manifest, canonical string) bool {
+	key, err := base64.StdEncoding.DecodeString(m.IdentityPublicKey)
+	if m.Version != 1 || !validHex(m.HubInstanceID, 16) || err != nil || len(key) != ed25519.PublicKeySize || canonical == "" || normalizeURL(canonical) != canonical || m.CanonicalURL != canonical || m.Revision < 1 || !validClockTime(m.IssuedAt) || !validClockTime(m.ExpiresAt) || m.ExpiresAt <= m.IssuedAt || m.ExpiresAt-m.IssuedAt != int64((24*time.Hour)/time.Millisecond) || len(m.Endpoints) < 1 || len(m.Endpoints) > 8 {
 		return false
 	}
 	seen := map[string]bool{}
@@ -303,17 +308,36 @@ func (t *Transport) verify(ctx context.Context, m Manifest, address string) erro
 	}
 	n := hex.EncodeToString(nonce[:])
 	var p proof
+	started := time.Now().UnixMilli()
 	if t.readJSON(ctx, address+"/ingress/identity?nonce="+n, &p) != nil {
 		return errors.New("ingress_identity_unavailable")
 	}
 	now := time.Now().UnixMilli()
-	if m.ExpiresAt <= now || p.Version != 1 || p.HubInstanceID != m.HubInstanceID || p.Nonce != n || p.IssuedAt < now-30000 || p.IssuedAt > now+5000 || p.ExpiresAt <= now || p.ExpiresAt-p.IssuedAt != 30000 {
+	return verifiedProof(m, p, n, started, now)
+}
+
+func verifiedProof(m Manifest, p proof, nonce string, started, now int64) error {
+	if p.Version != 1 || p.HubInstanceID != m.HubInstanceID || p.Nonce != nonce || !validClockTime(p.IssuedAt) || !validClockTime(p.ExpiresAt) || p.ExpiresAt <= p.IssuedAt || p.ExpiresAt-p.IssuedAt != 30000 {
 		return errors.New("ingress_identity_mismatch")
 	}
 	key, _ := base64.StdEncoding.DecodeString(m.IdentityPublicKey)
 	sig, err := base64.StdEncoding.DecodeString(p.Signature)
 	message := []byte(fmt.Sprintf("salcara-ingress-proof-v1\n%s\n%s\n%d\n%d", p.HubInstanceID, p.Nonce, p.IssuedAt, p.ExpiresAt))
 	if err != nil || len(key) != ed25519.PublicKeySize || !ed25519.Verify(key, message, sig) {
+		return errors.New("ingress_identity_mismatch")
+	}
+	// Authenticate every proof field, including the freshly chosen nonce,
+	// before producing a clock diagnostic. This still rejects the request.
+	if p.IssuedAt < now-30000 || p.IssuedAt > now+5000 || p.ExpiresAt <= now {
+		// Arrival latency can expire a legitimate proof. Only an issuance in
+		// the future, or expiry before we generated this nonce, is evidence
+		// that the signed time and the local request interval disagree.
+		if p.IssuedAt > now+5000 || p.ExpiresAt <= started {
+			return newClockSkewError("fresh_proof", now, p.IssuedAt, m)
+		}
+		return errors.New("ingress_identity_mismatch")
+	}
+	if m.ExpiresAt <= now {
 		return errors.New("ingress_identity_mismatch")
 	}
 	return nil

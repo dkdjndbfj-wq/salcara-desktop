@@ -14,7 +14,13 @@ function rmScopedHubStatus(st) {
 }
 
 function rmNeedsEnrollment(hub) {
+  if (hub?.errorCode === 'clock_skew') return false;
   return ['device_auth_required', 'invalid_key'].includes(hub?.state) || /device_|enrollment_|hub_identity_changed/.test(hub?.errorCode || '');
+}
+
+function rmClockSkewHelpMarkup(context = 'saved') {
+  const next = context === 'unknown' ? '校时后先刷新状态核对原操作，不要重复提交。' : context === 'connect' ? '同步后再次点击原连接按钮验证连接；此处尚未保存的新连接不会自动重试。' : '同步后等待已保存连接自动重连，或刷新状态。';
+  return `<p class="rm-recovery-note">先检查电脑的日期、时间和时区。Windows：设置 → 时间和语言 → 日期和时间，开启“自动设置时间”，然后点“立即同步”。${next}若电脑时间正确，请联系中转站管理员。</p><p class="rm-recovery-note">无需重新登记或更换 API，已有配置和聊天记录会保留。</p><button class="rm-link" data-act="rmRecoveryRefresh">校时后刷新状态</button>`;
 }
 
 function rmConnectionStepsMarkup(st = S.state || {}) {
@@ -27,7 +33,7 @@ function rmConnectionStepsMarkup(st = S.state || {}) {
   const eligible = progress ? !!progress.eligible : connected || confirmed;
   const discovered = progress ? !!progress.discovered : connected || confirmed;
   const paired = !progress && (active === 'direct' ? !!(d.paired || c.remoteModes?.direct?.paired) : !!hub.pairing?.paired);
-  const error = progress ? '' : active === 'direct' ? d.error || (d.enabled && !d.running ? '直连监听未启动，请刷新状态后重试。' : '') : enabled ? hub.error || '' : '';
+  const error = progress ? '' : active === 'direct' ? d.error || (d.enabled && !d.running ? '直连监听未启动，请刷新状态后重试。' : '') : enabled ? hub.errorCode === 'clock_skew' ? '电脑与中转站时间不一致，身份校验未通过。' : hub.error || '' : '';
   const issue = !!error || !progress && enabled && active !== 'direct' && (!!hub.errorCode || ['device_auth_required', 'invalid_key', 'source_unauthorized', 'pair_required', 'remote_blocked'].includes(hub.state));
   const label = st.loading ? '正在读取连接状态' : progress?.state === 'discovering' ? '正在发现中转站' : progress?.state === 'registering' ? '正在验证授权并登记电脑' : !enabled ? '尚未启用远程' : active === 'direct' ? d.error ? '直连暂不可用' : connected ? '手机已连接' : ready ? '直连已就绪' : '正在启动直连' : rmConnectionLabel(hub);
   const step = (title, detail, state) => `<li class="${state}"><i aria-hidden="true">${state === 'done' ? '✓' : state === 'issue' ? '!' : '·'}</i><div><b>${title}</b><span>${esc(detail)}</span></div></li>`;
@@ -40,6 +46,7 @@ function rmConnectionStepsMarkup(st = S.state || {}) {
 function rmConnectionHelpMarkup(mode, hub) {
   if (mode === 'direct') return '<button class="rm-link" data-act="rmDirectTutorial">检查局域网 / VPN 与直连设置</button><a class="rm-link" href="#settings">查看运行日志</a>';
   const code = hub?.errorCode || '', state = hub?.state || '';
+  if (code === 'clock_skew') return rmClockSkewHelpMarkup();
   if (state === 'source_unauthorized' || /api_credentials|api_enrollment|source_/.test(code)) return '<a class="rm-link" href="#accounts">检查 API 与站点授权</a>';
   if (mode === 'hub' && rmNeedsEnrollment(hub)) return '<button class="rm-link" data-act="rmShowRecovery" data-section="enrollment">检查电脑登记</button>';
   if (mode === 'bot') return '<button class="rm-link" data-act="rmShowRecovery" data-section="bot">检查 Bot 地址与绑定</button>';
@@ -83,7 +90,7 @@ function rmSavedBotsMarkup(c) {
     const activeGroup = String(c.remoteModes?.bot?.groupId || '');
     const current = !!group && rmEffectiveMode(c) === 'bot' && activeGroup === group && rmNormalizeHub(entry.hubUrl) === rmNormalizeHub(c.effectiveHubUrl || c.hubUrl);
     const connected = current && c.loggedIn && hub.state === 'connected';
-    const status = !current ? '已保存，未启用' : connected ? '已连接' : hub.error || hub.state === 'invalid_key' ? rmConnectionLabel(hub) : '正在连接';
+    const status = !current ? '已保存，未启用' : connected ? '已连接' : hub.error || hub.errorCode || hub.state === 'invalid_key' ? rmConnectionLabel(hub) : '正在连接';
     return `<div class="rm-saved-mode"><div><b>${esc(entry.name || group || 'Bot 中继')}</b><span>Bot · ${esc(host(entry.hubUrl))}${group ? ` · 组 ${esc(group)}` : ''}</span></div><span class="rm-mode-state"><i class="rm-dot ${connected ? 'ok' : current ? 'wait' : ''}"></i>${esc(status)}</span>${current ? '' : `<button class="btn sm" data-act="rmActivateMode" data-mode="bot" data-hub="${esc(entry.hubUrl)}" data-group="${esc(group)}" ${RM.connectionAction ? 'disabled' : ''}>启用 Bot</button>`}${rmConnectionManageMarkup(entry)}</div>`;
   }).join('');
 }

@@ -135,6 +135,36 @@ test('saved device configuration does not prove registration or allow a QR', () 
   assert.equal(visibleControls(f.html()).actions.some(action => action.action === 'rmShowQR'), true);
 });
 
+test('verified clock skew explains system time repair without enrollment or API recovery', () => {
+  for (const mode of ['hub', 'bot']) {
+    const config = { deviceId: 'clock-device', effectiveRemoteMode: mode, loggedIn: true, effectiveHubUrl: 'https://clock.test', remoteModes: { bot: { groupId: 'clock-group' } }, remoteConnections: [{ mode: 'bot', groupId: 'clock-group', hubUrl: 'https://clock.test' }] };
+    const f = fixture(mode === 'hub' ? 'station' : 'bot', config, { state: 'connecting', errorCode: 'clock_skew' });
+    const markup = f.context.rmConnectionStepsMarkup();
+    assert.match(markup, /时间不一致，请先校时/);
+    assert.match(markup, /日期、时间和时区/);
+    assert.match(markup, /自动设置时间.*立即同步/);
+    assert.match(markup, /若电脑时间正确，请联系中转站管理员/);
+    assert.match(markup, /无需重新登记或更换 API/);
+    assert.match(markup, /已有配置和聊天记录会保留/);
+    assert.match(markup, /data-act="rmRecoveryRefresh"/);
+    assert.doesNotMatch(markup, /data-act="rmShowRecovery"|data-act="rmReenroll"|href="#accounts"|远程服务暂不可用/);
+    assert.equal(f.context.rmNeedsEnrollment({ state: 'device_auth_required', errorCode: 'clock_skew' }), false);
+    if (mode === 'bot') assert.match(f.context.rmSavedBotsMarkup(config), /时间不一致，请先校时/);
+    f.context.S.state.hub = { state: 'connected' };
+    assert.doesNotMatch(f.context.rmConnectionStepsMarkup(), /先校时|立即同步/);
+  }
+});
+
+test('old Hub clock skew cannot leak into a replacement station or direct status', () => {
+  const f = fixture('station', { deviceId: 'new-device', effectiveRemoteMode: 'hub', loggedIn: true, effectiveHubUrl: 'https://current.test' }, { deviceId: 'old-device', state: 'connecting', errorCode: 'clock_skew' });
+  assert.doesNotMatch(f.context.rmConnectionStepsMarkup(), /先校时|立即同步/);
+  f.context.S.state.hub = { deviceId: 'new-device', hubUrl: 'https://old.test', state: 'connecting', errorCode: 'clock_skew' };
+  assert.doesNotMatch(f.context.rmConnectionStepsMarkup(), /先校时|立即同步/);
+  f.context.S.state.config.effectiveRemoteMode = 'direct';
+  vm.runInContext('RM.direct = { enabled: true, running: true, connected: true }', f.context);
+  assert.doesNotMatch(f.context.rmConnectionStepsMarkup(), /先校时|立即同步/);
+});
+
 test('station without a saved API explains the actual next step without adding another action', () => {
   const f = fixture('station', { effectiveRemoteMode: 'none' });
   const empty = f.html();

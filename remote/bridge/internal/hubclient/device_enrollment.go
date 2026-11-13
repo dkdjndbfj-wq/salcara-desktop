@@ -161,6 +161,9 @@ func AcquireDeviceEnrollmentGrant(ctx context.Context, info Discovery, account c
 func readEnrollmentEnvelope(client *http.Client, req *http.Request) (enrollment.Envelope, error) {
 	resp, err := client.Do(req)
 	if err != nil {
+		if hubingress.ClockSkew(err) != nil && hubingress.RequestWasNotSent(err) {
+			return enrollment.Envelope{}, err
+		}
 		return enrollment.Envelope{}, enrollmentError(503, "api_verifier_unavailable")
 	}
 	defer resp.Body.Close()
@@ -199,7 +202,7 @@ func RegisterRemoteDevice(ctx context.Context, info Discovery, device protocol.D
 	resp, err := client.Do(req)
 	if err != nil {
 		if hubingress.RequestWasNotSent(err) {
-			return enrollmentError(409, "enrollment_not_sent")
+			return &RemoteHTTPError{StatusCode: 409, Code: "enrollment_not_sent", cause: err}
 		}
 		return enrollmentError(409, "enrollment_result_unknown")
 	}

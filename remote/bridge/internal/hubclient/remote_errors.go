@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"salcara/bridge/internal/config"
+	"salcara/bridge/internal/hubingress"
 )
 
 // RemoteHTTPError describes only the remote transport's authorization/health.
@@ -16,6 +17,13 @@ import (
 type RemoteHTTPError struct {
 	Code       string
 	StatusCode int
+	cause      error // local verified transport evidence, never remote JSON
+}
+
+func (e *RemoteHTTPError) Unwrap() error { return e.cause }
+
+func sameClockSkew(a, b *hubingress.ClockSkewDetails) bool {
+	return a == nil && b == nil || a != nil && b != nil && *a == *b
 }
 
 func (e *RemoteHTTPError) Error() string {
@@ -81,6 +89,9 @@ func RemoteErrorCode(err error) string {
 	var remote *RemoteHTTPError
 	if errors.As(err, &remote) {
 		return remote.Code
+	}
+	if hubingress.ClockSkew(err) != nil {
+		return "clock_skew"
 	}
 	return ""
 }
@@ -151,6 +162,9 @@ func checkResp(resp *http.Response) error {
 }
 
 func remoteFailure(err error, cfg config.Config) (state, code, message string) {
+	if hubingress.ClockSkew(err) != nil {
+		return StateConnecting, "clock_skew", (&hubingress.ClockSkewError{}).Error()
+	}
 	if errors.Is(err, ErrHubIdentityChanged) {
 		return StateDeviceAuthRequired, "hub_identity_changed", ErrHubIdentityChanged.Error()
 	}

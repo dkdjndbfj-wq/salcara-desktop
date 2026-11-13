@@ -168,7 +168,7 @@ func verifiedManifestEnvelope(wire Manifest, id, key, endpoint string, now time.
 	if _, exists := fields["signature"]; exists {
 		return Manifest{}, errors.New("ingress_invalid_manifest")
 	}
-	if !validManifestAt(m, m.CanonicalURL, now, allowExpired) || id != "" && m.HubInstanceID != id || key != "" && m.IdentityPublicKey != key || (id == "") != (key == "") {
+	if !validManifestStructure(m, m.CanonicalURL) || id != "" && m.HubInstanceID != id || key != "" && m.IdentityPublicKey != key || (id == "") != (key == "") {
 		return Manifest{}, errors.New("ingress_identity_mismatch")
 	}
 	publicKey, err := base64.StdEncoding.Strict().DecodeString(m.IdentityPublicKey)
@@ -178,6 +178,14 @@ func verifiedManifestEnvelope(wire Manifest, id, key, endpoint string, now time.
 	}
 	if endpoint != "" && !manifestContains(m, endpoint) {
 		return Manifest{}, errors.New("ingress_endpoint_not_authorized")
+	}
+	if m.IssuedAt > now.Add(5*time.Second).UnixMilli() {
+		return Manifest{}, newClockSkewError("signed_manifest", now.UnixMilli(), m.IssuedAt, m)
+	}
+	if !validManifestAt(m, m.CanonicalURL, now, allowExpired) {
+		// A correctly signed expired manifest may simply be stale. It is not
+		// sufficient evidence that either machine's clock is wrong.
+		return Manifest{}, errors.New("ingress_identity_mismatch")
 	}
 	m.SignedPayload, m.Signature = wire.SignedPayload, wire.Signature
 	return m, nil
@@ -214,6 +222,7 @@ func (t *Transport) pinnedCandidates(ctx context.Context, canonical string, pin 
 		// with their own deadline instead of queuing behind network I/O.
 		pending := make(chan struct{})
 		e.refreshing, e.refreshPin = pending, pinKey
+		e.clockSkew = nil
 		e.refreshAt = time.Now().Add(time.Minute)
 		hint, hintErr := verifiedManifestEnvelope(e.manifest, pin.id, pin.key, "", time.Now(), true)
 		addresses := []string{pin.endpoint, canonical}
@@ -241,6 +250,7 @@ func (t *Transport) pinnedCandidates(ctx context.Context, canonical string, pin 
 
 		var refreshed Manifest
 		identityChanged := false
+		var clockSkew error
 		attempted := 0
 		for attempted < len(unique) && attempted < 8 {
 			if ctx.Err() != nil {
@@ -266,6 +276,9 @@ func (t *Transport) pinnedCandidates(ctx context.Context, canonical string, pin 
 			}
 			m, err := verifiedManifest(wire, pin.id, pin.key, address, time.Now())
 			if err != nil {
+				if ClockSkew(err) != nil {
+					clockSkew = err
+				}
 				if other, otherErr := verifiedManifest(wire, "", "", address, time.Now()); otherErr == nil && (other.HubInstanceID != pin.id || other.IdentityPublicKey != pin.key) {
 					identityChanged = true
 				}
@@ -280,7 +293,9 @@ func (t *Transport) pinnedCandidates(ctx context.Context, canonical string, pin 
 
 		e.mu.Lock()
 		e.identityChanged = identityChanged && refreshed.HubInstanceID == ""
+		e.clockSkew = clockSkew
 		if refreshed.HubInstanceID != "" && ctx.Err() == nil {
+			e.clockSkew = nil
 			e.refreshOffset = 0
 			if e.manifest.HubInstanceID != refreshed.HubInstanceID || e.manifest.IdentityPublicKey != refreshed.IdentityPublicKey || !manifestContains(refreshed, e.proofNext) {
 				e.proofNext = ""
@@ -368,11 +383,15 @@ func (t *Transport) ResolvePinnedIdentity(ctx context.Context, canonical, id, ke
 	}
 	defer t.releaseState(e)
 	m, candidates := t.pinnedCandidates(ctx, canonical, pin, e)
+	var clockSkew error
 	for index, candidate := range candidates {
 		if ctx.Err() != nil {
 			break
 		}
-		if t.verifyPinnedCandidate(ctx, m, e, candidates, index) != nil {
+		if err := t.verifyPinnedCandidate(ctx, m, e, candidates, index); err != nil {
+			if ClockSkew(err) != nil {
+				clockSkew = err
+			}
 			continue
 		}
 		if ctx.Err() != nil {
@@ -381,7 +400,14 @@ func (t *Transport) ResolvePinnedIdentity(ctx context.Context, canonical, id, ke
 		t.succeeded(e, candidate.URL)
 		return m, candidate.URL, nil
 	}
-	return Manifest{}, "", pinnedUnavailable(e, pin)
+	err = pinnedUnavailable(e, pin)
+	if clockSkew != nil && !errors.Is(err, ErrIdentityChanged) {
+		err = clockSkew
+	}
+	if ctx.Err() != nil {
+		err = ctx.Err()
+	}
+	return Manifest{}, "", err
 }
 
 // VerifyPinnedEndpoint checks exactly the address a user supplied for recovery.
@@ -443,6 +469,7 @@ func (t *Transport) VerifyPinnedEndpoint(ctx context.Context, canonical, id, key
 		e.mu.Lock()
 		if err == nil {
 			e.manifest, e.lastEndpoint, e.refreshPin = m, endpoint, id+":"+key
+			e.clockSkew = nil
 			e.proofNext = ""
 			e.identityChanged, e.refreshOffset = false, 0
 			e.refreshAt = time.Now().Add(time.Hour)
@@ -473,6 +500,11 @@ func pinnedUnavailable(e *entry, pin identityBinding) error {
 	if e.refreshPin == pin.id+":"+pin.key && e.identityChanged {
 		return ErrIdentityChanged
 	}
+	if e.refreshPin == pin.id+":"+pin.key && e.clockSkew != nil {
+		// A user correcting either clock must not wait behind a cached failure.
+		e.refreshAt = time.Time{}
+		return e.clockSkew
+	}
 	return errors.New("ingress_identity_unavailable")
 }
 
@@ -484,9 +516,18 @@ func (t *Transport) verifyPinned(ctx context.Context, m Manifest, endpoint strin
 
 func (t *Transport) verifyPinnedCandidate(ctx context.Context, m Manifest, e *entry, candidates []Endpoint, index int) error {
 	endpoint := candidates[index].URL
+	e.mu.Lock()
+	observedClock := e.clockSkew
+	e.mu.Unlock()
 	err := t.verifyPinned(ctx, m, endpoint)
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	// Only the fresh proof may retire a diagnosis it actually observed.
+	// A later refresh (possibly for a new pin) must survive an older proof
+	// or data response finishing after that refresh.
+	if err == nil && e.clockSkew == observedClock && e.manifest.SignedPayload == m.SignedPayload && e.refreshPin == m.HubInstanceID+":"+m.IdentityPublicKey {
+		e.clockSkew = nil
+	}
 	if err != nil {
 		e.failed[endpoint] = time.Now().Add(30 * time.Second)
 	}
@@ -536,13 +577,17 @@ func (t *Transport) roundTripPinned(req *http.Request, pin identityBinding) (*ht
 	defer cancel()
 	m, candidates := t.pinnedCandidates(ctx, canonical, pin, e)
 	sent := false
+	var clockSkew error
 	for index, endpoint := range candidates {
 		// This includes the canonical URL: TLS alone cannot preserve an older
 		// device identity after that hostname's Hub registry has been reset.
 		if ctx.Err() != nil {
 			break
 		}
-		if t.verifyPinnedCandidate(ctx, m, e, candidates, index) != nil {
+		if verifyErr := t.verifyPinnedCandidate(ctx, m, e, candidates, index); verifyErr != nil {
+			if ClockSkew(verifyErr) != nil {
+				clockSkew = verifyErr
+			}
 			continue
 		}
 		if ctx.Err() != nil || req.Context().Err() != nil {
@@ -579,6 +624,12 @@ func (t *Transport) roundTripPinned(req *http.Request, pin identityBinding) (*ht
 		req.Body.Close()
 	}
 	err = pinnedUnavailable(e, pin)
+	if clockSkew != nil && !errors.Is(err, ErrIdentityChanged) {
+		err = clockSkew
+	}
+	if ctx.Err() != nil {
+		err = ctx.Err()
+	}
 	if !sent {
 		return nil, &requestNotSentError{cause: err}
 	}

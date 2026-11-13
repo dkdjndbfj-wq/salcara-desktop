@@ -10,6 +10,7 @@ import (
 
 	"salcara/bridge/internal/config"
 	"salcara/bridge/internal/hubclient"
+	"salcara/bridge/internal/hubingress"
 
 	qrcode "github.com/skip2/go-qrcode"
 )
@@ -173,8 +174,9 @@ func (s *Server) handleRemoteDiscover(w http.ResponseWriter, r *http.Request) {
 		matchesScope := func(connection config.RemoteConnection) bool {
 			return connection.BotGroupID == "" && config.NormalizeHubURL(connection.HubURL) == target && scopeID != "" && connection.DeviceID == scopeID && connection.DeviceSecret == scopeSecret
 		}
+		observationNow := time.Now().UnixMilli()
 		for _, connection := range c.RemoteConnections {
-			if matchesScope(connection) && connection.RemoteSupport != nil && connection.RemoteSupport.CheckedAt > startedAt {
+			if matchesScope(connection) && config.StationObservationIsNewer(connection.RemoteSupport, observation, observationNow) {
 				effective = connection.RemoteSupport
 			}
 		}
@@ -210,7 +212,7 @@ func (s *Server) handleRemoteDiscover(w http.ResponseWriter, r *http.Request) {
 				c.RemoteConnections[i].RemoteSupport = config.CloneStationObservation(effective)
 			}
 		}
-		if c.EffectiveRemoteMode() == "hub" && c.DeviceID == scopeID && c.DeviceSecret == scopeSecret && target == config.NormalizeHubURL(c.EffectiveHubURL()) && (c.RemoteStationObservation == nil || effective.CheckedAt >= c.RemoteStationObservation.CheckedAt) {
+		if c.EffectiveRemoteMode() == "hub" && c.DeviceID == scopeID && c.DeviceSecret == scopeSecret && target == config.NormalizeHubURL(c.EffectiveHubURL()) && !config.StationObservationIsNewer(c.RemoteStationObservation, effective, observationNow) {
 			c.RecordRemoteStationObservation(effective)
 		}
 		observation = config.CloneStationObservation(effective)
@@ -261,9 +263,22 @@ func (s *Server) handleRemoteDiscover(w http.ResponseWriter, r *http.Request) {
 }
 
 func writeRemoteDiscoveryError(w http.ResponseWriter, status int, code string, err error, info hubclient.Discovery) {
+	clockSkew := hubingress.ClockSkew(err)
+	if clockSkew != nil && (code == "" || code == "remote_unavailable" || code == "clock_skew") {
+		status, code = http.StatusConflict, "clock_skew"
+	}
+	out := map[string]any{"ok": false, "plugin": info, "connected": false, "error": err.Error(), "code": code}
+	if clockSkew != nil && (code == "clock_skew" || code == "enrollment_not_sent") {
+		out["clockSkew"] = clockSkew
+		if code == "enrollment_not_sent" {
+			out["error"] = err.Error() + "；" + (&hubingress.ClockSkewError{}).Error()
+		} else {
+			out["error"] = (&hubingress.ClockSkewError{}).Error()
+		}
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "plugin": info, "connected": false, "error": err.Error(), "code": code})
+	_ = json.NewEncoder(w).Encode(out)
 }
 
 func (s *Server) clearQR() { s.pairMu.Lock(); s.pairPNG = nil; s.pairExpires = 0; s.pairMu.Unlock() }

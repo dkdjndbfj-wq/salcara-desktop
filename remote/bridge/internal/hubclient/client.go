@@ -43,16 +43,17 @@ const (
 
 // Status is a snapshot of the hub connection.
 type Status struct {
-	State     string         `json:"state"`
-	Error     string         `json:"error,omitempty"`
-	ErrorCode string         `json:"errorCode,omitempty"`
-	Since     int64          `json:"since"` // ms
-	HubURL    string         `json:"hubUrl"`
-	DeviceID  string         `json:"deviceId"`
-	Queued    int            `json:"queued"`
-	LastEvent int64          `json:"lastEventSent,omitempty"`
-	Pairing   *PairStatus    `json:"pairing,omitempty"`
-	Recovery  RecoveryStatus `json:"recovery"`
+	State     string                       `json:"state"`
+	Error     string                       `json:"error,omitempty"`
+	ErrorCode string                       `json:"errorCode,omitempty"`
+	ClockSkew *hubingress.ClockSkewDetails `json:"clockSkew,omitempty"`
+	Since     int64                        `json:"since"` // ms
+	HubURL    string                       `json:"hubUrl"`
+	DeviceID  string                       `json:"deviceId"`
+	Queued    int                          `json:"queued"`
+	LastEvent int64                        `json:"lastEventSent,omitempty"`
+	Pairing   *PairStatus                  `json:"pairing,omitempty"`
+	Recovery  RecoveryStatus               `json:"recovery"`
 }
 
 // RecoveryStatus describes local message storage, not remote task completion.
@@ -333,6 +334,10 @@ func (c *Client) Status() Status {
 	c.qmu.Unlock()
 	c.mu.Lock()
 	s := c.status
+	if s.ClockSkew != nil {
+		copy := *s.ClockSkew
+		s.ClockSkew = &copy
+	}
 	c.mu.Unlock()
 	cfg := c.o.Store.Get()
 	s.HubURL = cfg.EffectiveHubURL()
@@ -366,11 +371,12 @@ func (c *Client) setStateCode(state, errText, code string) {
 		cfg = c.o.Store.Get()
 	}
 	c.mu.Lock()
-	changed := c.status.State != state || c.status.Error != errText || c.status.ErrorCode != code
+	changed := c.status.State != state || c.status.Error != errText || c.status.ErrorCode != code || c.status.ClockSkew != nil
 	if c.status.State != state {
 		c.status.Since = nowMS()
 	}
 	c.status.State, c.status.Error, c.status.ErrorCode = state, errText, code
+	c.status.ClockSkew = nil
 	if state != StateConnected && cfg.EffectiveRemoteMode() == "bot" && botEventScopeRequired(cfg) {
 		c.eventScope.Store(&eventUploadScope{identity: eventIdentity(cfg), required: true})
 	}
@@ -391,17 +397,19 @@ func (c *Client) setStateCode(state, errText, code string) {
 // connection uses exactly the same URL and device ID. Kick retires it under mu.
 func (c *Client) publishConnectionFailure(cfg config.Config, epoch uint64, err error) (string, bool) {
 	state, code, message := remoteFailure(err, cfg)
+	clockSkew := hubingress.ClockSkew(err)
 	c.mu.Lock()
 	current := c.o.Store.Get() // Store notifications run after releasing its lock.
 	if c.connectionEpoch != epoch || config.RemoteIdentity(cfg) != config.RemoteIdentity(current) || !current.HubRemoteEnabled() {
 		c.mu.Unlock()
 		return "", false
 	}
-	changed := c.status.State != state || c.status.Error != message || c.status.ErrorCode != code
+	changed := c.status.State != state || c.status.Error != message || c.status.ErrorCode != code || !sameClockSkew(c.status.ClockSkew, clockSkew)
 	if c.status.State != state {
 		c.status.Since = nowMS()
 	}
 	c.status.State, c.status.Error, c.status.ErrorCode = state, message, code
+	c.status.ClockSkew = clockSkew
 	if current.EffectiveRemoteMode() == "bot" && botEventScopeRequired(current) {
 		c.eventScope.Store(&eventUploadScope{identity: eventIdentity(current), required: true})
 	}
@@ -435,11 +443,12 @@ func (c *Client) Kick() {
 	// Status reads the current saved Hub URL. Clear the old stream's connected
 	// state in the same critical section as its authorization, so a just-saved
 	// station cannot appear ready before its own stream has connected.
-	stateChanged := c.status.State != nextState || c.status.Error != "" || c.status.ErrorCode != ""
+	stateChanged := c.status.State != nextState || c.status.Error != "" || c.status.ErrorCode != "" || c.status.ClockSkew != nil
 	if c.status.State != nextState {
 		c.status.Since = nowMS()
 	}
 	c.status.State, c.status.Error, c.status.ErrorCode = nextState, "", ""
+	c.status.ClockSkew = nil
 	c.status.Pairing = nil // unknown until the new station's authenticated snapshot
 	c.uploadAuthorization = ""
 	if cfg.EffectiveRemoteMode() == "bot" && botEventScopeRequired(cfg) {
@@ -897,11 +906,12 @@ func (c *Client) acceptStreamConnection(ctx context.Context, cfg config.Config, 
 		c.mu.Unlock()
 		return errors.New("中转站连接已更换，不接受旧连接")
 	}
-	changed := c.status.State != StateConnected || c.status.Error != "" || c.status.ErrorCode != ""
+	changed := c.status.State != StateConnected || c.status.Error != "" || c.status.ErrorCode != "" || c.status.ClockSkew != nil
 	if c.status.State != StateConnected {
 		c.status.Since = nowMS()
 	}
 	c.status.State, c.status.Error, c.status.ErrorCode = StateConnected, "", ""
+	c.status.ClockSkew = nil
 	c.mu.Unlock()
 	if changed {
 		c.log.Printf("hub: %s", StateConnected)

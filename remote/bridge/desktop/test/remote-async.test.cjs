@@ -10,6 +10,9 @@ const vm = require('node:vm');
 
 const source = fs.readFileSync(path.resolve(__dirname, '../../internal/console/web/remote.js'), 'utf8');
 const connectionSource = fs.readFileSync(path.resolve(__dirname, '../../internal/console/web/remote-connect.js'), 'utf8');
+const appSource = fs.readFileSync(path.resolve(__dirname, '../../internal/console/web/app.js'), 'utf8');
+const apiSource = appSource.slice(appSource.indexOf('async function api('), appSource.indexOf('/* 系统相关的文案'));
+const clockDiagnostic = { direction: 'local_behind', offsetMs: 60000, localTime: 1700000000000, signedTime: 1700000060000, source: 'signed_manifest' };
 
 function deferred() { let resolve, reject; const promise = new Promise((done, fail) => { resolve = done; reject = fail; }); return { promise, resolve, reject }; }
 function fixture() {
@@ -813,7 +816,97 @@ test('remote errors distinguish enrollment, phone pairing, source policy and ava
     [{ state: 'pair_required' }, '手机需重新绑定'],
     [{ state: 'remote_blocked', errorCode: 'user_disabled' }, '远程用户已停用'],
     [{ state: 'connecting', errorCode: 'remote_unavailable' }, '远程服务暂不可用，自动重连中'],
+    [{ state: 'connecting', errorCode: 'clock_skew' }, '时间不一致，请先校时'],
   ]) assert.equal(f.context.rmConnectionLabel(status), label);
+});
+
+test('clock skew connection rejection preserves drafts and offers only read-only refresh', async () => {
+  const f = connectionFixture();
+  const connecting = f.context.ACTIONS.rmConnect({});
+  f.pending[0].reject(Object.assign(new Error('untrusted display text'), { status: 409, code: 'clock_skew' }));
+  await connecting;
+  const markup = f.node('rmConnectError').innerHTML;
+  assert.match(markup, /电脑与中转站时间不一致/);
+  assert.match(markup, /立即同步/);
+  assert.match(markup, /data-act="rmRecoveryRefresh"/);
+  assert.match(markup, /再次点击原连接按钮.*新连接不会自动重试/);
+  assert.doesNotMatch(markup, /untrusted display text|data-act="rmRetryEnrollment"|data-act="rmReenroll"|href="#accounts"|操作结果暂未确认/);
+  assert.equal(f.node('rmStation').value, 'https://one.test');
+  assert.equal(f.node('rmEnrollmentClaim').value, 'a'.repeat(64));
+  assert.equal(f.calls.length, 1);
+  let reads = 0;
+  f.context.loadState = async () => { reads++; return f.context.S.state; };
+  await f.context.ACTIONS.rmRecoveryRefresh({});
+  assert.equal(reads, 1);
+  assert.equal(f.calls.length, 1, 'clock repair refresh must not resend enrollment, mutate APIs or scan sessions');
+});
+
+test('local API retains only bounded clock diagnostics without changing the delivery code', async () => {
+  const f = fixture();
+  vm.runInContext(apiSource, f.context);
+  const ahead = { ...clockDiagnostic, source: 'fresh_proof', direction: 'local_ahead', offsetMs: -60000, signedTime: clockDiagnostic.localTime - 60000 };
+  for (const diagnostic of [clockDiagnostic, ahead]) {
+    f.context.fetch = async () => ({ ok: false, status: 409, json: async () => ({ code: 'enrollment_not_sent', clockSkew: { ...diagnostic, key: 'never-copy', html: '<script>bad</script>' } }) });
+    for (const endpoint of ['/api/remote/discover', '/api/remote/ingress']) {
+      await assert.rejects(f.context.api(endpoint, {}), error => {
+        assert.equal(error.code, 'enrollment_not_sent');
+        assert.equal(error.status, 409);
+        assert.deepEqual(JSON.parse(JSON.stringify(error.clockSkew)), diagnostic);
+        return true;
+      });
+    }
+  }
+  for (const clockSkew of [null, {}, { ...clockDiagnostic, source: 'http_date' }, { ...clockDiagnostic, offsetMs: '60000' }, { ...clockDiagnostic, direction: 'local_ahead' }, { ...clockDiagnostic, signedTime: 0 }, { ...clockDiagnostic, offsetMs: 1 }, { ...clockDiagnostic, localTime: 253402300800000 }, { ...ahead, source: 'signed_manifest' }]) {
+    f.context.fetch = async () => ({ ok: false, status: 409, json: async () => ({ code: 'enrollment_not_sent', clockSkew }) });
+    await assert.rejects(f.context.api('/api/remote/discover', {}), error => error.code === 'enrollment_not_sent' && error.clockSkew === undefined);
+  }
+  for (const [endpoint, code] of [['https://external.test/api/remote/discover', 'clock_skew'], ['/api/session/control', 'clock_skew'], ['/api/remote/discover', 'enrollment_result_unknown'], ['/api/remote/discover', 'hub_identity_changed']]) {
+    f.context.fetch = async () => ({ ok: false, status: 409, json: async () => ({ code, clockSkew: clockDiagnostic }) });
+    await assert.rejects(f.context.api(endpoint, {}), error => error.code === code && error.clockSkew === undefined);
+  }
+});
+
+test('real API submit errors preserve not-sent and unknown semantics alongside clock guidance', async () => {
+  for (const row of [
+    { code: 'enrollment_not_sent', status: 409, clock: true, clear: true },
+    { code: 'clock_skew', status: 409, clock: true },
+    { code: 'clock_skew', status: 503, clock: true, unknown: true },
+    { code: 'enrollment_result_unknown', status: 409, unknown: true },
+  ]) {
+    const f = apiConnectionFixture();
+    vm.runInContext(apiSource, f.context);
+    vm.runInContext('RM.pendingEnrollment = { key: rmCurrentEnrollmentTargetKey() }', f.context);
+    const originalPending = vm.runInContext('RM.pendingEnrollment', f.context);
+    const draft = f.node('rmStation').value;
+    f.context.fetch = async (endpoint, options) => {
+      const body = JSON.parse(options.body);
+      f.calls.push({ path: endpoint, body });
+      return body.connect ? { ok: false, status: row.status, json: async () => ({ code: row.code, error: 'server display text', clockSkew: clockDiagnostic }) }
+        : { ok: true, status: 200, json: async () => ({ ok: true, stage: 'discovered', eligibility: { supported: true, method: 'api' } }) };
+    };
+    await f.context.ACTIONS.rmConnect({});
+    const markup = f.node('rmConnectError').innerHTML;
+    assert.equal(f.calls.length, 2, row.code);
+    assert.equal(f.calls[1].body.connect, true);
+    assert.equal(f.calls.some(call => call.body.retryEnrollment), false);
+    assert.equal(f.node('rmStation').value, draft);
+    assert.equal(f.notices.length, 0);
+    assert.equal(/操作结果暂未确认/.test(markup), !!row.unknown);
+    assert.equal(/立即同步/.test(markup), !!row.clock);
+    if (row.clear) {
+      assert.match(markup, /登记尚未发送/);
+      assert.equal(vm.runInContext('RM.pendingEnrollment', f.context), null);
+    } else assert.equal(vm.runInContext('RM.pendingEnrollment.key', f.context), originalPending.key);
+    if (row.clock) {
+      assert.doesNotMatch(markup, /server display text|data-act="rmRetryEnrollment"|data-act="rmReenroll"|href="#accounts"/);
+      assert.match(markup, row.unknown ? /先刷新状态核对原操作，不要重复提交/ : /再次点击原连接按钮/);
+    } else assert.match(markup, /data-act="rmRetryEnrollment"/);
+    let reads = 0;
+    f.context.loadState = async () => { reads++; return f.context.S.state; };
+    await f.context.ACTIONS.rmRecoveryRefresh({});
+    assert.equal(reads, 1);
+    assert.equal(f.calls.length, 2, 'refresh never submits again or scans sessions');
+  }
 });
 
 test('a delayed status from another Hub cannot repaint the current remote page', () => {

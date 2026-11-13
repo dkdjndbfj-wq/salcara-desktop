@@ -36,6 +36,9 @@ func resolveDiscoveryConnection(ctx context.Context, info Discovery, cfg config.
 	}
 	m, err := hubingress.ResolveIdentity(ctx, info.HubURL+"/v1")
 	if err != nil {
+		if hubingress.ClockSkew(err) != nil && (exact == nil || exact.HubInstanceID == "" && exact.IdentityPublicKey == "" || hubingress.ClockSkewMatchesIdentity(err, exact.HubInstanceID, exact.IdentityPublicKey)) {
+			return info, exact, err
+		}
 		return info, exact, ErrHubIdentityVerification
 	}
 	info.Identity = &m
@@ -93,6 +96,9 @@ func discoverForConnection(ctx context.Context, cfg config.Config, saved config.
 		if err != nil {
 			if errors.Is(err, hubingress.ErrIdentityChanged) {
 				return Discovery{}, ErrHubIdentityChanged
+			}
+			if hubingress.ClockSkew(err) != nil {
+				return Discovery{}, err
 			}
 			return Discovery{}, ErrHubIdentityVerification
 		}

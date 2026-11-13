@@ -118,7 +118,22 @@ async function api(path, body, method, options = {}) {
     const res = await fetch(path, opts);
     let data = null;
     try { data = await res.json(); } catch (error) { if (controller.signal.aborted) throw error; }
-    if (!res.ok) throw Object.assign(new Error((data && data.error) || `请求失败 (${res.status})`), { status: res.status, code: typeof data?.code === 'string' ? data.code : undefined });
+    if (!res.ok) {
+      const error = Object.assign(new Error((data && data.error) || `请求失败 (${res.status})`), { status: res.status, code: typeof data?.code === 'string' ? data.code : undefined });
+      // Only carry the local Bridge's bounded, signed-time diagnostic. Keep
+      // delivery certainty in the primary code; never copy an arbitrary payload.
+      const clock = data?.clockSkew;
+      if (['/api/remote/discover', '/api/remote/ingress'].includes(path)
+        && ['clock_skew', 'enrollment_not_sent'].includes(error.code)
+        && clock && ['signed_manifest', 'fresh_proof'].includes(clock.source)
+        && [clock.localTime, clock.signedTime].every(value => Number.isSafeInteger(value) && value > 0 && value <= 253402300799999)
+        && Number.isSafeInteger(clock.offsetMs) && clock.offsetMs !== 0 && clock.offsetMs === clock.signedTime - clock.localTime
+        && clock.direction === (clock.offsetMs > 0 ? 'local_behind' : 'local_ahead')
+        && (clock.source !== 'signed_manifest' || clock.offsetMs > 0)) {
+        error.clockSkew = { direction: clock.direction, offsetMs: clock.offsetMs, localTime: clock.localTime, signedTime: clock.signedTime, source: clock.source };
+      }
+      throw error;
+    }
     if (data === null) throw new Error('本机响应不完整，请重试');
     return data;
   } catch (e) {

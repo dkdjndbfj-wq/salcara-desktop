@@ -57,7 +57,7 @@ func (c *Client) refreshStationCapabilities(ctx context.Context, station config.
 	}
 	if err != nil {
 		c.o.Store.ObserveRemoteStation(station, nil, sequence)
-		if errors.Is(err, ErrHubIdentityChanged) || errors.Is(err, ErrHubIdentityVerification) {
+		if errors.Is(err, ErrHubIdentityChanged) || errors.Is(err, ErrHubIdentityVerification) || RemoteErrorCode(err) == "clock_skew" {
 			return err
 		}
 		return nil
